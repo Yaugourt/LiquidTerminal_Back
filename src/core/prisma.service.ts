@@ -1,4 +1,6 @@
 import { PrismaClient } from '@prisma/client';
+import { Pool } from 'pg';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 /**
@@ -15,15 +17,16 @@ class PrismaService {
   public static getInstance(): PrismaClient {
     if (!PrismaService.instance) {
       logDeduplicator.info('Initializing PrismaClient singleton instance');
-      
+
+      // Adapter officiel Prisma 7 pour Postgres (engine type "client")
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+      });
+      const adapter = new PrismaPg(pool);
+
       PrismaService.instance = new PrismaClient({
+        adapter,
         log: ['error', 'warn'],
-        // Configuration optimisée pour la production
-        datasources: {
-          db: {
-            url: process.env.DATABASE_URL
-          }
-        }
       });
       
       // Gestion des événements de connexion
@@ -33,7 +36,7 @@ class PrismaService {
         .then(() => {
           logDeduplicator.info('Successfully connected to database');
         })
-        .catch((error) => {
+        .catch((error: unknown) => {
           logDeduplicator.error('Failed to connect to database', { error });
         });
     }

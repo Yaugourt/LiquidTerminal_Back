@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-package-lock.json
 
 # Build outputs
 dist/
@@ -8,6 +7,9 @@ build/
 .cursor/rules
 tests/
 scripts/
+
+# Uploads (now on Cloudflare R2, local files not needed)
+/uploads/
 
 # Environment variables
 .env

@@ -141,6 +141,9 @@ export class WalletListItemService extends BaseService<
               referenceId: `walletlistitem-${result.id}`,
               description: 'Added wallet to list',
             });
+            
+            // Compléter la daily task ADD_WALLET
+            await xpService.completeDailyTask(walletList.userId, 'ADD_WALLET');
           } catch (xpError) {
             logDeduplicator.warn('Failed to grant XP for adding wallet to list', {
               walletListId: data.walletListId,

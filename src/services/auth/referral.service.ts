@@ -80,7 +80,7 @@ export class ReferralService {
       }
       
       // Transaction pour garantir la cohérence et éviter les race conditions
-      await prisma.$transaction(async (tx) => {
+      await prisma.$transaction(async (tx: any) => {
         // Vérifier que l'utilisateur n'a pas déjà un parrain DANS la transaction
         const user = await tx.user.findUnique({
           where: { id: userId },
@@ -166,7 +166,7 @@ export class ReferralService {
       const stats: ReferralStats = {
         referralCount: user.referralCount || 0,
         referredBy: user.referredBy || null,
-        referrals: user.referrals?.filter(ref => ref.name !== null) || []
+        referrals: user.referrals?.filter((ref: any) => ref.name !== null) || []
       };
       
       logDeduplicator.info('Referral stats retrieved', { 

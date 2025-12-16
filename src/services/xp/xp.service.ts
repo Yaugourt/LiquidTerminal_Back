@@ -1,4 +1,4 @@
-import { XpActionType, User } from '@prisma/client';
+import { XpActionType, User, DailyTaskType, WeeklyChallengeType } from '@prisma/client';
 import { xpRepository } from '../../repositories/xp.repository';
 import { userRepository } from '../../repositories/user.repository';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -9,6 +9,10 @@ import {
   ONE_TIME_ACTIONS,
   DAILY_ACTIONS,
   STREAK_MILESTONES,
+  DAILY_CAPS,
+  DAILY_TASKS_CONFIG,
+  DAILY_COMPLETION_BONUS,
+  WEEKLY_CHALLENGES_CONFIG,
 } from '../../constants/xp.constants';
 import {
   UserXpStats,
@@ -31,7 +35,7 @@ export class XpService {
 
   /**
    * Attribue de l'XP à un utilisateur pour une action
-   * @returns L'XP attribué (0 si action déjà effectuée)
+   * @returns L'XP attribué (0 si action déjà effectuée ou cap atteint)
    */
   async grantXp(input: GrantXpInput): Promise<number> {
     const { userId, actionType, referenceId, description, customXpAmount } = input;
@@ -53,6 +57,19 @@ export class XpService {
           logDeduplicator.info('XP action already granted today', { userId, actionType });
           return 0;
         }
+      }
+
+      // Vérifier le cap journalier (anti-farm)
+      const dailyCap = DAILY_CAPS[actionType];
+      if (dailyCap !== undefined) {
+        const today = new Date();
+        const currentCount = await xpRepository.getDailyActionCount(userId, actionType, today);
+        if (currentCount >= dailyCap) {
+          logDeduplicator.info('Daily cap reached for action', { userId, actionType, cap: dailyCap, currentCount });
+          return 0;
+        }
+        // Incrémenter le compteur après vérification
+        await xpRepository.incrementDailyActionCount(userId, actionType, today);
       }
 
       // Vérifier les doublons pour les actions avec référence
@@ -89,6 +106,9 @@ export class XpService {
 
       await xpRepository.updateUserXp(userId, newTotalXp, newLevel);
 
+      // Mettre à jour les weekly challenges
+      await this.updateWeeklyChallengeProgress(userId, actionType);
+
       // Log level up
       if (newLevel > user.level) {
         logDeduplicator.info('User leveled up!', { 
@@ -119,12 +139,61 @@ export class XpService {
   }
 
   /**
+   * Met à jour la progression des weekly challenges basé sur l'action
+   */
+  private async updateWeeklyChallengeProgress(userId: number, actionType: XpActionType): Promise<void> {
+    const today = new Date();
+    
+    // Mapping action -> challenge
+    const actionToChallengeMap: Partial<Record<XpActionType, WeeklyChallengeType>> = {
+      MARK_RESOURCE_READ: 'READ_20_RESOURCES',
+      CREATE_READLIST: 'CREATE_5_READLISTS',
+      DAILY_LOGIN: 'LOGIN_7_DAYS',
+      ADD_WALLET_TO_LIST: 'ADD_15_WALLETS',
+    };
+
+    const challengeType = actionToChallengeMap[actionType];
+    if (!challengeType) return;
+
+    try {
+      // S'assurer que les challenges existent
+      await xpRepository.getOrCreateWeeklyChallenges(userId, today);
+      
+      // Incrémenter la progression
+      const challenge = await xpRepository.incrementChallengeProgress(userId, challengeType, today);
+      
+      // Si le challenge vient d'être complété, attribuer l'XP bonus
+      if (challenge?.completed && challenge.completedAt) {
+        const timeSinceCompletion = Date.now() - challenge.completedAt.getTime();
+        // Si complété il y a moins de 1 seconde (vient d'être complété)
+        if (timeSinceCompletion < 1000) {
+          await this.grantXp({
+            userId,
+            actionType: 'ADMIN_BONUS',
+            customXpAmount: challenge.xpReward,
+            referenceId: `weekly-${challengeType}-${challenge.weekStart.toISOString().split('T')[0]}`,
+            description: `Weekly challenge completed: ${WEEKLY_CHALLENGES_CONFIG[challengeType].description}`,
+          });
+          logDeduplicator.info('Weekly challenge completed!', { userId, challengeType, xpReward: challenge.xpReward });
+        }
+      }
+    } catch (error) {
+      logDeduplicator.error('Error updating weekly challenge', {
+        error: error instanceof Error ? error.message : String(error),
+        userId,
+        actionType,
+      });
+    }
+  }
+
+  /**
    * Gère le login quotidien et les streaks
    */
   async handleDailyLogin(userId: number): Promise<{
     xpGranted: number;
     streakBonus: number;
     newStreak: number;
+    dailyTaskCompleted: boolean;
   }> {
     try {
       const user = await userRepository.findById(userId);
@@ -149,7 +218,7 @@ export class XpService {
 
         if (daysDiff === 0) {
           // Déjà connecté aujourd'hui, pas de changement
-          return { xpGranted: 0, streakBonus: 0, newStreak };
+          return { xpGranted: 0, streakBonus: 0, newStreak, dailyTaskCompleted: false };
         } else if (daysDiff === 1) {
           // Jour consécutif
           newStreak += 1;
@@ -171,6 +240,9 @@ export class XpService {
         actionType: 'DAILY_LOGIN',
         referenceId: now.toISOString().split('T')[0], // Date du jour
       });
+
+      // Compléter la daily task LOGIN
+      await this.completeDailyTask(userId, 'LOGIN');
 
       // Vérifier les bonus de streak
       if (newStreak === STREAK_MILESTONES.WEEK) {
@@ -194,7 +266,7 @@ export class XpService {
         streakBonus 
       });
 
-      return { xpGranted, streakBonus, newStreak };
+      return { xpGranted, streakBonus, newStreak, dailyTaskCompleted: true };
     } catch (error) {
       logDeduplicator.error('Error handling daily login', {
         error: error instanceof Error ? error.message : String(error),
@@ -343,6 +415,203 @@ export class XpService {
       referenceId: `admin-${adminId}-${Date.now()}`,
       description,
     });
+  }
+
+  // ==================== DAILY TASKS ====================
+
+  /**
+   * Récupère les daily tasks du jour avec leur statut
+   */
+  async getDailyTasks(userId: number): Promise<{
+    tasks: Array<{
+      type: DailyTaskType;
+      description: string;
+      xp: number;
+      completed: boolean;
+      completedAt: Date | null;
+    }>;
+    allCompleted: boolean;
+    bonusXp: number;
+    bonusClaimed: boolean;
+  }> {
+    const today = new Date();
+    const progress = await xpRepository.getDailyTasks(userId, today);
+    
+    const taskTypes: DailyTaskType[] = ['LOGIN', 'READ_RESOURCE', 'ADD_WALLET', 'EXPLORE_LEADERBOARD'];
+    
+    const tasks = taskTypes.map((type) => {
+      const taskProgress = progress.find((p) => p.taskType === type);
+      return {
+        type,
+        description: DAILY_TASKS_CONFIG[type].description,
+        xp: DAILY_TASKS_CONFIG[type].xp,
+        completed: taskProgress?.completed ?? false,
+        completedAt: taskProgress?.completedAt ?? null,
+      };
+    });
+
+    const completedCount = tasks.filter((t) => t.completed).length;
+    const allCompleted = completedCount === taskTypes.length;
+    
+    // Vérifier si le bonus a déjà été réclamé
+    const bonusRefId = `daily-bonus-${today.toISOString().split('T')[0]}`;
+    const bonusClaimed = await xpRepository.transactionExists(userId, 'ADMIN_BONUS', bonusRefId);
+
+    return {
+      tasks,
+      allCompleted,
+      bonusXp: DAILY_COMPLETION_BONUS,
+      bonusClaimed,
+    };
+  }
+
+  /**
+   * Complète une daily task et attribue l'XP
+   */
+  async completeDailyTask(userId: number, taskType: DailyTaskType): Promise<{
+    xpGranted: number;
+    allTasksCompleted: boolean;
+    bonusGranted: number;
+  }> {
+    const today = new Date();
+    
+    // Vérifier si déjà complétée
+    const alreadyCompleted = await xpRepository.isDailyTaskCompleted(userId, taskType, today);
+    if (alreadyCompleted) {
+      return { xpGranted: 0, allTasksCompleted: false, bonusGranted: 0 };
+    }
+
+    // Compléter la task
+    await xpRepository.completeDailyTask(userId, taskType, today);
+    
+    // Attribuer l'XP de la task
+    const taskXp = DAILY_TASKS_CONFIG[taskType].xp;
+    const xpGranted = await this.grantXp({
+      userId,
+      actionType: 'ADMIN_BONUS',
+      customXpAmount: taskXp,
+      referenceId: `daily-task-${taskType}-${today.toISOString().split('T')[0]}`,
+      description: `Daily task: ${DAILY_TASKS_CONFIG[taskType].description}`,
+    });
+
+    // Vérifier si toutes les tasks sont complétées
+    const completedCount = await xpRepository.countCompletedDailyTasks(userId, today);
+    const totalTasks = Object.keys(DAILY_TASKS_CONFIG).length;
+    const allTasksCompleted = completedCount >= totalTasks;
+
+    let bonusGranted = 0;
+    if (allTasksCompleted) {
+      // Attribuer le bonus de completion
+      bonusGranted = await this.grantXp({
+        userId,
+        actionType: 'ADMIN_BONUS',
+        customXpAmount: DAILY_COMPLETION_BONUS,
+        referenceId: `daily-bonus-${today.toISOString().split('T')[0]}`,
+        description: 'All daily tasks completed bonus',
+      });
+      
+      if (bonusGranted > 0) {
+        logDeduplicator.info('All daily tasks completed!', { userId, bonusGranted });
+      }
+    }
+
+    return { xpGranted, allTasksCompleted, bonusGranted };
+  }
+
+  // ==================== WEEKLY CHALLENGES ====================
+
+  /**
+   * Récupère les weekly challenges de la semaine en cours
+   */
+  async getWeeklyChallenges(userId: number): Promise<{
+    challenges: Array<{
+      type: WeeklyChallengeType;
+      description: string;
+      progress: number;
+      target: number;
+      progressPercent: number;
+      xpReward: number;
+      completed: boolean;
+      completedAt: Date | null;
+    }>;
+    weekStart: Date;
+    weekEnd: Date;
+  }> {
+    const today = new Date();
+    const challenges = await xpRepository.getOrCreateWeeklyChallenges(userId, today);
+    
+    // Calculer le début et la fin de la semaine
+    const weekStart = challenges[0]?.weekStart ?? this.getWeekStart(today);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
+
+    return {
+      challenges: challenges.map((c) => ({
+        type: c.challengeType,
+        description: WEEKLY_CHALLENGES_CONFIG[c.challengeType].description,
+        progress: c.progress,
+        target: c.target,
+        progressPercent: Math.min(100, Math.floor((c.progress / c.target) * 100)),
+        xpReward: c.xpReward,
+        completed: c.completed,
+        completedAt: c.completedAt,
+      })),
+      weekStart,
+      weekEnd,
+    };
+  }
+
+  private getWeekStart(date: Date): Date {
+    const d = new Date(date);
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+    d.setDate(diff);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  // ==================== DAILY LIMITS ====================
+
+  /**
+   * Récupère les limites quotidiennes restantes
+   */
+  async getDailyLimits(userId: number): Promise<{
+    limits: Array<{
+      actionType: XpActionType;
+      used: number;
+      max: number;
+      remaining: number;
+      xpPerAction: number;
+    }>;
+  }> {
+    const today = new Date();
+    const counts = await xpRepository.getAllDailyActionCounts(userId, today);
+    
+    const limits = Object.entries(DAILY_CAPS).map(([actionType, max]) => {
+      const count = counts.find((c) => c.actionType === actionType);
+      const used = count?.count ?? 0;
+      return {
+        actionType: actionType as XpActionType,
+        used,
+        max: max as number,
+        remaining: Math.max(0, (max as number) - used),
+        xpPerAction: XP_REWARDS[actionType as XpActionType],
+      };
+    });
+
+    return { limits };
+  }
+
+  /**
+   * Marque une ressource comme explorée (pour la daily task EXPLORE_LEADERBOARD)
+   */
+  async markLeaderboardExplored(userId: number): Promise<{
+    xpGranted: number;
+    allTasksCompleted: boolean;
+    bonusGranted: number;
+  }> {
+    return this.completeDailyTask(userId, 'EXPLORE_LEADERBOARD');
   }
 }
 

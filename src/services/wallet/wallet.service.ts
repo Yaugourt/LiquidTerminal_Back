@@ -166,7 +166,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       });
 
       return {
-        data: result.userWallets.map(uw => ({
+        data: result.userWallets.map((uw: any) => ({
           id: uw.id,
           userId: uw.userId,
           walletId: uw.walletId,
@@ -379,25 +379,25 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
         }
 
         // Étape 1: Bulk insert des wallets (skip duplicates)
-        const addresses = validWallets.map(w => w.address);
+        const addresses = validWallets.map((w: any) => w.address);
         await this.repository.bulkCreate(addresses);
 
         // Étape 2: Récupérer tous les wallet IDs
         const walletRecords = await this.repository.findManyByAddresses(addresses);
         const addressToWalletId = new Map(
-          walletRecords.map(w => [w.address, w.id])
+          walletRecords.map((w: any) => [w.address, w.id])
         );
 
         // Étape 3: Vérifier quels wallets l'utilisateur possède déjà
         const existingUserWallets = await userWalletRepository.findManyByUserAndWallets(
           user.id,
-          walletRecords.map(w => w.id)
+          walletRecords.map((w: any) => w.id)
         );
-        const existingWalletIds = new Set(existingUserWallets.map(uw => uw.walletId));
+        const existingWalletIds = new Set(existingUserWallets.map((uw: any) => uw.walletId));
 
         // Étape 4: Préparer les données UserWallet (seulement les nouveaux)
         const userWalletData: Array<{ userId: number; walletId: number; name?: string }> = [];
-        const walletMap = new Map(validWallets.map(w => [w.address, w.name]));
+        const walletMap = new Map(validWallets.map((w: any) => [w.address, w.name]));
 
         for (const walletRecord of walletRecords) {
           if (!existingWalletIds.has(walletRecord.id)) {
@@ -420,7 +420,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           // Récupérer les UserWallets créés/existants
           const allUserWallets = await userWalletRepository.findManyByUserAndWallets(
             user.id,
-            walletRecords.map(w => w.id)
+            walletRecords.map((w: any) => w.id)
           );
 
           // Vérifier quels sont déjà dans la liste
@@ -428,16 +428,16 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
             where: {
               walletListId,
               userWalletId: {
-                in: allUserWallets.map(uw => uw.id)
+                in: allUserWallets.map((uw: any) => uw.id)
               }
             }
           });
-          const existingListItemIds = new Set(existingListItems.map(li => li.userWalletId));
+          const existingListItemIds = new Set(existingListItems.map((li: any) => li.userWalletId));
 
           // Préparer les données WalletListItem (seulement les nouveaux)
           const walletListItemData = allUserWallets
-            .filter(uw => !existingListItemIds.has(uw.id))
-            .map((uw, index) => ({
+            .filter((uw: any) => !existingListItemIds.has(uw.id))
+            .map((uw: any, index: number) => ({
               walletListId,
               userWalletId: uw.id,
               order: index
@@ -530,7 +530,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           walletIds
         );
 
-        const existingWalletIds = new Set(existingUserWallets.map(uw => uw.walletId));
+        const existingWalletIds = new Set(existingUserWallets.map((uw: any) => uw.walletId));
         
         // Identifier les wallets qui n'existent pas
         const errors: Array<{ walletId: number; reason: string }> = [];

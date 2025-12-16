@@ -6,7 +6,11 @@ import { userRepository } from "../../repositories/user.repository";
 import { ReferralService } from "./referral.service";
 import { xpService } from "../xp/xp.service";
 
-const JWKS_URL = process.env.JWKS_URL!;
+const JWKS_URL = process.env.JWKS_URL;
+
+if (!JWKS_URL) {
+  logDeduplicator.error('JWKS_URL is not configured in environment variables');
+}
 
 export class AuthService {
   private static instance: AuthService;
@@ -35,16 +39,23 @@ export class AuthService {
         return cached.key;
       }
 
-      logDeduplicator.info('Fetching JWKS', { kid: header.kid });
+      if (!JWKS_URL) {
+        logDeduplicator.error('JWKS_URL is not configured', { kid: header.kid });
+        throw new JWKSError("JWKS_URL is not configured");
+      }
+
+      logDeduplicator.info('Fetching JWKS', { kid: header.kid, jwksUrl: JWKS_URL });
 
       const response = await fetch(JWKS_URL);
       if (!response.ok) {
         logDeduplicator.error('Error fetching JWKS', {
           status: response.status,
           statusText: response.statusText,
-          kid: header.kid
+          kid: header.kid,
+          jwksUrl: JWKS_URL,
+          responseText: await response.text().catch(() => 'Unable to read response')
         });
-        throw new JWKSError("Error fetching JWKS");
+        throw new JWKSError(`Error fetching JWKS: ${response.status} ${response.statusText}`);
       }
 
       const jwks = await response.json();
@@ -73,20 +84,41 @@ export class AuthService {
       if (error instanceof JWKSError || error instanceof SigningKeyError) {
         throw error;
       }
+      
+      const errorMessage = error instanceof Error ? error.message : String(error);
       logDeduplicator.error('Unexpected error during JWKS retrieval', {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
         stack: error instanceof Error ? error.stack : undefined,
-        kid: header.kid
+        kid: header.kid,
+        jwksUrl: JWKS_URL
       });
-      throw new JWKSError("Unexpected error during JWKS retrieval");
+      throw new JWKSError(`Unexpected error during JWKS retrieval: ${errorMessage}`);
     }
   }
 
   public async verifyToken(token: string): Promise<PrivyPayload> {
     try {
-      logDeduplicator.info('Verifying token');
+      if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
+        logDeduplicator.error('Invalid token format', { 
+          tokenLength: token?.length,
+          tokenType: typeof token,
+          tokenParts: token?.split('.').length 
+        });
+        throw new TokenValidationError("Invalid token format");
+      }
+
+      logDeduplicator.info('Verifying token', { 
+        tokenLength: token.length,
+        tokenPrefix: token.substring(0, 20) + '...'
+      });
 
       const decodedHeader = JSON.parse(Buffer.from(token.split(".")[0], "base64").toString());
+      logDeduplicator.info('Token header decoded', { 
+        kid: decodedHeader.kid,
+        alg: decodedHeader.alg,
+        typ: decodedHeader.typ
+      });
+      
       const signingKey = await this.getSigningKey(decodedHeader);
 
       const jose = await this.loadJose();

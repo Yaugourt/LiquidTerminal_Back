@@ -4,7 +4,7 @@ import { requireAdmin } from '../../middleware/roleMiddleware';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { xpService } from '../../services/xp/xp.service';
-import { XpActionType } from '@prisma/client';
+import { XpActionType, DailyTaskType } from '@prisma/client';
 import { prisma } from '../../core/prisma.service';
 
 const router = Router();
@@ -225,6 +225,181 @@ router.post('/admin/grant', validatePrivyToken, requireAdmin, async (req: Reques
     });
   } catch (error) {
     logDeduplicator.error('Error in admin XP grant', {
+      error: error instanceof Error ? error.message : String(error),
+      privyUserId: req.user?.sub,
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+});
+
+// ==================== DAILY TASKS ====================
+
+/**
+ * GET /xp/daily-tasks
+ * Récupère les daily tasks du jour avec leur statut
+ */
+router.get('/daily-tasks', validatePrivyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = await getUserFromRequest(req);
+    if (!user) {
+      res.status(401).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    const tasks = await xpService.getDailyTasks(user.id);
+
+    res.status(200).json({
+      success: true,
+      data: tasks,
+    });
+  } catch (error) {
+    logDeduplicator.error('Error getting daily tasks', {
+      error: error instanceof Error ? error.message : String(error),
+      privyUserId: req.user?.sub,
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+});
+
+/**
+ * POST /xp/daily-tasks/:type
+ * Complète une daily task manuellement (pour les tasks comme EXPLORE_LEADERBOARD)
+ */
+router.post('/daily-tasks/:type', validatePrivyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = await getUserFromRequest(req);
+    if (!user) {
+      res.status(401).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    const taskType = req.params.type as DailyTaskType;
+    
+    // Valider le type de task
+    const validTypes: DailyTaskType[] = ['LOGIN', 'READ_RESOURCE', 'ADD_WALLET', 'EXPLORE_LEADERBOARD'];
+    if (!validTypes.includes(taskType)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid task type. Valid types: ${validTypes.join(', ')}`,
+        code: 'INVALID_TASK_TYPE',
+      });
+      return;
+    }
+
+    // Seules certaines tasks peuvent être complétées manuellement
+    const manuallyCompletable: DailyTaskType[] = ['EXPLORE_LEADERBOARD'];
+    if (!manuallyCompletable.includes(taskType)) {
+      res.status(400).json({
+        success: false,
+        message: `Task ${taskType} cannot be completed manually. It's completed automatically.`,
+        code: 'TASK_NOT_MANUALLY_COMPLETABLE',
+      });
+      return;
+    }
+
+    const result = await xpService.completeDailyTask(user.id, taskType);
+
+    res.status(200).json({
+      success: true,
+      message: result.xpGranted > 0 ? 'Daily task completed!' : 'Task already completed today',
+      data: result,
+    });
+  } catch (error) {
+    logDeduplicator.error('Error completing daily task', {
+      error: error instanceof Error ? error.message : String(error),
+      privyUserId: req.user?.sub,
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+});
+
+// ==================== WEEKLY CHALLENGES ====================
+
+/**
+ * GET /xp/weekly-challenges
+ * Récupère les weekly challenges de la semaine en cours
+ */
+router.get('/weekly-challenges', validatePrivyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = await getUserFromRequest(req);
+    if (!user) {
+      res.status(401).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    const challenges = await xpService.getWeeklyChallenges(user.id);
+
+    res.status(200).json({
+      success: true,
+      data: challenges,
+    });
+  } catch (error) {
+    logDeduplicator.error('Error getting weekly challenges', {
+      error: error instanceof Error ? error.message : String(error),
+      privyUserId: req.user?.sub,
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+});
+
+// ==================== DAILY LIMITS ====================
+
+/**
+ * GET /xp/daily-limits
+ * Récupère les limites quotidiennes restantes pour l'utilisateur
+ */
+router.get('/daily-limits', validatePrivyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = await getUserFromRequest(req);
+    if (!user) {
+      res.status(401).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    const limits = await xpService.getDailyLimits(user.id);
+
+    res.status(200).json({
+      success: true,
+      data: limits,
+    });
+  } catch (error) {
+    logDeduplicator.error('Error getting daily limits', {
       error: error instanceof Error ? error.message : String(error),
       privyUserId: req.user?.sub,
     });

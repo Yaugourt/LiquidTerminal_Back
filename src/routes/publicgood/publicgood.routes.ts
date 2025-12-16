@@ -8,11 +8,11 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 import { validatePrivyToken } from '../../middleware/authMiddleware';
 import { requireModerator } from '../../middleware/roleMiddleware';
 import { 
-  uploadPublicGoodFiles, 
-  handlePublicGoodUploadError, 
-  validateUploadedPublicGoodFiles, 
-  processUploadedPublicGoodFiles 
-} from '../../middleware/publicgood-upload.middleware';
+  uploadPublicGoodFilesR2, 
+  handlePublicGoodUploadErrorR2, 
+  validateAndUploadPublicGoodToR2, 
+  getPublicGoodUploadedUrls 
+} from '../../middleware/publicgood-upload-r2.middleware';
 import { prisma } from '../../core/prisma.service';
 
 const router = express.Router();
@@ -152,12 +152,12 @@ router.get('/:id', (async (req: Request, res: Response) => {
   }
 }) as RequestHandler);
 
-// ========== ROUTE 4: POST /publicgoods - Créer un projet avec upload ==========
+// ========== ROUTE 4: POST /publicgoods - Créer un projet avec upload (R2) ==========
 router.post('/', 
   validatePrivyToken,
-  uploadPublicGoodFiles,
-  handlePublicGoodUploadError,
-  validateUploadedPublicGoodFiles,
+  uploadPublicGoodFilesR2,
+  handlePublicGoodUploadErrorR2,
+  validateAndUploadPublicGoodToR2,
   // Parser les JSON strings avant validation
   (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -217,8 +217,8 @@ router.post('/',
         });
       }
 
-      // Traiter les fichiers uploadés
-      const uploadedFiles = processUploadedPublicGoodFiles(req);
+      // Récupérer les URLs R2 des fichiers uploadés
+      const uploadedFiles = getPublicGoodUploadedUrls(req);
       
       // Merger les URLs des fichiers uploadés avec le body
       const createData = {
@@ -229,7 +229,7 @@ router.post('/',
         ...(uploadedFiles.screenshots && { screenshots: uploadedFiles.screenshots })
       };
 
-      logDeduplicator.info('Files uploaded successfully', uploadedFiles);
+      logDeduplicator.info('Files uploaded to R2 successfully', uploadedFiles);
 
       const publicGood = await publicGoodService.create(createData);
       res.status(201).json({
@@ -257,12 +257,12 @@ router.post('/',
   }) as RequestHandler
 );
 
-// ========== ROUTE 5: PUT /publicgoods/:id - Modifier un projet avec upload ==========
+// ========== ROUTE 5: PUT /publicgoods/:id - Modifier un projet avec upload (R2) ==========
 router.put('/:id',
   validatePrivyToken,
-  uploadPublicGoodFiles,
-  handlePublicGoodUploadError,
-  validateUploadedPublicGoodFiles,
+  uploadPublicGoodFilesR2,
+  handlePublicGoodUploadErrorR2,
+  validateAndUploadPublicGoodToR2,
   // Parser les JSON strings avant validation
   (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -334,8 +334,8 @@ router.put('/:id',
       // Vérifier ownership (owner OU ADMIN)
       await publicGoodService.checkOwnership(id, user.id, user.role);
 
-      // Traiter les fichiers uploadés
-      const uploadedFiles = processUploadedPublicGoodFiles(req);
+      // Récupérer les URLs R2 des fichiers uploadés
+      const uploadedFiles = getPublicGoodUploadedUrls(req);
       
       // Merger les URLs des fichiers uploadés avec le body
       const updateData = {

@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { logDeduplicator } from './utils/logDeduplicator';
-
+import 'dotenv/config';
 import { createServer } from 'http';
 import { sanitizeInput } from './middleware/validation';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
@@ -90,26 +90,8 @@ app.use(express.urlencoded({ extended: true }));
 // Appliquer la sanitization globalement
 app.use(sanitizeInput);
 
-// Servir les fichiers statiques (uploads)
-app.use('/uploads', express.static('uploads'));
-
-// S'assurer que les dossiers d'upload existent
-import fs from 'fs';
-const uploadDirs = [
-  'uploads',
-  'uploads/logos',
-  'uploads/csv-projects',
-  'uploads/publicgoods',
-  'uploads/publicgoods/logos',
-  'uploads/publicgoods/banners',
-  'uploads/publicgoods/screenshots'
-];
-uploadDirs.forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-    logDeduplicator.info(`Created upload directory: ${dir}`);
-  }
-});
+// Note: File uploads now use Cloudflare R2 directly (no local /uploads folder)
+// Legacy /uploads endpoints removed as all images are stored in R2
 
 // Routes Pages
 app.use('/auth', authRoutes);

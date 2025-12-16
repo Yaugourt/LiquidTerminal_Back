@@ -224,6 +224,9 @@ export class ReadListItemService extends BaseService<
             referenceId: `readitem-${itemId}`,
             description: 'Marked resource as read',
           });
+          
+          // Compléter la daily task READ_RESOURCE
+          await xpService.completeDailyTask(userId, 'READ_RESOURCE');
         } catch (xpError) {
           logDeduplicator.warn('Failed to grant XP for marking resource as read', {
             userId,

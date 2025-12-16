@@ -4,7 +4,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 enum UserRole {
@@ -16,6 +15,12 @@ enum UserRole {
 // ==================== PUBLIC GOODS ENUMS ====================
 
 enum ProjectStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ResourceStatus {
   PENDING
   APPROVED
   REJECTED
@@ -99,6 +104,22 @@ enum XpActionType {
   ADMIN_PENALTY
 }
 
+// Daily tasks enum
+enum DailyTaskType {
+  LOGIN              // Se connecter
+  READ_RESOURCE      // Lire une ressource
+  ADD_WALLET         // Ajouter un wallet à une liste
+  EXPLORE_LEADERBOARD // Visiter le leaderboard
+}
+
+// Weekly challenges enum
+enum WeeklyChallengeType {
+  READ_20_RESOURCES    // Lire 20 ressources
+  CREATE_5_READLISTS   // Créer 5 readlists
+  LOGIN_7_DAYS         // Se connecter 7 jours
+  ADD_15_WALLETS       // Ajouter 15 wallets
+}
+
 model XpTransaction {
   id          Int          @id @default(autoincrement())
   userId      Int
@@ -115,6 +136,56 @@ model XpTransaction {
   @@index([actionType])
   @@index([createdAt])
   @@map("xp_transactions")
+}
+
+// Progression des daily tasks par utilisateur
+model DailyTaskProgress {
+  id          Int           @id @default(autoincrement())
+  userId      Int
+  taskType    DailyTaskType
+  date        DateTime      @db.Date
+  completed   Boolean       @default(false)
+  completedAt DateTime?     @db.Timestamp(6)
+  
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, taskType, date])
+  @@index([userId, date])
+  @@map("daily_task_progress")
+}
+
+// Challenges hebdomadaires
+model WeeklyChallenge {
+  id            Int                  @id @default(autoincrement())
+  userId        Int
+  challengeType WeeklyChallengeType
+  weekStart     DateTime             @db.Date  // Lundi de la semaine
+  progress      Int                  @default(0)
+  target        Int
+  completed     Boolean              @default(false)
+  completedAt   DateTime?            @db.Timestamp(6)
+  xpReward      Int
+  
+  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, challengeType, weekStart])
+  @@index([userId, weekStart])
+  @@map("weekly_challenges")
+}
+
+// Compteur d'actions quotidiennes (pour les caps)
+model DailyActionCount {
+  id          Int           @id @default(autoincrement())
+  userId      Int
+  actionType  XpActionType
+  date        DateTime      @db.Date
+  count       Int           @default(0)
+  
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, actionType, date])
+  @@index([userId, date])
+  @@map("daily_action_counts")
 }
 
 model User {
@@ -148,7 +219,12 @@ model User {
   walletLists                     WalletList[]
   submittedPublicGoods            PublicGood[]                  @relation("SubmittedGoods")
   reviewedPublicGoods             PublicGood[]                  @relation("ReviewedGoods")
+  reviewedEducationalResources    EducationalResource[]         @relation("EducationalResourceReviewer")
+  submittedResourceReports        ResourceReport[]              @relation("ResourceReporter")
   xpTransactions                  XpTransaction[]
+  dailyTaskProgress               DailyTaskProgress[]
+  weeklyChallenges                WeeklyChallenge[]
+  dailyActionCounts               DailyActionCount[]
   
   @@index([totalXp])
   @@index([level])
@@ -249,15 +325,28 @@ model EducationalCategory {
 }
 
 model EducationalResource {
-  id          Int       @id @default(autoincrement())
-  url         String    @db.VarChar(500)
-  createdAt   DateTime  @default(now()) @db.Timestamp(6)
-  addedBy     Int
+  id            Int             @id @default(autoincrement())
+  url           String          @db.VarChar(500)
+  createdAt     DateTime        @default(now()) @db.Timestamp(6)
+  addedBy       Int
   linkPreviewId String?
-  creator     User      @relation("EducationalResourceCreator", fields: [addedBy], references: [id])
-  linkPreview LinkPreview? @relation(fields: [linkPreviewId], references: [id])
-  categories  EducationalResourceCategory[]
+  
+  // Moderation fields
+  status        ResourceStatus  @default(PENDING)
+  reviewedAt    DateTime?       @db.Timestamp(6)
+  reviewedBy    Int?
+  reviewNotes   String?         @db.VarChar(500)
+  
+  // Relations
+  creator       User            @relation("EducationalResourceCreator", fields: [addedBy], references: [id])
+  reviewer      User?           @relation("EducationalResourceReviewer", fields: [reviewedBy], references: [id])
+  linkPreview   LinkPreview?    @relation(fields: [linkPreviewId], references: [id])
+  categories    EducationalResourceCategory[]
   readListItems ReadListItem[]
+  reports       ResourceReport[]
+  
+  @@index([status])
+  @@index([addedBy])
 }
 
 model EducationalResourceCategory {
@@ -375,4 +464,22 @@ model PublicGood {
   @@index([submitterId])
   @@index([developmentStatus])
   @@map("public_goods")
+}
+
+// ==================== RESOURCE REPORTS ====================
+
+model ResourceReport {
+  id          Int       @id @default(autoincrement())
+  resourceId  Int
+  reportedBy  Int
+  reason      String    @db.VarChar(500)
+  createdAt   DateTime  @default(now()) @db.Timestamp(6)
+  
+  resource    EducationalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  reporter    User                @relation("ResourceReporter", fields: [reportedBy], references: [id])
+  
+  @@unique([resourceId, reportedBy])
+  @@index([resourceId])
+  @@index([reportedBy])
+  @@map("resource_reports")
 }

@@ -48,6 +48,6 @@ export const walletBulkDeleteSchema = z.object({
 
 // Types
 export type WalletCreateInput = z.infer<typeof walletCreateSchema>;
-export type WalletUpdateInput = z.infer<typeof walletUpdateSchema>;
+export type WalletUpdateInput = z.infer<typeof walletUpdateSchema>; 
 export type WalletBulkAddInput = z.infer<typeof walletBulkAddSchema>;
 export type WalletBulkDeleteInput = z.infer<typeof walletBulkDeleteSchema>; 

@@ -1,14 +1,20 @@
 # 🎮 Système XP/Niveau - Documentation Backend
 
-> **Version:** 1.1  
-> **Date:** 29 Novembre 2025  
-> **Status:** ✅ Implémenté et testé - Prêt pour production
+> **Version:** 2.0  
+> **Date:** 2 Décembre 2025  
+> **Status:** ✅ Implémenté - Prêt pour production
 
 ---
 
 ## 📋 Résumé
 
 Le backend expose un système complet de points d'expérience (XP) et de niveaux pour gamifier l'expérience utilisateur. L'XP est attribué automatiquement lors de certaines actions et peut être consulté via des endpoints dédiés.
+
+### 🆕 Nouveautés v2.0
+- **Daily Tasks** : 4 tâches quotidiennes à compléter pour de l'XP bonus
+- **Weekly Challenges** : 4 défis hebdomadaires avec récompenses XP
+- **Daily Caps** : Limites anti-farm sur les actions répétables
+- **Nouveaux endpoints** : `/xp/daily-tasks`, `/xp/weekly-challenges`, `/xp/daily-limits`
 
 ---
 
@@ -168,6 +174,254 @@ Development: http://localhost:3002
 
 ---
 
+## 🆕 Daily Tasks (Tâches Quotidiennes)
+
+### 5️⃣ GET /xp/daily-tasks
+> Récupère les daily tasks du jour avec leur statut de complétion
+
+**Authentification:** 🔒 Requise (Bearer Token)
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": {
+    "tasks": [
+      {
+        "type": "LOGIN",
+        "description": "Se connecter",
+        "xp": 10,
+        "completed": true,
+        "completedAt": "2025-12-02T10:00:00.000Z"
+      },
+      {
+        "type": "READ_RESOURCE",
+        "description": "Lire une ressource",
+        "xp": 5,
+        "completed": false,
+        "completedAt": null
+      },
+      {
+        "type": "ADD_WALLET",
+        "description": "Ajouter un wallet à une liste",
+        "xp": 5,
+        "completed": false,
+        "completedAt": null
+      },
+      {
+        "type": "EXPLORE_LEADERBOARD",
+        "description": "Explorer le leaderboard",
+        "xp": 5,
+        "completed": false,
+        "completedAt": null
+      }
+    ],
+    "allCompleted": false,
+    "bonusXp": 15,
+    "bonusClaimed": false
+  }
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `tasks` | array | Liste des 4 daily tasks |
+| `tasks[].type` | string | Type de la task (LOGIN, READ_RESOURCE, ADD_WALLET, EXPLORE_LEADERBOARD) |
+| `tasks[].completed` | boolean | Si la task est complétée aujourd'hui |
+| `allCompleted` | boolean | True si toutes les tasks sont complétées |
+| `bonusXp` | number | XP bonus si toutes les tasks sont complétées (15) |
+| `bonusClaimed` | boolean | True si le bonus a déjà été attribué |
+
+---
+
+### 6️⃣ POST /xp/daily-tasks/:type
+> Complète manuellement une daily task
+
+**Authentification:** 🔒 Requise (Bearer Token)
+
+**⚠️ Seules certaines tasks peuvent être complétées manuellement :**
+- `EXPLORE_LEADERBOARD` : À appeler quand l'utilisateur visite le leaderboard
+
+Les autres tasks sont complétées **automatiquement** :
+- `LOGIN` : Via POST /xp/daily-login
+- `READ_RESOURCE` : Quand l'utilisateur marque une ressource comme lue
+- `ADD_WALLET` : Quand l'utilisateur ajoute un wallet à une liste
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "message": "Daily task completed!",
+  "data": {
+    "xpGranted": 5,
+    "allTasksCompleted": true,
+    "bonusGranted": 15
+  }
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `xpGranted` | number | XP accordé pour la task (0 si déjà complétée) |
+| `allTasksCompleted` | boolean | True si c'était la dernière task |
+| `bonusGranted` | number | Bonus XP si toutes les tasks viennent d'être complétées |
+
+---
+
+## 🆕 Weekly Challenges (Défis Hebdomadaires)
+
+### 7️⃣ GET /xp/weekly-challenges
+> Récupère les challenges de la semaine en cours
+
+**Authentification:** 🔒 Requise (Bearer Token)
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": {
+    "challenges": [
+      {
+        "type": "READ_20_RESOURCES",
+        "description": "Lire 20 ressources",
+        "progress": 7,
+        "target": 20,
+        "progressPercent": 35,
+        "xpReward": 100,
+        "completed": false,
+        "completedAt": null
+      },
+      {
+        "type": "CREATE_5_READLISTS",
+        "description": "Créer 5 readlists",
+        "progress": 2,
+        "target": 5,
+        "progressPercent": 40,
+        "xpReward": 75,
+        "completed": false,
+        "completedAt": null
+      },
+      {
+        "type": "LOGIN_7_DAYS",
+        "description": "Se connecter 7 jours",
+        "progress": 3,
+        "target": 7,
+        "progressPercent": 42,
+        "xpReward": 100,
+        "completed": false,
+        "completedAt": null
+      },
+      {
+        "type": "ADD_15_WALLETS",
+        "description": "Ajouter 15 wallets",
+        "progress": 15,
+        "target": 15,
+        "progressPercent": 100,
+        "xpReward": 100,
+        "completed": true,
+        "completedAt": "2025-12-01T15:30:00.000Z"
+      }
+    ],
+    "weekStart": "2025-12-02T00:00:00.000Z",
+    "weekEnd": "2025-12-08T23:59:59.999Z"
+  }
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `challenges` | array | Liste des 4 weekly challenges |
+| `challenges[].progress` | number | Progression actuelle |
+| `challenges[].target` | number | Objectif à atteindre |
+| `challenges[].progressPercent` | number | % de progression (0-100) |
+| `challenges[].xpReward` | number | XP attribué à la complétion |
+| `weekStart` | string | Date de début de la semaine (lundi) |
+| `weekEnd` | string | Date de fin de la semaine (dimanche) |
+
+> ℹ️ Les challenges se réinitialisent automatiquement chaque **lundi à 00:00**  
+> ℹ️ La progression est mise à jour automatiquement quand l'utilisateur fait les actions correspondantes
+
+---
+
+## 🆕 Daily Limits (Limites Quotidiennes Anti-Farm)
+
+### 8️⃣ GET /xp/daily-limits
+> Récupère les limites quotidiennes restantes pour les actions XP
+
+**Authentification:** 🔒 Requise (Bearer Token)
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": {
+    "limits": [
+      {
+        "actionType": "CREATE_READLIST",
+        "used": 1,
+        "max": 3,
+        "remaining": 2,
+        "xpPerAction": 15
+      },
+      {
+        "actionType": "MARK_RESOURCE_READ",
+        "used": 5,
+        "max": 10,
+        "remaining": 5,
+        "xpPerAction": 5
+      },
+      {
+        "actionType": "CREATE_WALLETLIST",
+        "used": 0,
+        "max": 3,
+        "remaining": 3,
+        "xpPerAction": 15
+      },
+      {
+        "actionType": "ADD_WALLET_TO_LIST",
+        "used": 10,
+        "max": 10,
+        "remaining": 0,
+        "xpPerAction": 10
+      },
+      {
+        "actionType": "COPY_PUBLIC_READLIST",
+        "used": 2,
+        "max": 5,
+        "remaining": 3,
+        "xpPerAction": 10
+      },
+      {
+        "actionType": "CREATE_EDUCATIONAL_CATEGORY",
+        "used": 0,
+        "max": 2,
+        "remaining": 2,
+        "xpPerAction": 30
+      },
+      {
+        "actionType": "ADD_EDUCATIONAL_RESOURCE",
+        "used": 3,
+        "max": 5,
+        "remaining": 2,
+        "xpPerAction": 25
+      }
+    ]
+  }
+}
+```
+
+| Champ | Type | Description |
+|-------|------|-------------|
+| `actionType` | string | Type d'action avec limite |
+| `used` | number | Nombre d'actions effectuées aujourd'hui |
+| `max` | number | Limite quotidienne |
+| `remaining` | number | Actions restantes aujourd'hui |
+| `xpPerAction` | number | XP par action |
+
+> ⚠️ Une fois la limite atteinte (`remaining: 0`), l'action ne donnera plus d'XP jusqu'au lendemain
+
+---
+
 ## 🎁 Endpoints qui retournent `xpGranted`
 
 Les endpoints suivants incluent **automatiquement** un champ `xpGranted` dans leur réponse :
@@ -198,20 +452,52 @@ Les endpoints suivants incluent **automatiquement** un champ `xpGranted` dans le
 
 ## 📊 Types d'actions XP
 
+### Actions sans limite
 | Action | XP | Trigger |
 |--------|-----|---------|
-| `REGISTRATION` | 100 | Automatique à l'inscription |
-| `DAILY_LOGIN` | 10 | Via POST /xp/daily-login |
+| `REGISTRATION` | 100 | Automatique à l'inscription (une fois) |
+| `DAILY_LOGIN` | 10 | Via POST /xp/daily-login (1x/jour) |
 | `LOGIN_STREAK_7` | 50 | Automatique au 7ème jour consécutif |
 | `LOGIN_STREAK_30` | 200 | Automatique au 30ème jour consécutif |
 | `REFERRAL_SUCCESS` | 200 | Automatique quand un filleul s'inscrit |
-| `CREATE_READLIST` | 15 | Via POST /readlists |
-| `MARK_RESOURCE_READ` | 5 | Via PATCH /readlists/items/:id/read-status |
-| `COPY_PUBLIC_READLIST` | 10 | Via POST /readlists/copy/:id |
-| `CREATE_WALLETLIST` | 15 | Via POST /walletlists |
-| `ADD_WALLET_TO_LIST` | 10 | Via POST /walletlists/:id/items |
 | `SUBMIT_PUBLIC_GOOD` | 100 | Via POST /publicgoods |
 | `PUBLIC_GOOD_APPROVED` | 500 | Automatique quand admin approuve |
+
+### Actions avec limite quotidienne (anti-farm)
+| Action | XP | Max/jour | XP max/jour | Trigger |
+|--------|-----|----------|-------------|---------|
+| `CREATE_READLIST` | 15 | 3 | 45 | Via POST /readlists |
+| `MARK_RESOURCE_READ` | 5 | 10 | 50 | Via PATCH /readlists/items/:id/read-status |
+| `COPY_PUBLIC_READLIST` | 10 | 5 | 50 | Via POST /readlists/copy/:id |
+| `CREATE_WALLETLIST` | 15 | 3 | 45 | Via POST /walletlists |
+| `ADD_WALLET_TO_LIST` | 10 | 10 | 100 | Via POST /walletlists/:id/items |
+| `CREATE_EDUCATIONAL_CATEGORY` | 30 | 2 | 60 | Via POST /educational/categories |
+| `ADD_EDUCATIONAL_RESOURCE` | 25 | 5 | 125 | Via POST /educational/resources |
+
+### Daily Tasks XP
+| Task | XP | Trigger |
+|------|-----|---------|
+| `LOGIN` | 10 | Auto via POST /xp/daily-login |
+| `READ_RESOURCE` | 5 | Auto quand on marque une ressource lue |
+| `ADD_WALLET` | 5 | Auto quand on ajoute un wallet |
+| `EXPLORE_LEADERBOARD` | 5 | Manuel via POST /xp/daily-tasks/EXPLORE_LEADERBOARD |
+| **Bonus completion** | 15 | Auto si toutes les tasks sont complétées |
+
+### Weekly Challenges XP
+| Challenge | Target | XP Reward |
+|-----------|--------|-----------|
+| `READ_20_RESOURCES` | 20 ressources lues | 100 |
+| `CREATE_5_READLISTS` | 5 readlists créées | 75 |
+| `LOGIN_7_DAYS` | 7 jours de connexion | 100 |
+| `ADD_15_WALLETS` | 15 wallets ajoutés | 100 |
+
+### 📈 XP Maximum par jour
+| Source | XP Max |
+|--------|--------|
+| Daily Tasks (4) + Bonus | 40 |
+| Actions limitées | ~475 |
+| **Total théorique** | **~515/jour** |
+| Weekly Challenges | +375/semaine |
 
 ---
 
@@ -238,27 +524,87 @@ xpForLevel(N) = 100 × (N - 1)^1.5
 ```typescript
 // Appeler une seule fois par session
 const loginResult = await api.post('/xp/daily-login');
-if (loginResult.data.xpGranted > 0) {
-  showXpNotification(loginResult.data.xpGranted);
-  if (loginResult.data.streakBonus > 0) {
-    showStreakBonus(loginResult.data.streakBonus);
+if (loginResult.data.data.xpGranted > 0) {
+  showXpNotification(loginResult.data.data.xpGranted);
+  if (loginResult.data.data.streakBonus > 0) {
+    showStreakBonus(loginResult.data.data.streakBonus);
   }
+}
+
+// Récupérer toutes les données XP en parallèle
+const [stats, dailyTasks, weeklyChallenges, limits] = await Promise.all([
+  api.get('/xp/stats'),
+  api.get('/xp/daily-tasks'),
+  api.get('/xp/weekly-challenges'),
+  api.get('/xp/daily-limits'),
+]);
+```
+
+### 2. Afficher le dashboard XP
+```typescript
+// Page ou modal dédiée aux daily tasks et weekly challenges
+const XpDashboard = () => {
+  const { data: dailyTasks } = useQuery('/xp/daily-tasks');
+  const { data: weeklyChallenges } = useQuery('/xp/weekly-challenges');
+  const { data: limits } = useQuery('/xp/daily-limits');
+  
+  return (
+    <>
+      {/* Daily Tasks Progress */}
+      <DailyTasksList tasks={dailyTasks.tasks} />
+      {dailyTasks.allCompleted && !dailyTasks.bonusClaimed && (
+        <BonusClaimedBanner xp={dailyTasks.bonusXp} />
+      )}
+      
+      {/* Weekly Challenges */}
+      <WeeklyChallengesList challenges={weeklyChallenges.challenges} />
+      
+      {/* Daily Limits Warning */}
+      {limits.limits.some(l => l.remaining === 0) && (
+        <LimitsReachedWarning limits={limits.limits} />
+      )}
+    </>
+  );
+};
+```
+
+### 3. Marquer le leaderboard comme exploré
+```typescript
+// Quand l'utilisateur visite la page leaderboard
+useEffect(() => {
+  api.post('/xp/daily-tasks/EXPLORE_LEADERBOARD')
+    .then(res => {
+      if (res.data.data.xpGranted > 0) {
+        showXpNotification(res.data.data.xpGranted);
+        if (res.data.data.bonusGranted > 0) {
+          showBonusNotification('All daily tasks completed!', res.data.data.bonusGranted);
+        }
+      }
+    });
+}, []);
+```
+
+### 4. Gérer les notifications XP sur les actions
+```typescript
+const response = await api.post('/readlists', data);
+if (response.data.xpGranted > 0) {
+  showXpNotification(response.data.xpGranted);
+  // Refetch les données pour mettre à jour les progressions
+  refetchXpStats();
+  refetchDailyTasks(); // La task READ_RESOURCE peut avoir été complétée
+  refetchWeeklyChallenges(); // La progression peut avoir changé
+  refetchDailyLimits(); // Les limites ont changé
 }
 ```
 
-### 2. Récupérer les stats XP
+### 5. Afficher les limites atteintes
 ```typescript
-const stats = await api.get('/xp/stats');
-// Utiliser pour afficher le badge XP dans le header
-```
+// Vérifier avant de faire une action si la limite est atteinte
+const limits = await api.get('/xp/daily-limits');
+const readListLimit = limits.data.limits.find(l => l.actionType === 'CREATE_READLIST');
 
-### 3. Gérer les notifications XP sur les actions
-```typescript
-const response = await api.post('/readlists', data);
-if (response.xpGranted > 0) {
-  showXpNotification(response.xpGranted);
-  // Optionnel: refetch les stats pour mettre à jour le badge
-  refetchXpStats();
+if (readListLimit.remaining === 0) {
+  showWarning(`Daily limit reached! No more XP for creating readlists today.`);
 }
 ```
 
@@ -269,6 +615,7 @@ if (response.xpGranted > 0) {
 ### 1. Idempotence
 - `POST /xp/daily-login` est idempotent : plusieurs appels le même jour retournent `xpGranted: 0`
 - Les actions avec `referenceId` unique ne donnent l'XP qu'une fois
+- `POST /xp/daily-tasks/:type` est idempotent : retourne `xpGranted: 0` si déjà complétée
 
 ### 2. Streak
 - Le streak se reset à 1 si l'utilisateur ne se connecte pas pendant un jour
@@ -277,10 +624,27 @@ if (response.xpGranted > 0) {
 ### 3. XP conditionnel
 - `MARK_RESOURCE_READ` ne donne de l'XP que si la ressource n'était pas déjà lue
 - Toujours vérifier `xpGranted > 0` avant d'afficher une notification
+- **Vérifier `remaining > 0`** dans `/xp/daily-limits` pour savoir si une action donnera de l'XP
 
 ### 4. Erreurs
 - Les erreurs d'attribution XP sont silencieuses côté backend (l'action principale réussit quand même)
 - Si `xpGranted` est absent de la réponse, considérer comme `0`
+
+### 5. 🆕 Daily Tasks
+- Les tasks LOGIN, READ_RESOURCE, ADD_WALLET se complètent **automatiquement**
+- Seule `EXPLORE_LEADERBOARD` doit être appelée manuellement via POST
+- Le bonus de completion (15 XP) est attribué automatiquement quand la dernière task est complétée
+- Les tasks se réinitialisent à **minuit (timezone serveur)**
+
+### 6. 🆕 Weekly Challenges
+- Les challenges se réinitialisent chaque **lundi à 00:00**
+- La progression est mise à jour automatiquement quand l'utilisateur fait les actions correspondantes
+- L'XP du challenge est attribué automatiquement à la complétion
+
+### 7. 🆕 Daily Limits (Anti-Farm)
+- Une fois la limite atteinte, l'action réussit mais **ne donne plus d'XP**
+- Les limites se réinitialisent à **minuit (timezone serveur)**
+- Afficher un warning à l'utilisateur quand `remaining === 0`
 
 ---
 
@@ -308,6 +672,19 @@ curl -X POST http://localhost:3002/xp/daily-login \
 ---
 
 ## 📝 Changelog
+
+### v2.0 (02/12/2025) - 🆕 Anti-Farm & Engagement System
+- ✅ **Daily Tasks** : 4 tâches quotidiennes (LOGIN, READ_RESOURCE, ADD_WALLET, EXPLORE_LEADERBOARD)
+- ✅ **Daily Completion Bonus** : +15 XP si toutes les daily tasks sont complétées
+- ✅ **Weekly Challenges** : 4 défis hebdomadaires avec progression automatique
+- ✅ **Daily Caps** : Limites quotidiennes sur les actions répétables (anti-farm)
+- ✅ **Nouveaux endpoints** : 
+  - `GET /xp/daily-tasks` - État des daily tasks
+  - `POST /xp/daily-tasks/:type` - Compléter manuellement une task
+  - `GET /xp/weekly-challenges` - État des challenges hebdo
+  - `GET /xp/daily-limits` - Limites quotidiennes restantes
+- ✅ **Auto-completion** : Les daily tasks READ_RESOURCE et ADD_WALLET se complètent automatiquement
+- ✅ **Fix Dockerfile** : Les migrations Prisma s'appliquent maintenant au démarrage
 
 ### v1.1 (29/11/2025)
 - 🐛 Fix: Routes XP utilisaient `req.currentUser` qui n'était jamais défini
