@@ -20,6 +20,12 @@ enum ProjectStatus {
   REJECTED
 }
 
+enum ResourceStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum DevelopmentStatus {
   IDEA
   DEVELOPMENT
@@ -79,9 +85,11 @@ enum XpActionType {
   // Educational
   CREATE_EDUCATIONAL_CATEGORY
   ADD_EDUCATIONAL_RESOURCE
+  EDUCATIONAL_RESOURCE_APPROVED
   
   // ReadLists
   CREATE_READLIST
+  CREATE_PUBLIC_LIST_BONUS
   MARK_RESOURCE_READ
   COPY_PUBLIC_READLIST
   
@@ -213,6 +221,8 @@ model User {
   walletLists                     WalletList[]
   submittedPublicGoods            PublicGood[]                  @relation("SubmittedGoods")
   reviewedPublicGoods             PublicGood[]                  @relation("ReviewedGoods")
+  reviewedEducationalResources    EducationalResource[]         @relation("EducationalResourceReviewer")
+  submittedResourceReports        ResourceReport[]              @relation("ResourceReporter")
   xpTransactions                  XpTransaction[]
   dailyTaskProgress               DailyTaskProgress[]
   weeklyChallenges                WeeklyChallenge[]
@@ -317,15 +327,28 @@ model EducationalCategory {
 }
 
 model EducationalResource {
-  id          Int       @id @default(autoincrement())
-  url         String    @db.VarChar(500)
-  createdAt   DateTime  @default(now()) @db.Timestamp(6)
-  addedBy     Int
+  id            Int             @id @default(autoincrement())
+  url           String          @db.VarChar(500)
+  createdAt     DateTime        @default(now()) @db.Timestamp(6)
+  addedBy       Int
   linkPreviewId String?
-  creator     User      @relation("EducationalResourceCreator", fields: [addedBy], references: [id])
-  linkPreview LinkPreview? @relation(fields: [linkPreviewId], references: [id])
-  categories  EducationalResourceCategory[]
+  
+  // Moderation fields
+  status        ResourceStatus  @default(PENDING)
+  reviewedAt    DateTime?       @db.Timestamp(6)
+  reviewedBy    Int?
+  reviewNotes   String?         @db.VarChar(500)
+  
+  // Relations
+  creator       User            @relation("EducationalResourceCreator", fields: [addedBy], references: [id])
+  reviewer      User?           @relation("EducationalResourceReviewer", fields: [reviewedBy], references: [id])
+  linkPreview   LinkPreview?    @relation(fields: [linkPreviewId], references: [id])
+  categories    EducationalResourceCategory[]
   readListItems ReadListItem[]
+  reports       ResourceReport[]
+  
+  @@index([status])
+  @@index([addedBy])
 }
 
 model EducationalResourceCategory {
@@ -443,4 +466,22 @@ model PublicGood {
   @@index([submitterId])
   @@index([developmentStatus])
   @@map("public_goods")
+}
+
+// ==================== RESOURCE REPORTS ====================
+
+model ResourceReport {
+  id          Int       @id @default(autoincrement())
+  resourceId  Int
+  reportedBy  Int
+  reason      String    @db.VarChar(500)
+  createdAt   DateTime  @default(now()) @db.Timestamp(6)
+  
+  resource    EducationalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  reporter    User                @relation("ResourceReporter", fields: [reportedBy], references: [id])
+  
+  @@unique([resourceId, reportedBy])
+  @@index([resourceId])
+  @@index([reportedBy])
+  @@map("resource_reports")
 }

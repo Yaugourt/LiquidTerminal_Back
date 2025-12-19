@@ -1,11 +1,11 @@
-import { 
-  WalletListResponse, 
-  WalletListCreateInput, 
+import {
+  WalletListResponse,
+  WalletListCreateInput,
   WalletListUpdateInput,
   WalletListSummaryResponse
 } from '../../types/walletlist.types';
-import { 
-  WalletListNotFoundError, 
+import {
+  WalletListNotFoundError,
   WalletListAlreadyExistsError,
   WalletListValidationError,
   WalletListPermissionError,
@@ -13,10 +13,10 @@ import {
 } from '../../errors/walletlist.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
-import { 
-  walletListCreateSchema, 
-  walletListUpdateSchema, 
-  walletListQuerySchema 
+import {
+  walletListCreateSchema,
+  walletListUpdateSchema,
+  walletListQuerySchema
 } from '../../schemas/walletlist.schema';
 import { BaseService } from '../../core/crudBase.service';
 import { cacheService } from '../../core/cache.service';
@@ -37,9 +37,9 @@ type WalletListQueryParams = {
 };
 
 export class WalletListService extends BaseService<
-  WalletListResponse, 
-  WalletListCreateInput, 
-  WalletListUpdateInput, 
+  WalletListResponse,
+  WalletListCreateInput,
+  WalletListUpdateInput,
   WalletListQueryParams
 > {
   protected repository = new PrismaWalletListRepository();
@@ -124,7 +124,7 @@ export class WalletListService extends BaseService<
   async getByIdWithPermission(id: number, userId: number): Promise<WalletListResponse> {
     try {
       const walletList = await this.getById(id);
-      
+
       if (!await this.hasAccess(id, userId)) {
         throw new WalletListPermissionError();
       }
@@ -146,18 +146,18 @@ export class WalletListService extends BaseService<
    */
   async getByUser(userId: number): Promise<WalletListSummaryResponse[]> {
     try {
-              return await cacheService.getOrSet(
-          CACHE_KEYS.WALLETLIST_BY_USER(userId),
-          async () => {
-            const walletLists = await this.repository.findByUser(userId);
-            logDeduplicator.info('Wallet lists by user retrieved successfully', { 
-              userId,
-              count: walletLists.length
-            });
-            return walletLists;
-          },
-          CACHE_TTL.MEDIUM
-        );
+      return await cacheService.getOrSet(
+        CACHE_KEYS.WALLETLIST_BY_USER(userId),
+        async () => {
+          const walletLists = await this.repository.findByUser(userId);
+          logDeduplicator.info('Wallet lists by user retrieved successfully', {
+            userId,
+            count: walletLists.length
+          });
+          return walletLists;
+        },
+        CACHE_TTL.MEDIUM
+      );
     } catch (error) {
       logDeduplicator.error('Error fetching wallet lists by user:', { error, userId });
       throw error;
@@ -213,7 +213,7 @@ export class WalletListService extends BaseService<
   async create(data: WalletListCreateInput): Promise<WalletListResponse> {
     const result = await super.create(data);
     await this.invalidateWalletListCache(result.id, data.userId);
-    
+
     // Attribuer l'XP pour création de wallet list
     try {
       await xpService.grantXp({
@@ -222,6 +222,16 @@ export class WalletListService extends BaseService<
         referenceId: `walletlist-${result.id}`,
         description: `Created wallet list: ${data.name}`,
       });
+
+      // Bonus pour liste publique
+      if (data.isPublic) {
+        await xpService.grantXp({
+          userId: data.userId,
+          actionType: 'CREATE_PUBLIC_LIST_BONUS' as any,
+          referenceId: `walletlist-public-${result.id}`,
+          description: `Public bonus for wallet list: ${data.name}`,
+        });
+      }
     } catch (error) {
       logDeduplicator.warn('Failed to grant XP for wallet list creation', {
         userId: data.userId,
@@ -229,7 +239,7 @@ export class WalletListService extends BaseService<
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    
+
     return result;
   }
 
@@ -280,8 +290,8 @@ export class WalletListService extends BaseService<
 
       // 4. Créer une nouvelle wallet list avec un nom unique
       const newName = `${originalWalletList.name} (Copy)`;
-      const newDescription = originalWalletList.description ? 
-        `${originalWalletList.description}\n\nCopied from: ${originalWalletList.creator.name}` : 
+      const newDescription = originalWalletList.description ?
+        `${originalWalletList.description}\n\nCopied from: ${originalWalletList.creator.name}` :
         `Copied from: ${originalWalletList.creator.name}`;
 
       const newWalletList = await this.create({
@@ -295,16 +305,16 @@ export class WalletListService extends BaseService<
       if (originalWalletList.items && originalWalletList.items.length > 0) {
         const walletListItemService = new WalletListItemService();
         const { userWalletRepository } = await import('../../repositories/userWallet.repository');
-        
+
         for (const item of originalWalletList.items) {
           const originalWallet = item.userWallet.Wallet;
-          
+
           // A. Vérifier si le copieur a déjà ce wallet dans ses UserWallet
           let copierUserWallet = await userWalletRepository.findByUserAndWallet(
-            userId, 
+            userId,
             originalWallet.id
           );
-          
+
           // B. Si non, créer un UserWallet pour le copieur
           if (!copierUserWallet) {
             copierUserWallet = await userWalletRepository.create({
@@ -312,14 +322,14 @@ export class WalletListService extends BaseService<
               walletId: originalWallet.id,
               name: item.userWallet.name || undefined  // Garder le nom original
             });
-            
+
             logDeduplicator.info('Created UserWallet for copier', {
               userId,
               walletId: originalWallet.id,
               userWalletId: copierUserWallet.id
             });
           }
-          
+
           // C. Créer le WalletListItem avec le userWalletId DU COPIEUR
           await walletListItemService.create({
             walletListId: newWalletList.id,
@@ -329,10 +339,10 @@ export class WalletListService extends BaseService<
           });
         }
 
-        logDeduplicator.info('Wallet list items copied successfully', { 
-          originalWalletListId: walletListId, 
-          newWalletListId: newWalletList.id, 
-          itemsCount: originalWalletList.items.length 
+        logDeduplicator.info('Wallet list items copied successfully', {
+          originalWalletListId: walletListId,
+          newWalletListId: newWalletList.id,
+          itemsCount: originalWalletList.items.length
         });
       }
 
@@ -342,10 +352,10 @@ export class WalletListService extends BaseService<
         throw new WalletListError('Failed to retrieve copied wallet list', 500, 'INTERNAL_ERROR');
       }
 
-      logDeduplicator.info('Wallet list copied successfully', { 
-        originalWalletListId: walletListId, 
+      logDeduplicator.info('Wallet list copied successfully', {
+        originalWalletListId: walletListId,
         newWalletListId: newWalletList.id,
-        userId 
+        userId
       });
 
       return completeWalletList;

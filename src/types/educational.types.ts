@@ -1,4 +1,5 @@
 import { BaseResponse, BasePagination } from './common.types';
+import { ResourceStatus } from '@prisma/client';
 
 // Types de base pour les catégories éducatives
 export interface EducationalCategoryResponse {
@@ -33,6 +34,17 @@ export interface EducationalResourceResponse {
   createdAt: Date;
   addedBy: number;
   linkPreviewId?: string;
+
+  // Moderation fields
+  status: ResourceStatus;
+  reviewedAt?: Date;
+  reviewedBy?: number;
+  reviewNotes?: string;
+  reviewer?: {
+    id: number;
+    name: string | null;
+  } | null;
+
   creator: {
     id: number;
     name: string | null;
@@ -99,4 +111,49 @@ export interface EducationalResourcesResponseWrapper extends BaseResponse {
   pagination?: BasePagination;
 }
 
- 
+// ==================== MODERATION TYPES ====================
+
+export interface ResourceReviewInput {
+  status: 'APPROVED' | 'REJECTED';
+  notes?: string;
+}
+
+export interface ResourceSubmitInput {
+  url: string;
+  addedBy: number;
+  categoryIds?: number[];
+}
+
+// ==================== REPORT TYPES ====================
+
+export interface ResourceReportInput {
+  resourceId: number;
+  reportedBy: number;
+  reason: string;
+}
+
+export interface ResourceReportResponse {
+  id: number;
+  resourceId: number;
+  reportedBy: number;
+  reason: string;
+  createdAt: Date;
+  reporter: {
+    id: number;
+    name: string | null;
+  };
+  resource?: {
+    id: number;
+    url: string;
+    status: ResourceStatus;
+  };
+}
+
+export interface ResourceReportResponseWrapper extends BaseResponse {
+  data: ResourceReportResponse;
+}
+
+export interface ResourceReportsResponseWrapper extends BaseResponse {
+  data: ResourceReportResponse[];
+  pagination?: BasePagination;
+}

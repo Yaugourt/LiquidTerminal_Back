@@ -13,7 +13,7 @@ export const educationalCategoryBaseSchema = z.object({
     .max(100, 'Le nom ne doit pas dépasser 100 caractères')
     .trim()
     .regex(/^[a-zA-Z0-9\s\-_:()À-ÿ]+$/, 'Le nom contient des caractères non autorisés'),
-  
+
   description: z.string()
     .max(255, 'La description ne doit pas dépasser 255 caractères')
     .trim()
@@ -45,6 +45,12 @@ export const educationalResourceBaseSchema = z.object({
 
 // Schéma pour la création de ressource éducative
 export const educationalResourceCreateSchema = z.object({
+  ...educationalResourceBaseSchema.shape,
+  categoryIds: z.array(z.number().int().positive()).optional()
+});
+
+// Schéma pour la création de ressource éducative (Service - inclut addedBy)
+export const educationalResourceServiceCreateSchema = z.object({
   ...educationalResourceBaseSchema.shape,
   addedBy: z.number().int().positive('ID utilisateur invalide'),
   categoryIds: z.array(z.number().int().positive()).optional()
@@ -170,4 +176,3 @@ export const educationalCategoryResourcesGetSchema = z.object({
   })
 });
 
- 

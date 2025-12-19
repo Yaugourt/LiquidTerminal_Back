@@ -123,12 +123,18 @@ export class XpRepository {
      */
     async countTransactions(
         userId: number,
-        actionType?: XpActionType
+        actionType?: XpActionType,
+        options?: { since?: Date }
     ): Promise<number> {
         return this.prismaClient.xpTransaction.count({
             where: {
                 userId,
                 ...(actionType && { actionType }),
+                ...(options?.since && {
+                    createdAt: {
+                        gte: options.since,
+                    },
+                }),
             },
         });
     }
@@ -205,7 +211,7 @@ export class XpRepository {
      */
     async getDailyActionCount(userId: number, actionType: XpActionType, date: Date): Promise<number> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
-        
+
         const record = await this.prismaClient.dailyActionCount.findUnique({
             where: {
                 userId_actionType_date: {
@@ -223,7 +229,7 @@ export class XpRepository {
      */
     async incrementDailyActionCount(userId: number, actionType: XpActionType, date: Date): Promise<DailyActionCount> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
-        
+
         return this.prismaClient.dailyActionCount.upsert({
             where: {
                 userId_actionType_date: {
@@ -249,7 +255,7 @@ export class XpRepository {
      */
     async getAllDailyActionCounts(userId: number, date: Date): Promise<DailyActionCount[]> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
-        
+
         return this.prismaClient.dailyActionCount.findMany({
             where: {
                 userId,
@@ -265,7 +271,7 @@ export class XpRepository {
      */
     async getDailyTasks(userId: number, date: Date): Promise<DailyTaskProgress[]> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
-        
+
         return this.prismaClient.dailyTaskProgress.findMany({
             where: {
                 userId,
@@ -279,7 +285,7 @@ export class XpRepository {
      */
     async completeDailyTask(userId: number, taskType: DailyTaskType, date: Date): Promise<DailyTaskProgress> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
-        
+
         return this.prismaClient.dailyTaskProgress.upsert({
             where: {
                 userId_taskType_date: {
@@ -307,7 +313,7 @@ export class XpRepository {
      */
     async isDailyTaskCompleted(userId: number, taskType: DailyTaskType, date: Date): Promise<boolean> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
-        
+
         const task = await this.prismaClient.dailyTaskProgress.findUnique({
             where: {
                 userId_taskType_date: {
@@ -325,7 +331,7 @@ export class XpRepository {
      */
     async countCompletedDailyTasks(userId: number, date: Date): Promise<number> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
-        
+
         return this.prismaClient.dailyTaskProgress.count({
             where: {
                 userId,
@@ -354,7 +360,7 @@ export class XpRepository {
      */
     async getOrCreateWeeklyChallenges(userId: number, date: Date): Promise<WeeklyChallenge[]> {
         const weekStart = this.getWeekStart(date);
-        
+
         const existing = await this.prismaClient.weeklyChallenge.findMany({
             where: {
                 userId,
@@ -404,7 +410,7 @@ export class XpRepository {
         increment: number = 1
     ): Promise<WeeklyChallenge | null> {
         const weekStart = this.getWeekStart(date);
-        
+
         const challenge = await this.prismaClient.weeklyChallenge.findUnique({
             where: {
                 userId_challengeType_weekStart: {
@@ -437,7 +443,7 @@ export class XpRepository {
      */
     async getWeeklyChallenges(userId: number, date: Date): Promise<WeeklyChallenge[]> {
         const weekStart = this.getWeekStart(date);
-        
+
         return this.prismaClient.weeklyChallenge.findMany({
             where: {
                 userId,

@@ -1,19 +1,26 @@
 import { EducationalResourceRepository } from '../interfaces/educational-resource.repository.interface';
-import { 
-  EducationalResourceResponse, 
-  EducationalResourceCreateInput, 
+import {
+  EducationalResourceResponse,
+  EducationalResourceCreateInput,
   EducationalResourceUpdateInput,
   EducationalResourceCategoryCreateInput,
-  EducationalResourceCategoryResponse 
+  EducationalResourceCategoryResponse
 } from '../../types/educational.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
+import { ResourceStatus } from '@prisma/client';
 
 export class PrismaEducationalResourceRepository extends BasePrismaRepository implements EducationalResourceRepository {
   // Helper pour les includes répétitifs
   private readonly includeConfig = {
     creator: {
       select: BasePrismaRepository.UserSelect
+    },
+    reviewer: {
+      select: {
+        id: true,
+        name: true
+      }
     },
     linkPreview: {
       select: {
@@ -49,6 +56,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
     search?: string;
     addedBy?: number;
     categoryId?: number;
+    status?: ResourceStatus;
   }): Promise<{
     data: EducationalResourceResponse[];
     pagination: BasePagination;
@@ -61,11 +69,12 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         order = 'desc',
         search,
         addedBy,
-        categoryId
+        categoryId,
+        status
       } = params;
 
       this.validatePaginationParams({ page, limit, sort, order });
-      
+
       const where: any = {};
       if (search) {
         where.url = { contains: search, mode: 'insensitive' };
@@ -78,7 +87,10 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
           some: { categoryId }
         };
       }
-      
+      if (status) {
+        where.status = status;
+      }
+
       const { skip, take, orderBy } = this.buildQueryParams({ page, limit, sort, order });
 
       const total = await this.prismaClient.educationalResource.count({ where });
@@ -114,7 +126,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
     return this.executeWithErrorHandling(
       async () => {
         const { categoryIds, ...resourceData } = data;
-        
+
         return await this.prismaClient.educationalResource.create({
           data: {
             ...resourceData,
@@ -321,4 +333,68 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
       { resourceId }
     );
   }
-} 
+
+  // ==================== MODERATION METHODS ====================
+
+  async findPending(params: {
+    page?: number;
+    limit?: number;
+  }): Promise<{
+    data: EducationalResourceResponse[];
+    pagination: BasePagination;
+  }> {
+    return this.findAll({
+      ...params,
+      status: 'PENDING' as ResourceStatus
+    });
+  }
+
+  async countPending(): Promise<number> {
+    return this.executeWithErrorHandling(
+      async () => {
+        return await this.prismaClient.educationalResource.count({
+          where: { status: 'PENDING' }
+        });
+      },
+      'counting pending resources'
+    );
+  }
+
+  async updateReviewStatus(
+    id: number,
+    status: ResourceStatus,
+    reviewerId: number,
+    notes?: string
+  ): Promise<EducationalResourceResponse> {
+    return this.executeWithErrorHandling(
+      async () => {
+        return await this.prismaClient.educationalResource.update({
+          where: { id },
+          data: {
+            status,
+            reviewedAt: new Date(),
+            reviewedBy: reviewerId,
+            reviewNotes: notes
+          },
+          include: this.includeConfig
+        });
+      },
+      'updating resource review status',
+      { id, status, reviewerId }
+    );
+  }
+
+  async findByStatus(status: ResourceStatus): Promise<EducationalResourceResponse[]> {
+    return this.executeWithErrorHandling(
+      async () => {
+        return await this.prismaClient.educationalResource.findMany({
+          where: { status },
+          include: this.includeConfig,
+          orderBy: { createdAt: 'desc' }
+        });
+      },
+      'finding resources by status',
+      { status }
+    );
+  }
+}

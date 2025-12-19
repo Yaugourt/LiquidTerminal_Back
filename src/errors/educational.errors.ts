@@ -113,4 +113,31 @@ export class EducationalUrlFetchError extends EducationalResourceError {
   constructor(message: string = 'Failed to fetch URL metadata') {
     super(message, 400, 'EDUCATIONAL_URL_FETCH_ERROR');
   }
-} 
+}
+
+// Content Filter Errors
+export class ContentFilterError extends EducationalResourceError {
+  constructor(reason: string, details?: string) {
+    super(details ? `Content rejected: ${reason} - ${details}` : `Content rejected: ${reason}`, 400, 'CONTENT_FILTERED');
+  }
+}
+
+// Resource Report Errors
+export class DuplicateReportError extends EducationalError {
+  constructor(message: string = 'You have already reported this resource') {
+    super(message, 409, 'DUPLICATE_REPORT');
+  }
+}
+
+export class ResourceReportNotFoundError extends EducationalError {
+  constructor(message: string = 'Resource report not found') {
+    super(message, 404, 'RESOURCE_REPORT_NOT_FOUND');
+  }
+}
+
+// Moderation Errors
+export class ResourceAlreadyReviewedError extends EducationalResourceError {
+  constructor(message: string = 'This resource has already been reviewed') {
+    super(message, 400, 'RESOURCE_ALREADY_REVIEWED');
+  }
+}

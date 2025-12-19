@@ -1,0 +1,2 @@
+-- AlterEnum
+ALTER TYPE "XpActionType" ADD VALUE 'CREATE_PUBLIC_LIST_BONUS';
