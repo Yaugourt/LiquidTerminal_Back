@@ -59,7 +59,7 @@ redis.on('close', () => {
 
 redis.on('error', (err) => {
   console.error('❌ Redis Error:', err);
-  logDeduplicator.error('Redis Error', { 
+  logDeduplicator.error('Redis Error', {
     error: err instanceof Error ? err.message : String(err),
     stack: err instanceof Error ? err.stack : undefined
   });
@@ -71,7 +71,7 @@ redis.ping().then(() => {
   logDeduplicator.info('Redis PING successful');
 }).catch((err) => {
   console.error('❌ Redis PING failed:', err);
-  logDeduplicator.error('Redis PING failed', { 
+  logDeduplicator.error('Redis PING failed', {
     error: err instanceof Error ? err.message : String(err),
     stack: err instanceof Error ? err.stack : undefined
   });
@@ -87,7 +87,7 @@ export class RedisService {
     try {
       return await redisNormal.get(key);
     } catch (error) {
-      logDeduplicator.error('Redis get error', { 
+      logDeduplicator.error('Redis get error', {
         key,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -104,7 +104,7 @@ export class RedisService {
         await redisNormal.set(key, value);
       }
     } catch (error) {
-      logDeduplicator.error('Redis set error', { 
+      logDeduplicator.error('Redis set error', {
         key,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -116,7 +116,7 @@ export class RedisService {
     try {
       await redisNormal.del(key);
     } catch (error) {
-      logDeduplicator.error('Redis delete error', { 
+      logDeduplicator.error('Redis delete error', {
         key,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -128,7 +128,7 @@ export class RedisService {
     try {
       return await redisNormal.keys(pattern);
     } catch (error) {
-      logDeduplicator.error('Redis keys error', { 
+      logDeduplicator.error('Redis keys error', {
         pattern,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -141,7 +141,7 @@ export class RedisService {
     try {
       await redisNormal.publish(channel, message);
     } catch (error) {
-      logDeduplicator.error('Redis publish error', { 
+      logDeduplicator.error('Redis publish error', {
         channel,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -158,7 +158,7 @@ export class RedisService {
         }
       });
     } catch (error) {
-      logDeduplicator.error('Redis subscribe error', { 
+      logDeduplicator.error('Redis subscribe error', {
         channel,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -170,7 +170,7 @@ export class RedisService {
     try {
       await redis.unsubscribe(channel);
     } catch (error) {
-      logDeduplicator.error('Redis unsubscribe error', { 
+      logDeduplicator.error('Redis unsubscribe error', {
         channel,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -182,7 +182,7 @@ export class RedisService {
     try {
       await redisNormal.flushall();
     } catch (error) {
-      logDeduplicator.error('Redis flushall error', { 
+      logDeduplicator.error('Redis flushall error', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
       });
@@ -194,7 +194,7 @@ export class RedisService {
       await redis.quit();
       await redisNormal.quit();
     } catch (error) {
-      logDeduplicator.error('Redis disconnect error', { 
+      logDeduplicator.error('Redis disconnect error', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
       });
@@ -203,6 +203,9 @@ export class RedisService {
 
   public multi() {
     return redisNormal.multi();
+  }
+  public getClient(): Redis {
+    return redisNormal;
   }
 }
 

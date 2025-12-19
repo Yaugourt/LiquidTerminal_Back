@@ -1,11 +1,11 @@
-import { 
-  ReadListResponse, 
-  ReadListCreateInput, 
+import {
+  ReadListResponse,
+  ReadListCreateInput,
   ReadListUpdateInput,
   ReadListSummaryResponse
 } from '../../types/readlist.types';
-import { 
-  ReadListNotFoundError, 
+import {
+  ReadListNotFoundError,
   ReadListAlreadyExistsError,
   ReadListValidationError,
   ReadListPermissionError,
@@ -13,10 +13,10 @@ import {
 } from '../../errors/readlist.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
-import { 
-  readListCreateSchema, 
-  readListUpdateSchema, 
-  readListQuerySchema 
+import {
+  readListCreateSchema,
+  readListUpdateSchema,
+  readListQuerySchema
 } from '../../schemas/readlist.schema';
 import { readListRepository } from '../../repositories';
 import { BaseService } from '../../core/crudBase.service';
@@ -37,9 +37,9 @@ type ReadListQueryParams = {
 };
 
 export class ReadListService extends BaseService<
-  ReadListResponse, 
-  ReadListCreateInput, 
-  ReadListUpdateInput, 
+  ReadListResponse,
+  ReadListCreateInput,
+  ReadListUpdateInput,
   ReadListQueryParams
 > {
   protected repository = readListRepository;
@@ -124,7 +124,7 @@ export class ReadListService extends BaseService<
   async getByIdWithPermission(id: number, userId: number): Promise<ReadListResponse> {
     try {
       const readList = await this.getById(id);
-      
+
       if (!await this.hasAccess(id, userId)) {
         throw new ReadListPermissionError();
       }
@@ -150,7 +150,7 @@ export class ReadListService extends BaseService<
         CACHE_KEYS.READLIST_BY_USER(userId),
         async () => {
           const readLists = await this.repository.findByUser(userId);
-          logDeduplicator.info('Read lists by user retrieved successfully', { 
+          logDeduplicator.info('Read lists by user retrieved successfully', {
             userId,
             count: readLists.length
           });
@@ -213,7 +213,7 @@ export class ReadListService extends BaseService<
   async create(data: ReadListCreateInput): Promise<ReadListResponse> {
     const result = await super.create(data);
     await this.invalidateReadListCache(result.id, data.userId);
-    
+
     // Attribuer l'XP pour création de readlist
     try {
       await xpService.grantXp({
@@ -222,6 +222,16 @@ export class ReadListService extends BaseService<
         referenceId: `readlist-${result.id}`,
         description: `Created read list: ${data.name}`,
       });
+
+      // Bonus pour liste publique
+      if (data.isPublic) {
+        await xpService.grantXp({
+          userId: data.userId,
+          actionType: 'CREATE_PUBLIC_LIST_BONUS' as any,
+          referenceId: `readlist-public-${result.id}`,
+          description: `Public bonus for read list: ${data.name}`,
+        });
+      }
     } catch (error) {
       logDeduplicator.warn('Failed to grant XP for readlist creation', {
         userId: data.userId,
@@ -229,7 +239,7 @@ export class ReadListService extends BaseService<
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    
+
     return result;
   }
 
@@ -280,8 +290,8 @@ export class ReadListService extends BaseService<
 
       // 4. Créer une nouvelle read list avec un nom unique
       const newName = `${originalReadList.name} (Copy)`;
-      const newDescription = originalReadList.description ? 
-        `${originalReadList.description}\n\nCopied from: ${originalReadList.creator.name}` : 
+      const newDescription = originalReadList.description ?
+        `${originalReadList.description}\n\nCopied from: ${originalReadList.creator.name}` :
         `Copied from: ${originalReadList.creator.name}`;
 
       const newReadList = await this.create({
@@ -294,7 +304,7 @@ export class ReadListService extends BaseService<
       // 5. Copier tous les items de la read list originale
       if (originalReadList.items && originalReadList.items.length > 0) {
         const readListItemService = new ReadListItemService();
-        
+
         for (const item of originalReadList.items) {
           await readListItemService.create({
             readListId: newReadList.id,
@@ -304,10 +314,10 @@ export class ReadListService extends BaseService<
           });
         }
 
-        logDeduplicator.info('Read list items copied successfully', { 
-          originalReadListId: readListId, 
-          newReadListId: newReadList.id, 
-          itemsCount: originalReadList.items.length 
+        logDeduplicator.info('Read list items copied successfully', {
+          originalReadListId: readListId,
+          newReadListId: newReadList.id,
+          itemsCount: originalReadList.items.length
         });
       }
 
@@ -334,10 +344,10 @@ export class ReadListService extends BaseService<
         });
       }
 
-      logDeduplicator.info('Read list copied successfully', { 
-        originalReadListId: readListId, 
+      logDeduplicator.info('Read list copied successfully', {
+        originalReadListId: readListId,
         newReadListId: newReadList.id,
-        userId 
+        userId
       });
 
       return completeReadList;

@@ -17,10 +17,12 @@ export const XP_REWARDS: Record<XpActionType, number> = {
 
     // Educational
     CREATE_EDUCATIONAL_CATEGORY: 30,
-    ADD_EDUCATIONAL_RESOURCE: 25,
+    ADD_EDUCATIONAL_RESOURCE: 15,
+    EDUCATIONAL_RESOURCE_APPROVED: 10,
 
     // ReadLists
     CREATE_READLIST: 15,
+    CREATE_PUBLIC_LIST_BONUS: 5,
     MARK_RESOURCE_READ: 5,
     COPY_PUBLIC_READLIST: 10,
 
@@ -48,7 +50,14 @@ export const DAILY_CAPS: Partial<Record<XpActionType, number>> = {
     ADD_WALLET_TO_LIST: 10,       // Max 10/jour = 100 XP max
     COPY_PUBLIC_READLIST: 5,      // Max 5/jour = 50 XP max
     CREATE_EDUCATIONAL_CATEGORY: 2, // Max 2/jour = 60 XP max
-    ADD_EDUCATIONAL_RESOURCE: 5,  // Max 5/jour = 125 XP max
+    // ADD_EDUCATIONAL_RESOURCE: removed daily cap in favor of weekly cap
+};
+
+/**
+ * Caps hebdomadaires par type d'action
+ */
+export const WEEKLY_CAPS: Partial<Record<XpActionType, number>> = {
+    ADD_EDUCATIONAL_RESOURCE: 10, // Max 10/semaine (User request)
 };
 
 /**

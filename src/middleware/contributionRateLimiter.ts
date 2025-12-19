@@ -34,7 +34,7 @@ export const contributionRateLimiter = async (
         const now = Math.floor(Date.now() / 1000);
         const windowStart = now - (CONTRIBUTION_LIMITS.WINDOW_MS / 1000);
 
-        const redis = (redisService as any).redisNormal || (redisService as any).redis;
+        const redis = redisService.getClient();
 
         // Compter les contributions dans les dernières 24h
         const count = await redis.zcount(key, windowStart, '+inf');
@@ -66,7 +66,10 @@ export const contributionRateLimiter = async (
 
         next();
     } catch (error) {
-        logDeduplicator.error('Contribution rate limiter error', { error });
+        logDeduplicator.error('Contribution rate limiter error', {
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined
+        });
         // En cas d'erreur Redis, on laisse passer la requête
         next();
     }
@@ -81,7 +84,7 @@ export const recordContribution = async (userId: number): Promise<void> => {
         const now = Math.floor(Date.now() / 1000);
         const windowSeconds = CONTRIBUTION_LIMITS.WINDOW_MS / 1000;
 
-        const redis = (redisService as any).redisNormal || (redisService as any).redis;
+        const redis = redisService.getClient();
 
         // Ajouter la contribution au sorted set
         await redis.zadd(key, now, `${now}:${Math.random()}`);
@@ -94,7 +97,11 @@ export const recordContribution = async (userId: number): Promise<void> => {
 
         logDeduplicator.info('Contribution recorded for rate limiting', { userId });
     } catch (error) {
-        logDeduplicator.error('Error recording contribution', { userId, error });
+        logDeduplicator.error('Error recording contribution', {
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined
+        });
     }
 };
 
@@ -107,12 +114,16 @@ export const getRemainingSubmissions = async (userId: number): Promise<number> =
         const now = Math.floor(Date.now() / 1000);
         const windowStart = now - (CONTRIBUTION_LIMITS.WINDOW_MS / 1000);
 
-        const redis = (redisService as any).redisNormal || (redisService as any).redis;
+        const redis = redisService.getClient();
 
         const count = await redis.zcount(key, windowStart, '+inf');
         return Math.max(0, CONTRIBUTION_LIMITS.MAX_SUBMISSIONS_PER_DAY - count);
     } catch (error) {
-        logDeduplicator.error('Error getting remaining submissions', { userId, error });
+        logDeduplicator.error('Error getting remaining submissions', {
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined
+        });
         return CONTRIBUTION_LIMITS.MAX_SUBMISSIONS_PER_DAY; // En cas d'erreur, on suppose le max
     }
 };
