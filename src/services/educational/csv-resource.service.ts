@@ -48,10 +48,6 @@ export class CsvResourceService {
     try {
       // Lire le fichier CSV
       const fileContent = fs.readFileSync(filePath, 'utf-8');
-      
-      console.log('DEBUG: About to parse CSV - CONSOLE LOG');
-      console.log('File content length:', fileContent.length);
-      console.log('File content preview:', fileContent.substring(0, 200));
 
       // Parser le CSV
       const records = parse(fileContent, {
@@ -60,9 +56,6 @@ export class CsvResourceService {
         trim: true,
         delimiter: ','
       }) as CsvRow[];
-
-      console.log('DEBUG: CSV parsing completed - CONSOLE LOG');
-      console.log('Records length:', records.length);
 
       result.totalRows = records.length;
       
@@ -78,10 +71,6 @@ export class CsvResourceService {
         recordsLength: records.length,
         resultTotalRows: result.totalRows
       });
-
-      console.log('DEBUG: About to start processing rows - CONSOLE LOG');
-      console.log('Total rows:', records.length);
-      console.log('First row keys:', Object.keys(records[0]));
 
       logDeduplicator.info('About to start processing rows', { 
         totalRows: records.length,
@@ -112,13 +101,6 @@ export class CsvResourceService {
             logDeduplicator.info('Row processed successfully', { rowNumber });
                   } catch (error) {
           result.failedImports++;
-          
-          // Forcer l'affichage de l'erreur réelle
-          console.log('RAW ERROR:', error);
-          console.log('ERROR TYPE:', typeof error);
-          console.log('ERROR CONSTRUCTOR:', error instanceof Error ? error.constructor.name : 'Unknown');
-          console.log('ERROR MESSAGE:', error instanceof Error ? error.message : 'No message');
-          console.log('ERROR STACK:', error instanceof Error ? error.stack : 'No stack');
           
           const errorMessage = error instanceof Error ? error.message : String(error);
           const errorStack = error instanceof Error ? error.stack : String(error);
