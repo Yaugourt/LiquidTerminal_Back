@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import { logDeduplicator } from './utils/logDeduplicator';
 import 'dotenv/config';
 import { createServer } from 'http';
@@ -49,6 +50,9 @@ const server = createServer(app);
 
 // Désactiver l'en-tête X-Powered-By pour des raisons de sécurité
 app.disable('x-powered-by');
+
+// Compression gzip des réponses (réduit la bande passante de 60-80%)
+app.use(compression());
 
 // Ajouter Request ID pour traçabilité (doit être en premier)
 app.use(requestIdMiddleware);
