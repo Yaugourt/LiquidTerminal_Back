@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import { logDeduplicator } from './utils/logDeduplicator';
 import 'dotenv/config';
 import { createServer } from 'http';
@@ -43,12 +44,16 @@ import leaderboardRoutes from './routes/leaderboard/leaderboard.routes';
 import xpRoutes from './routes/xp/xp.routes';
 
 import healthRoutes from './routes/health.routes';
+import liquidationsRoutes from './routes/liquidations/liquidations.routes';
 
 const app = express();
 const server = createServer(app);
 
 // Désactiver l'en-tête X-Powered-By pour des raisons de sécurité
 app.disable('x-powered-by');
+
+// Compression gzip des réponses (réduit la bande passante de 60-80%)
+app.use(compression());
 
 // Ajouter Request ID pour traçabilité (doit être en premier)
 app.use(requestIdMiddleware);
@@ -121,6 +126,7 @@ app.use('/market/perp/globalstats', globalPerpStatsRoutes);
 app.use('/leaderboard', leaderboardRoutes);
 app.use('/xp', xpRoutes);
 app.use('/api/health', healthRoutes);
+app.use('/liquidations', liquidationsRoutes);
 
 const PORT = process.env.PORT || 3002;
 

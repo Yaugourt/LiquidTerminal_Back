@@ -55,8 +55,6 @@ export const validateCreateWalletListItem = (req: Request, res: Response, next: 
     walletListItemCreateSchema.parse(req.body);
     next();
   } catch (error) {
-    console.log('Validation error:', error);
-    console.log('Request body:', req.body);
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
