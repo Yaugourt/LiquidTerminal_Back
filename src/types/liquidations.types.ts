@@ -1,7 +1,7 @@
 /**
- * Types for HypeDexer Liquidations API
+ * Liquidation data from HypeDexer API
+ * Keep ALL original field names
  */
-
 export interface Liquidation {
   time: string;              // ISO datetime "2026-01-08T10:28:36"
   time_ms: number;           // Timestamp in milliseconds
@@ -13,23 +13,29 @@ export interface Liquidation {
   fill_px_vwap: number;      // Volume weighted average price
   mark_px: number;           // Mark price
   method: string;            // Method (e.g., "market")
-  fee_total_liquidated: number;
+  fee_total_liquidated: number; // Liquidation fee
   liquidators: string[];     // List of liquidator addresses
-  liquidator_count: number;
+  liquidator_count: number;  // Number of liquidators
   liq_dir: "Long" | "Short"; // Liquidation direction
-  tid: number;               // Trade ID
+  tid: number;               // Trade ID (unique)
 }
 
+/**
+ * Response from HypeDexer API (original format)
+ */
 export interface LiquidationResponse {
   success: boolean;
   message: string;
   data: Liquidation[];
   total_count: number | null;
   execution_time_ms: number;
-  next_cursor: string | null;  // For pagination: "<time_ms>:<tid>"
+  next_cursor: string | null;  // For keyset pagination: "<time_ms>:<tid>"
   has_more: boolean;
 }
 
+/**
+ * Query parameters for liquidations API
+ */
 export interface LiquidationQueryParams {
   coin?: string;
   user?: string;
@@ -39,6 +45,52 @@ export interface LiquidationQueryParams {
   limit?: number;
   cursor?: string;
   order?: 'ASC' | 'DESC';
+  // Hours filter for recent liquidations
+  hours?: number;
+}
+
+/**
+ * Aggregated stats for liquidations
+ */
+export interface LiquidationStats {
+  totalVolume: number;        // Sum of notional_total
+  liquidationsCount: number;  // Total number of liquidations
+  longCount: number;          // Number of Long liquidations
+  shortCount: number;         // Number of Short liquidations
+  topCoin: string;            // Most liquidated coin
+  topCoinVolume: number;      // Volume of top coin
+}
+
+/**
+ * Stats response for single period
+ */
+export interface LiquidationStatsResponse {
+  success: boolean;
+  stats: LiquidationStats;
+  metadata: {
+    hours: number;
+    executionTimeMs: number;
+    pagesLoaded: number;
+  };
+}
+
+/**
+ * Stats response for ALL periods (/stats/all)
+ */
+export interface LiquidationStatsAllResponse {
+  success: boolean;
+  stats: {
+    '2h': LiquidationStats | null;
+    '4h': LiquidationStats | null;
+    '8h': LiquidationStats | null;
+    '12h': LiquidationStats | null;
+    '24h': LiquidationStats | null;
+  };
+  errors?: string[];
+  metadata: {
+    executionTimeMs: number;
+    cachedAt: string;
+  };
 }
 
 export class LiquidationsError extends Error {
