@@ -44,6 +44,7 @@ import leaderboardRoutes from './routes/leaderboard/leaderboard.routes';
 import xpRoutes from './routes/xp/xp.routes';
 
 import healthRoutes from './routes/health.routes';
+import liquidationsRoutes from './routes/liquidations/liquidations.routes';
 
 const app = express();
 const server = createServer(app);
@@ -125,6 +126,7 @@ app.use('/market/perp/globalstats', globalPerpStatsRoutes);
 app.use('/leaderboard', leaderboardRoutes);
 app.use('/xp', xpRoutes);
 app.use('/api/health', healthRoutes);
+app.use('/liquidations', liquidationsRoutes);
 
 const PORT = process.env.PORT || 3002;
 
