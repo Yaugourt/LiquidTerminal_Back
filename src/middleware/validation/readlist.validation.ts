@@ -55,8 +55,6 @@ export const validateCreateReadListItem = (req: Request, res: Response, next: Ne
     readListItemCreateSchema.parse(req.body);
     next();
   } catch (error) {
-    console.log('Validation error:', error);
-    console.log('Request body:', req.body);
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
