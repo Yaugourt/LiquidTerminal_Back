@@ -1,6 +1,6 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { LiquidationsService } from '../../services/liquidations/liquidations.service';
-import { LiquidationQueryParams, LiquidationsError } from '../../types/liquidations.types';
+import { LiquidationQueryParams, LiquidationsError, ChartPeriod } from '../../types/liquidations.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { liquidationsQuerySchema, recentLiquidationsQuerySchema } from '../../schemas/liquidations.schema';
@@ -114,6 +114,80 @@ router.get('/',
         execution_time_ms: 0,
         next_cursor: null,
         has_more: false
+      });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/chart-data
+ * Get aggregated chart data for visualization
+ * 
+ * Query params:
+ * - period: '2h' | '4h' | '8h' | '12h' | '24h' | '7d' | '30d' (default: '24h')
+ */
+router.get('/chart-data',
+  (async (req: Request, res: Response) => {
+    try {
+      const periodParam = (req.query.period as string) || '24h';
+      
+      // Validate period
+      const validPeriods: ChartPeriod[] = ['2h', '4h', '8h', '12h', '24h'];
+      if (!validPeriods.includes(periodParam as ChartPeriod)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid period. Valid values: ${validPeriods.join(', ')}`
+        });
+      }
+
+      const period = periodParam as ChartPeriod;
+      logDeduplicator.info('GET /liquidations/chart-data request', { period });
+
+      const response = await liquidationsService.getChartData(period);
+      res.json(response);
+    } catch (error) {
+      logDeduplicator.error('Error fetching chart data:', { error });
+
+      if (error instanceof LiquidationsError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          error: error.message
+        });
+      }
+      
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Internal server error'
+      });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/data
+ * Unified endpoint: stats + chart data for ALL periods in one call
+ * Reduces API calls by 67% compared to separate /stats/all + /chart-data
+ */
+router.get('/data',
+  (async (req: Request, res: Response) => {
+    try {
+      logDeduplicator.info('GET /liquidations/data request');
+
+      const response = await liquidationsService.getAllData();
+      res.json(response);
+    } catch (error) {
+      logDeduplicator.error('Error fetching unified liquidation data:', { error });
+
+      if (error instanceof LiquidationsError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          error: error.message
+        });
+      }
+      
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Internal server error'
       });
     }
   }) as RequestHandler

@@ -14,6 +14,7 @@ import { HypurrscanFeesClient } from '../clients/hypurrscan/fees.client';
 import { HyperliquidGlobalStatsClient } from '../clients/hyperliquid/globalstats.client';
 import { HyperliquidLeaderboardClient } from '../clients/hyperliquid/leaderboard/leaderboard.client';
 import { HypurrscanStakedHoldersClient } from '../clients/hypurrscan/stakedHolders.client';
+import { LiquidationsService } from '../services/liquidations/liquidations.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export class ClientInitializerService {
@@ -131,6 +132,10 @@ export class ClientInitializerService {
       // Initialiser le client Staked Holders
       const stakedHoldersClient = HypurrscanStakedHoldersClient.getInstance();
       this.clients.set('stakedHolders', stakedHoldersClient);
+
+      // Initialiser le service Liquidations (background polling)
+      const liquidationsService = LiquidationsService.getInstance();
+      this.clients.set('liquidations', liquidationsService);
 
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
