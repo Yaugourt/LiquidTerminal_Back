@@ -123,7 +123,7 @@ router.get('/', (async (req: Request, res: Response) => {
 // Route pour récupérer un projet par ID
 router.get('/:id', (async (req: Request, res: Response) => {
   try {
-    const projectId = parseInt(req.params.id);
+    const projectId = parseInt(String(req.params.id));
     if (isNaN(projectId)) {
       logDeduplicator.warn('Invalid project ID provided', { id: req.params.id });
       return res.status(400).json({ message: "ID de projet invalide" });
@@ -145,7 +145,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
 // Route pour mettre à jour un projet
 router.put('/:id', validatePrivyToken, requireModerator, (async (req: Request, res: Response) => {
   try {
-    const projectId = parseInt(req.params.id);
+    const projectId = parseInt(String(req.params.id));
     if (isNaN(projectId)) {
       logDeduplicator.warn('Invalid project ID provided', { id: req.params.id });
       return res.status(400).json({ message: "ID de projet invalide" });
@@ -167,7 +167,7 @@ router.put('/:id', validatePrivyToken, requireModerator, (async (req: Request, r
 // Route pour supprimer un projet
 router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, res: Response) => {
   try {
-    const projectId = parseInt(req.params.id);
+    const projectId = parseInt(String(req.params.id));
     if (isNaN(projectId)) {
       logDeduplicator.warn('Invalid project ID provided', { id: req.params.id });
       return res.status(400).json({ message: "ID de projet invalide" });
@@ -189,7 +189,7 @@ router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, re
 // Route pour assigner des catégories à un projet
 router.post('/:id/categories', validatePrivyToken, requireModerator, validateRequest(projectCategoriesUpdateSchema), (async (req: Request, res: Response) => {
   try {
-    const projectId = parseInt(req.params.id);
+    const projectId = parseInt(String(req.params.id));
     if (isNaN(projectId)) {
       logDeduplicator.warn('Invalid project ID provided', { id: req.params.id });
       return res.status(400).json({ message: "ID de projet invalide" });
@@ -237,7 +237,7 @@ router.post('/:id/categories', validatePrivyToken, requireModerator, validateReq
 // Route pour retirer des catégories d'un projet
 router.delete('/:id/categories', validatePrivyToken, requireModerator, validateRequest(projectCategoriesUpdateSchema), (async (req: Request, res: Response) => {
   try {
-    const projectId = parseInt(req.params.id);
+    const projectId = parseInt(String(req.params.id));
     if (isNaN(projectId)) {
       logDeduplicator.warn('Invalid project ID provided', { id: req.params.id });
       return res.status(400).json({ message: "ID de projet invalide" });
@@ -277,7 +277,7 @@ router.delete('/:id/categories', validatePrivyToken, requireModerator, validateR
 // Route pour récupérer les catégories d'un projet
 router.get('/:id/categories', (async (req: Request, res: Response) => {
   try {
-    const projectId = parseInt(req.params.id);
+    const projectId = parseInt(String(req.params.id));
     if (isNaN(projectId)) {
       logDeduplicator.warn('Invalid project ID provided', { id: req.params.id });
       return res.status(400).json({ message: "ID de projet invalide" });

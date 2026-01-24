@@ -113,7 +113,7 @@ router.get('/userlists', validatePrivyToken, validateWalletListQuery, (async (re
 // Récupérer une wallet list par ID
 router.get('/:id', (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -152,7 +152,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
 // Modifier une wallet list
 router.put('/:id', validatePrivyToken, validateUpdateWalletList, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -188,7 +188,7 @@ router.put('/:id', validatePrivyToken, validateUpdateWalletList, (async (req: Re
 // Supprimer une wallet list
 router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -224,7 +224,7 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
 // Copier une wallet list publique
 router.post('/:id/copy', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -256,7 +256,7 @@ router.post('/:id/copy', validatePrivyToken, (async (req: Request, res: Response
 // Lister les items d'une wallet list
 router.get('/:id/items', validatePrivyToken, validateWalletListItemQuery, (async (req: Request, res: Response) => {
   try {
-    const walletListId = parseInt(req.params.id, 10);
+    const walletListId = parseInt(String(req.params.id), 10);
     if (isNaN(walletListId)) {
       return res.status(400).json({ success: false, error: 'Invalid wallet list ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -286,7 +286,7 @@ router.get('/:id/items', validatePrivyToken, validateWalletListItemQuery, (async
 // Ajouter un wallet à une liste
 router.post('/:id/items', validatePrivyToken, validateCreateWalletListItem, (async (req: Request, res: Response) => {
   try {
-    const walletListId = parseInt(req.params.id, 10);
+    const walletListId = parseInt(String(req.params.id), 10);
     if (isNaN(walletListId)) {
       return res.status(400).json({ success: false, error: 'Invalid wallet list ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -330,7 +330,7 @@ router.post('/:id/items', validatePrivyToken, validateCreateWalletListItem, (asy
 // Modifier un item
 router.put('/items/:itemId', validatePrivyToken, validateUpdateWalletListItem, (async (req: Request, res: Response) => {
   try {
-    const itemId = parseInt(req.params.itemId, 10);
+    const itemId = parseInt(String(req.params.itemId), 10);
     if (isNaN(itemId)) {
       return res.status(400).json({ success: false, error: 'Invalid item ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -367,7 +367,7 @@ router.put('/items/:itemId', validatePrivyToken, validateUpdateWalletListItem, (
 // Supprimer un wallet d'une liste
 router.delete('/items/:itemId', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const itemId = parseInt(req.params.itemId, 10);
+    const itemId = parseInt(String(req.params.itemId), 10);
     if (isNaN(itemId)) {
       return res.status(400).json({ success: false, error: 'Invalid item ID format', code: 'INVALID_ID_FORMAT' });
     }

@@ -115,7 +115,7 @@ router.get('/my-lists', validatePrivyToken, (async (req: Request, res: Response)
 // Récupérer une read list par ID
 router.get('/:id', (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -154,7 +154,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
 // Modifier une read list
 router.put('/:id', validatePrivyToken, validateUpdateReadList, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -185,7 +185,7 @@ router.put('/:id', validatePrivyToken, validateUpdateReadList, (async (req: Requ
 // Supprimer une read list
 router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -218,7 +218,7 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
 // Ajouter un item à une read list
 router.post('/:id/items', validatePrivyToken, validateCreateReadListItem, (async (req: Request, res: Response) => {
   try {
-    const readListId = parseInt(req.params.id, 10);
+    const readListId = parseInt(String(req.params.id), 10);
     if (isNaN(readListId)) {
       return res.status(400).json({ success: false, error: 'Invalid read list ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -249,7 +249,7 @@ router.post('/:id/items', validatePrivyToken, validateCreateReadListItem, (async
 // Lister les items d'une read list
 router.get('/:id/items', validatePrivyToken, validateReadListItemQuery, (async (req: Request, res: Response) => {
   try {
-    const readListId = parseInt(req.params.id, 10);
+    const readListId = parseInt(String(req.params.id), 10);
     if (isNaN(readListId)) {
       return res.status(400).json({ success: false, error: 'Invalid read list ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -279,7 +279,7 @@ router.get('/:id/items', validatePrivyToken, validateReadListItemQuery, (async (
 // Modifier un item
 router.put('/items/:itemId', validatePrivyToken, validateUpdateReadListItem, (async (req: Request, res: Response) => {
   try {
-    const itemId = parseInt(req.params.itemId, 10);
+    const itemId = parseInt(String(req.params.itemId), 10);
     if (isNaN(itemId)) {
       return res.status(400).json({ success: false, error: 'Invalid item ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -298,7 +298,7 @@ router.put('/items/:itemId', validatePrivyToken, validateUpdateReadListItem, (as
 // Supprimer un item
 router.delete('/items/:itemId', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const itemId = parseInt(req.params.itemId, 10);
+    const itemId = parseInt(String(req.params.itemId), 10);
     if (isNaN(itemId)) {
       return res.status(400).json({ success: false, error: 'Invalid item ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -328,7 +328,7 @@ router.delete('/items/:itemId', validatePrivyToken, (async (req: Request, res: R
 // Marquer un item comme lu/non lu
 router.patch('/items/:itemId/read-status', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const itemId = parseInt(req.params.itemId, 10);
+    const itemId = parseInt(String(req.params.itemId), 10);
     if (isNaN(itemId)) {
       return res.status(400).json({ success: false, error: 'Invalid item ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -368,7 +368,7 @@ router.patch('/items/:itemId/read-status', validatePrivyToken, (async (req: Requ
 // Copier une read list publique
 router.post('/copy/:id', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }

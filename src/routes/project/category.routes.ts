@@ -43,7 +43,7 @@ router.get('/', (async (req: Request, res: Response) => {
 // Récupérer une catégorie par son ID
 router.get('/:id', (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -79,7 +79,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
 // Récupérer une catégorie avec ses projets
 router.get('/:id/projects', (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id);
+    const id = parseInt(String(req.params.id));
     
     if (isNaN(id)) {
       logDeduplicator.warn('Invalid category ID provided', { id: req.params.id });
@@ -136,7 +136,7 @@ router.post('/', validatePrivyToken, requireModerator, (async (req: Request, res
 // Mettre à jour une catégorie
 router.put('/:id', validatePrivyToken, requireModerator, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -173,7 +173,7 @@ router.put('/:id', validatePrivyToken, requireModerator, (async (req: Request, r
 // Supprimer une catégorie
 router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,

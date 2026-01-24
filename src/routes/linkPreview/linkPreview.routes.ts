@@ -76,7 +76,7 @@ router.get('/:id', validateRequest(linkPreviewByIdGetSchema), (async (req: Reque
       });
     }
 
-    const preview = await linkPreviewService.getByIdString(id);
+    const preview = await linkPreviewService.getByIdString(String(id));
 
     if (!preview) {
       return res.status(404).json({ 

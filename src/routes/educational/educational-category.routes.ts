@@ -92,7 +92,7 @@ router.get('/', validateGetRequest(educationalCategoriesGetSchema), (async (req:
 // Route pour récupérer une catégorie éducative par son ID
 router.get('/:id', validateGetRequest(educationalCategoryByIdGetSchema), (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -128,7 +128,7 @@ router.get('/:id', validateGetRequest(educationalCategoryByIdGetSchema), (async 
 // Route pour récupérer les ressources d'une catégorie
 router.get('/:id/resources', validateGetRequest(educationalCategoryResourcesGetSchema), (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -164,7 +164,7 @@ router.get('/:id/resources', validateGetRequest(educationalCategoryResourcesGetS
 // Route pour mettre à jour une catégorie éducative
 router.put('/:id', validatePrivyToken, requireModerator, validateUpdateEducationalCategory, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -201,7 +201,7 @@ router.put('/:id', validatePrivyToken, requireModerator, validateUpdateEducation
 // Route pour supprimer une catégorie éducative
 router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,

@@ -140,7 +140,7 @@ router.get('/', validateGetRequest(educationalResourcesGetSchema), (async (req: 
 // Route pour récupérer une ressource éducative par son ID
 router.get('/:id', validateGetRequest(educationalResourceByIdGetSchema), (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -176,7 +176,7 @@ router.get('/:id', validateGetRequest(educationalResourceByIdGetSchema), (async 
 // Route pour mettre à jour une ressource éducative
 router.put('/:id', validatePrivyToken, requireModerator, validateUpdateEducationalResource, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -213,7 +213,7 @@ router.put('/:id', validatePrivyToken, requireModerator, validateUpdateEducation
 // Route pour supprimer une ressource éducative
 router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -249,7 +249,7 @@ router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, re
 // Route pour assigner une ressource à une catégorie
 router.post('/:id/categories', validatePrivyToken, requireModerator, validateAssignResourceToCategory, (async (req: Request, res: Response) => {
   try {
-    const resourceId = parseInt(req.params.id, 10);
+    const resourceId = parseInt(String(req.params.id), 10);
     if (isNaN(resourceId)) {
       return res.status(400).json({
         success: false,
@@ -304,8 +304,8 @@ router.post('/:id/categories', validatePrivyToken, requireModerator, validateAss
 // Route pour retirer une ressource d'une catégorie
 router.delete('/:id/categories/:categoryId', validatePrivyToken, requireModerator, (async (req: Request, res: Response) => {
   try {
-    const resourceId = parseInt(req.params.id, 10);
-    const categoryId = parseInt(req.params.categoryId, 10);
+    const resourceId = parseInt(String(req.params.id), 10);
+    const categoryId = parseInt(String(req.params.categoryId), 10);
 
     if (isNaN(resourceId) || isNaN(categoryId)) {
       return res.status(400).json({
@@ -347,7 +347,7 @@ router.delete('/:id/categories/:categoryId', validatePrivyToken, requireModerato
 // Route pour récupérer les ressources d'une catégorie spécifique
 router.get('/category/:categoryId', validateGetRequest(educationalResourcesByCategoryGetSchema), (async (req: Request, res: Response) => {
   try {
-    const categoryId = parseInt(req.params.categoryId, 10);
+    const categoryId = parseInt(String(req.params.categoryId), 10);
     if (isNaN(categoryId)) {
       return res.status(400).json({
         success: false,
@@ -437,7 +437,7 @@ router.get('/moderation/pending/count', validatePrivyToken, requireModerator, (a
 // Route pour approuver une ressource
 router.patch('/:id/approve', validatePrivyToken, requireModerator, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -485,7 +485,7 @@ router.patch('/:id/approve', validatePrivyToken, requireModerator, (async (req: 
 // Route pour rejeter une ressource
 router.patch('/:id/reject', validatePrivyToken, requireModerator, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({
         success: false,
@@ -543,7 +543,7 @@ router.patch('/:id/reject', validatePrivyToken, requireModerator, (async (req: R
 // Route pour signaler une ressource (tout utilisateur connecté)
 router.post('/:id/report', validatePrivyToken, requireUser, (async (req: Request, res: Response) => {
   try {
-    const resourceId = parseInt(req.params.id, 10);
+    const resourceId = parseInt(String(req.params.id), 10);
     if (isNaN(resourceId)) {
       return res.status(400).json({
         success: false,
@@ -636,7 +636,7 @@ router.get('/moderation/reports', validatePrivyToken, requireModerator, (async (
 // Route pour récupérer les signalements d'une ressource spécifique
 router.get('/:id/reports', validatePrivyToken, requireModerator, (async (req: Request, res: Response) => {
   try {
-    const resourceId = parseInt(req.params.id, 10);
+    const resourceId = parseInt(String(req.params.id), 10);
     if (isNaN(resourceId)) {
       return res.status(400).json({
         success: false,
