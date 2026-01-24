@@ -20,9 +20,9 @@ import {
 } from '../../schemas/readlist.schema';
 import { readListRepository } from '../../repositories';
 import { BaseService } from '../../core/crudBase.service';
+import { prisma } from '../../core/prisma.service';
 import { cacheService } from '../../core/cache.service';
 import { CACHE_TTL } from '../../constants/cache.constants';
-import { ReadListItemService } from './readlist-item.service';
 import { xpService } from '../xp/xp.service';
 
 // Type pour les paramètres de requête
@@ -301,20 +301,21 @@ export class ReadListService extends BaseService<
         isPublic: false // Par défaut, la copie est privée
       });
 
-      // 5. Copier tous les items de la read list originale
+      // 5. Copier tous les items de la read list originale en batch (optimisé)
       if (originalReadList.items && originalReadList.items.length > 0) {
-        const readListItemService = new ReadListItemService();
+        const itemsData = originalReadList.items.map((item, index) => ({
+          readListId: newReadList.id,
+          resourceId: item.resource.id,
+          notes: item.notes || null,
+          order: item.order ?? index
+        }));
 
-        for (const item of originalReadList.items) {
-          await readListItemService.create({
-            readListId: newReadList.id,
-            resourceId: item.resource.id,
-            notes: item.notes || undefined,
-            order: item.order || undefined
-          });
-        }
+        await prisma.readListItem.createMany({
+          data: itemsData,
+          skipDuplicates: true
+        });
 
-        logDeduplicator.info('Read list items copied successfully', {
+        logDeduplicator.info('Read list items copied successfully (batch)', {
           originalReadListId: readListId,
           newReadListId: newReadList.id,
           itemsCount: originalReadList.items.length

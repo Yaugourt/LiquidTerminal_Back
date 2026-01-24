@@ -79,22 +79,25 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
 
 async function incrementAndGetCount(key: string, now: number, window: number): Promise<number> {
   try {
-    // ✅ Utiliser directement les commandes Redis au lieu de multi()
+    // ✅ Utiliser un pipeline Redis pour grouper les 4 commandes en 1 seul round-trip
     const redis = (redisService as any).redisNormal || (redisService as any).redis;
     
-    // Ajouter le timestamp actuel au sorted set
-    await redis.zadd(key, now, `${now}`);
+    const pipeline = redis.pipeline();
+    pipeline.zadd(key, now, `${now}`);           // Ajouter le timestamp actuel
+    pipeline.zremrangebyscore(key, 0, now - window); // Nettoyer les anciennes entrées
+    pipeline.zcard(key);                          // Compter les entrées restantes
+    pipeline.expire(key, window * 2);             // Définir une expiration
     
-    // Nettoyer les anciennes entrées
-    await redis.zremrangebyscore(key, 0, now - window);
+    const results = await pipeline.exec();
     
-    // Compter les entrées restantes
-    const count = await redis.zcard(key);
+    // Le résultat de zcard est à l'index 2 (3ème commande)
+    // Format: [[err, result], [err, result], ...]
+    const zcardResult = results?.[2];
+    if (zcardResult && zcardResult[0] === null) {
+      return zcardResult[1] as number;
+    }
     
-    // Définir une expiration sur la clé
-    await redis.expire(key, window * 2);
-    
-    return count;
+    return 0;
   } catch (error) {
     logDeduplicator.error('Rate limiter Redis error', { error });
     return 0;

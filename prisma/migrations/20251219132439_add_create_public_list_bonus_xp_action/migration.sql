@@ -1,2 +1,2 @@
--- AlterEnum
+-- Add CREATE_PUBLIC_LIST_BONUS to XpActionType enum
 ALTER TYPE "XpActionType" ADD VALUE 'CREATE_PUBLIC_LIST_BONUS';
