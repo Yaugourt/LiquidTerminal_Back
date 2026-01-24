@@ -121,7 +121,7 @@ router.get('/my-submissions', validatePrivyToken, (async (req: Request, res: Res
 // ========== ROUTE 2: GET /publicgoods/:id - Détail d'un projet ==========
 router.get('/:id', (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ 
         success: false,
@@ -303,7 +303,7 @@ router.put('/:id',
   validateRequest(publicGoodUpdateSchema),
   (async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(String(req.params.id), 10);
       if (isNaN(id)) {
         return res.status(400).json({ 
           success: false,
@@ -374,7 +374,7 @@ router.put('/:id',
 // ========== ROUTE 6: DELETE /publicgoods/:id - Supprimer un projet ==========
 router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ 
         success: false,
@@ -436,7 +436,7 @@ router.patch('/:id/review',
   validateRequest(publicGoodReviewSchema),
   (async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id, 10);
+      const id = parseInt(String(req.params.id), 10);
       if (isNaN(id)) {
         return res.status(400).json({ 
           success: false,

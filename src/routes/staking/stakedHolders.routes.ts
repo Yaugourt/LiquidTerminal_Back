@@ -91,7 +91,7 @@ router.get('/:address',
     try {
       const { address } = req.params;
       
-      const holder = await stakedHoldersService.getHolderByAddress(address);
+      const holder = await stakedHoldersService.getHolderByAddress(String(address));
 
       if (!holder) {
         return res.status(404).json({

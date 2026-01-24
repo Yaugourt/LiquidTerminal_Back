@@ -336,7 +336,7 @@ router.get("/", validateWalletQuery, (async (req: Request, res: Response) => {
 // Récupérer un wallet par ID
 router.get("/:id", (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -368,7 +368,7 @@ router.get("/:id", (async (req: Request, res: Response) => {
 // Modifier un wallet
 router.put("/:id", validatePrivyToken, validateUpdateWallet, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
@@ -421,7 +421,7 @@ router.put("/:id", validatePrivyToken, validateUpdateWallet, (async (req: Reques
 // Supprimer un wallet
 router.delete("/:id", validatePrivyToken, (async (req: Request, res: Response) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }

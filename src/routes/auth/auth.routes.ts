@@ -302,7 +302,7 @@ router.get("/referral/stats", validatePrivyToken, async (req: Request, res: Resp
 // Route pour valider un name de parrain
 router.get("/referral/validate/:name", validatePrivyToken, async (req: Request, res: Response) => {
   try {
-    const name = req.params.name;
+    const name = String(req.params.name);
     const isValid = await referralService.validateReferrerName(name);
     
     logDeduplicator.info('Referrer validation completed', { 

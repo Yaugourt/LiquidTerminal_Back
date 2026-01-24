@@ -63,7 +63,7 @@ router.get("/admin/users", validatePrivyToken, requireAdmin, (req: Request, res:
 
 // Route admin pour récupérer un utilisateur spécifique
 router.get("/admin/users/:userId", validatePrivyToken, requireAdmin, (req: Request, res: Response): void => {
-  const userId = parseInt(req.params.userId);
+  const userId = parseInt(String(req.params.userId));
 
   if (!userId || isNaN(userId)) {
     res.status(400).json({
@@ -120,7 +120,7 @@ router.get("/admin/users/:userId", validatePrivyToken, requireAdmin, (req: Reque
 
 // Route admin pour modifier un utilisateur
 router.put("/admin/users/:userId", validatePrivyToken, requireAdmin, validateAdminUserUpdate, (req: Request, res: Response): void => {
-  const userId = parseInt(req.params.userId);
+  const userId = parseInt(String(req.params.userId));
 
   if (!userId || isNaN(userId)) {
     res.status(400).json({
@@ -179,7 +179,7 @@ router.put("/admin/users/:userId", validatePrivyToken, requireAdmin, validateAdm
 
 // Route admin pour supprimer un utilisateur
 router.delete("/admin/users/:userId", validatePrivyToken, requireAdmin, (req: Request, res: Response): void => {
-  const userId = parseInt(req.params.userId);
+  const userId = parseInt(String(req.params.userId));
 
   if (!userId || isNaN(userId)) {
     res.status(400).json({

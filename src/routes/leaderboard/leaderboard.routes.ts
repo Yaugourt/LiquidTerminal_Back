@@ -122,8 +122,8 @@ router.get('/stats', (async (req: Request, res: Response) => {
  */
 router.get('/user/:ethAddress', (async (req: Request, res: Response) => {
   try {
-    const { ethAddress } = req.params;
-    
+    const ethAddress = String(req.params.ethAddress);
+
     if (!ethAddress || !/^0x[a-fA-F0-9]{40}$/.test(ethAddress)) {
       return res.status(400).json({
         success: false,
