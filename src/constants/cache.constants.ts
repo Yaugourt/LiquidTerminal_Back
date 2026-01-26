@@ -12,7 +12,9 @@ export const CACHE_PREFIX = {
   MARKET: 'market',
   STATS: 'stats',
   WALLET: 'wallet',
-  PUBLIC_GOOD: 'publicgood'
+  PUBLIC_GOOD: 'publicgood',
+  SSE: 'sse',
+  LIQUIDATIONS: 'liquidations'
 } as const;
 
 // Durées de vie par défaut (en secondes)
@@ -55,5 +57,8 @@ export const CACHE_KEYS = {
   STATS: (id: string) => `${CACHE_PREFIX.STATS}:${id}`,
   STATS_LIST: (params: string) => `${CACHE_PREFIX.STATS}:list:${params}`,
   WALLET: (id: number) => `${CACHE_PREFIX.WALLET}:${id}`,
-  WALLET_LIST: (params: string) => `${CACHE_PREFIX.WALLET}:list:${params}`
+  WALLET_LIST: (params: string) => `${CACHE_PREFIX.WALLET}:list:${params}`,
+  // SSE-related keys
+  SSE_LAST_TID: `${CACHE_PREFIX.SSE}:liquidations:lastTid`,
+  SSE_BROADCAST_CHANNEL: `${CACHE_PREFIX.SSE}:liquidations:broadcast`
 } as const; 

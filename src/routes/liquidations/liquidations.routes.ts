@@ -1,16 +1,16 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { LiquidationsService } from '../../services/liquidations/liquidations.service';
+import { SSEManagerService } from '../../services/liquidations/sse-manager.service';
 import { LiquidationQueryParams, LiquidationsError, ChartPeriod } from '../../types/liquidations.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { liquidationsQuerySchema, recentLiquidationsQuerySchema } from '../../schemas/liquidations.schema';
+import { sseStreamQuerySchema } from '../../schemas/sse.schema';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
 const liquidationsService = LiquidationsService.getInstance();
-
-// Apply rate limiter to all routes
-router.use(marketRateLimiter);
+const sseManager = SSEManagerService.getInstance();
 
 /**
  * Parse validated query parameters into LiquidationQueryParams
@@ -81,6 +81,7 @@ function parseQueryParams(query: Request['query']): LiquidationQueryParams {
  * Historical liquidations with filters and keyset pagination
  */
 router.get('/',
+  marketRateLimiter,
   validateRequest(liquidationsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -127,6 +128,7 @@ router.get('/',
  * - period: '2h' | '4h' | '8h' | '12h' | '24h' | '7d' | '30d' (default: '24h')
  */
 router.get('/chart-data',
+  marketRateLimiter,
   (async (req: Request, res: Response) => {
     try {
       const periodParam = (req.query.period as string) || '24h';
@@ -169,6 +171,7 @@ router.get('/chart-data',
  * Reduces API calls by 67% compared to separate /stats/all + /chart-data
  */
 router.get('/data',
+  marketRateLimiter,
   (async (req: Request, res: Response) => {
     try {
       logDeduplicator.info('GET /liquidations/data request');
@@ -199,6 +202,7 @@ router.get('/data',
  * Uses sequential fetching and caching to avoid rate limiting
  */
 router.get('/stats/all',
+  marketRateLimiter,
   (async (req: Request, res: Response) => {
     try {
       logDeduplicator.info('GET /liquidations/stats/all request');
@@ -252,6 +256,7 @@ router.get('/stats/all',
  * Supports: hours=2, hours=4, hours=8, hours=12, hours=24
  */
 router.get('/recent',
+  marketRateLimiter,
   validateRequest(recentLiquidationsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -287,6 +292,81 @@ router.get('/recent',
         has_more: false
       });
     }
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/stream
+ * Server-Sent Events endpoint for real-time liquidation updates
+ *
+ * Query params:
+ * - coin: Filter by coin (optional, e.g., "BTC")
+ * - min_amount_dollars: Minimum notional value filter (optional)
+ * - last_event_id: Resume from this event ID (optional)
+ *
+ * Headers:
+ * - Last-Event-ID: Alternative way to specify resume point (SSE standard)
+ *
+ * Note: This route does NOT use marketRateLimiter - SSE has its own connection limits
+ */
+router.get('/stream',
+  validateRequest(sseStreamQuerySchema),
+  (async (req: Request, res: Response) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+
+    // Parse filters from query
+    const filters = {
+      coin: req.query.coin as string | undefined,
+      minAmountDollars: req.query.min_amount_dollars
+        ? parseFloat(String(req.query.min_amount_dollars))
+        : undefined
+    };
+
+    // Get last event ID (from query or header)
+    const lastEventId = req.query.last_event_id
+      ? parseInt(String(req.query.last_event_id), 10)
+      : req.headers['last-event-id']
+        ? parseInt(String(req.headers['last-event-id']), 10)
+        : undefined;
+
+    logDeduplicator.info('SSE stream request', { ip, filters, lastEventId });
+
+    // Add client
+    const clientId = await sseManager.addClient(res, ip, filters, lastEventId);
+
+    if (!clientId) {
+      return res.status(429).json({
+        success: false,
+        error: 'Connection limit reached',
+        code: 'SSE_CONNECTION_LIMIT'
+      });
+    }
+
+    // Handle client disconnect
+    req.on('close', () => {
+      sseManager.removeClient(clientId);
+    });
+
+    req.on('error', () => {
+      sseManager.removeClient(clientId);
+    });
+
+    // Keep connection open - response handled by SSE manager
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/stream/stats
+ * Get current SSE connection statistics (for monitoring)
+ */
+router.get('/stream/stats',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    const stats = sseManager.getStats();
+    res.json({
+      success: true,
+      data: stats
+    });
   }) as RequestHandler
 );
 

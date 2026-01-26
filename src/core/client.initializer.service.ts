@@ -15,6 +15,7 @@ import { HyperliquidGlobalStatsClient } from '../clients/hyperliquid/globalstats
 import { HyperliquidLeaderboardClient } from '../clients/hyperliquid/leaderboard/leaderboard.client';
 import { HypurrscanStakedHoldersClient } from '../clients/hypurrscan/stakedHolders.client';
 import { LiquidationsService } from '../services/liquidations/liquidations.service';
+import { SSEManagerService } from '../services/liquidations/sse-manager.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export class ClientInitializerService {
@@ -137,6 +138,12 @@ export class ClientInitializerService {
       const liquidationsService = LiquidationsService.getInstance();
       this.clients.set('liquidations', liquidationsService);
 
+      // Initialiser le SSE Manager pour les liquidations temps réel
+      const sseManager = SSEManagerService.getInstance();
+      await sseManager.initialize();
+      this.clients.set('sseManager', sseManager);
+      logDeduplicator.info('SSE Manager initialized successfully');
+
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
@@ -173,6 +180,15 @@ export class ClientInitializerService {
           logDeduplicator.info(`Stopped polling for ${name} client`);
         } catch (error) {
           logDeduplicator.error(`Error stopping polling for ${name} client:`, { error });
+        }
+      }
+      // Handle SSE Manager shutdown
+      if ('shutdown' in client && name === 'sseManager') {
+        try {
+          client.shutdown();
+          logDeduplicator.info('SSE Manager shutdown successfully');
+        } catch (error) {
+          logDeduplicator.error('Error shutting down SSE Manager:', { error });
         }
       }
     }

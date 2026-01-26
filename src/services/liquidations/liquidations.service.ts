@@ -1,7 +1,7 @@
 import { HLIndexerLiquidationsClient } from '../../clients/hlindexer/liquidations/liquidations.client';
-import { 
-  LiquidationResponse, 
-  LiquidationQueryParams, 
+import {
+  LiquidationResponse,
+  LiquidationQueryParams,
   LiquidationsError,
   LiquidationStatsAllResponse,
   LiquidationStats,
@@ -15,6 +15,7 @@ import {
 } from '../../types/liquidations.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { redisService } from '../../core/redis.service';
+import { SSEManagerService } from './sse-manager.service';
 
 /**
  * Period configuration for chart data aggregation
@@ -39,28 +40,32 @@ export class LiquidationsService {
   private static readonly DEFAULT_LIMIT = 100;
   private static readonly MAX_PAGES_FOR_STATS = 5; // Max 5 pages (5000 liquidations)
   
-  // Cache TTLs - increased to reduce API calls
-  private static readonly DATA_CACHE_TTL = 180; // 3 minutes for unified data
-  private static readonly STATS_CACHE_TTL = 180; // 3 minutes for stats
-  private static readonly RECENT_CACHE_TTL = 180; // 3 minutes for recent
+  // Cache TTLs - optimized for 30s polling
+  private static readonly DATA_CACHE_TTL = 25; // Just under polling interval
+  private static readonly STATS_CACHE_TTL = 25; // Just under polling interval
+  private static readonly RECENT_CACHE_TTL = 25; // Just under polling interval
 
-  // Background refresh configuration
-  private static readonly REFRESH_INTERVAL_MS = 300_000; // Refresh every 5 minutes (reduces API calls)
+  // Background refresh configuration - 30 seconds for near real-time SSE
+  private static readonly REFRESH_INTERVAL_MS = 30_000; // Refresh every 30 seconds
   private refreshTimer: NodeJS.Timeout | null = null;
   private isRefreshing = false;
 
   // Chart data configuration per period (max 24h)
   private static readonly PERIOD_CONFIG: Record<ChartPeriod, PeriodConfig> = {
-    '2h':  { hours: 2,   interval: '5m',  intervalMs: 5 * 60 * 1000,   useStatsCache: true, maxPages: 5, cacheTTL: 180 },
-    '4h':  { hours: 4,   interval: '5m',  intervalMs: 5 * 60 * 1000,   useStatsCache: true, maxPages: 5, cacheTTL: 180 },
-    '8h':  { hours: 8,   interval: '15m', intervalMs: 15 * 60 * 1000,  useStatsCache: true, maxPages: 5, cacheTTL: 180 },
-    '12h': { hours: 12,  interval: '15m', intervalMs: 15 * 60 * 1000,  useStatsCache: true, maxPages: 5, cacheTTL: 180 },
-    '24h': { hours: 24,  interval: '30m', intervalMs: 30 * 60 * 1000,  useStatsCache: true, maxPages: 5, cacheTTL: 180 },
+    '2h':  { hours: 2,   interval: '5m',  intervalMs: 5 * 60 * 1000,   useStatsCache: true, maxPages: 5, cacheTTL: 25 },
+    '4h':  { hours: 4,   interval: '5m',  intervalMs: 5 * 60 * 1000,   useStatsCache: true, maxPages: 5, cacheTTL: 25 },
+    '8h':  { hours: 8,   interval: '15m', intervalMs: 15 * 60 * 1000,  useStatsCache: true, maxPages: 5, cacheTTL: 25 },
+    '12h': { hours: 12,  interval: '15m', intervalMs: 15 * 60 * 1000,  useStatsCache: true, maxPages: 5, cacheTTL: 25 },
+    '24h': { hours: 24,  interval: '30m', intervalMs: 30 * 60 * 1000,  useStatsCache: true, maxPages: 5, cacheTTL: 25 },
   };
 
 
+  // SSE Manager for real-time broadcasting
+  private readonly sseManager: SSEManagerService;
+
   private constructor() {
     this.client = HLIndexerLiquidationsClient.getInstance();
+    this.sseManager = SSEManagerService.getInstance();
   }
 
   public static getInstance(): LiquidationsService {
@@ -152,6 +157,9 @@ export class LiquidationsService {
         pages: pagesLoaded
       });
 
+      // Detect and broadcast new liquidations via SSE
+      await this.detectAndBroadcastNewLiquidations(allLiquidations);
+
       // Build and cache unified data for /liquidations/data endpoint
       await this.buildAndCacheUnifiedData(allLiquidations);
 
@@ -169,6 +177,45 @@ export class LiquidationsService {
       });
     } finally {
       this.isRefreshing = false;
+    }
+  }
+
+  /**
+   * Detect and broadcast new liquidations via SSE
+   * Compares current liquidations with last seen tid and broadcasts new ones
+   */
+  private async detectAndBroadcastNewLiquidations(liquidations: Liquidation[]): Promise<void> {
+    try {
+      const lastSeenTid = await this.sseManager.getLastSeenTid();
+
+      if (lastSeenTid === null) {
+        // First run - just set the baseline, don't broadcast
+        if (liquidations.length > 0) {
+          const maxTid = Math.max(...liquidations.map(l => l.tid));
+          await this.sseManager.setLastSeenTid(maxTid);
+          logDeduplicator.info('SSE baseline established', { maxTid });
+        }
+        return;
+      }
+
+      // Filter for new liquidations (tid > lastSeenTid)
+      const newLiquidations = liquidations
+        .filter(liq => liq.tid > lastSeenTid)
+        .sort((a, b) => a.tid - b.tid); // Chronological order
+
+      if (newLiquidations.length > 0) {
+        await this.sseManager.broadcastNewLiquidations(newLiquidations);
+        logDeduplicator.info('SSE broadcasting new liquidations', {
+          count: newLiquidations.length,
+          previousTid: lastSeenTid,
+          newMaxTid: newLiquidations[newLiquidations.length - 1].tid
+        });
+      }
+    } catch (error) {
+      logDeduplicator.error('SSE broadcast detection failed', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Don't throw - polling should continue even if SSE fails
     }
   }
 
