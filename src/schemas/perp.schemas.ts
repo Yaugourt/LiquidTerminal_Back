@@ -7,7 +7,7 @@ export const marketPerpGetSchema = z.object({
   query: z.object({
     token: z.string().optional(),
     pair: z.string().optional(),
-    sortBy: z.enum(['volume', 'openInterest', 'change24h']).optional().default('volume'),
+    sortBy: z.enum(['volume', 'openInterest', 'change24h', 'name', 'price']).optional().default('volume'),
     sortOrder: z.enum(['asc', 'desc']).optional().default('desc'),
     limit: z.string().regex(/^\d+$/).transform(Number).refine(val => val > 0 && val <= 1000, {
       message: 'Limit must be between 1 and 1000'
@@ -26,7 +26,7 @@ export const marketPerpQuerySchema = z.object({
   query: z.object({
     token: z.string().optional(),
     pair: z.string().optional(),
-    sortBy: z.enum(['volume', 'openInterest', 'change24h']).optional().default('volume'),
+    sortBy: z.enum(['volume', 'openInterest', 'change24h', 'name', 'price']).optional().default('volume'),
     sortOrder: z.enum(['asc', 'desc']).optional().default('desc'),
     limit: z.string().regex(/^\d+$/).transform(Number).refine(val => val > 0 && val <= 1000, {
       message: 'Limit must be between 1 and 1000'

@@ -20,7 +20,7 @@ router.get('/', validateGetRequest(marketPerpGetSchema), async (req: Request, re
     } = req.query;
 
     const result = await perpMarketService.getPerpMarketsData({
-      sortBy: sortBy as 'volume' | 'openInterest' | 'change24h',
+      sortBy: sortBy as 'volume' | 'openInterest' | 'change24h' | 'name' | 'price',
       sortOrder: sortOrder as 'asc' | 'desc',
       limit: limit ? Number(limit) : undefined,
       page: page ? Number(page) : undefined,
