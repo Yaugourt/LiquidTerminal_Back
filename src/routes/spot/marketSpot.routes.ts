@@ -34,7 +34,7 @@ router.get('/', validateGetRequest(marketSpotGetSchema), async (req: Request, re
     } = req.query;
 
     const result = await marketService.getMarketsData({
-      sortBy: sortBy as 'volume' | 'marketCap' | 'change24h',
+      sortBy: sortBy as 'volume' | 'marketCap' | 'change24h' | 'name' | 'price',
       sortOrder: sortOrder as 'asc' | 'desc',
       limit: limit ? Number(limit) : undefined,
       page: page ? Number(page) : undefined,
