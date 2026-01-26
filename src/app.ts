@@ -154,12 +154,16 @@ clientInitializer.initialize()
 // Gestion de l'arrêt propre de l'application
 process.on('SIGINT', async () => {
   logDeduplicator.info('Received SIGINT. Performing graceful shutdown...');
+  // Stop all polling and shutdown SSE connections
+  clientInitializer.stopAllPolling();
   await prisma.$disconnect();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   logDeduplicator.info('Received SIGTERM. Performing graceful shutdown...');
+  // Stop all polling and shutdown SSE connections
+  clientInitializer.stopAllPolling();
   await prisma.$disconnect();
   process.exit(0);
 });
