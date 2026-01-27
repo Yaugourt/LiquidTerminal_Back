@@ -30,7 +30,7 @@ export class SSEManagerService {
   private static readonly MAX_CONNECTIONS_PER_IP = 3;          // Limit per IP
   private static readonly MAX_TOTAL_CONNECTIONS = 1000;        // Server limit
   private static readonly REDIS_CHANNEL = 'liquidations:sse:broadcast';
-  private static readonly LAST_TID_KEY = 'liquidations:sse:lastTid';
+  private static readonly LAST_TIME_MS_KEY = 'liquidations:sse:lastTimeMs';
   private static readonly MISSED_DATA_LIMIT = 100;             // Max missed events to send
 
   // State
@@ -54,7 +54,10 @@ export class SSEManagerService {
    * - Start heartbeat timer
    */
   public async initialize(): Promise<void> {
-    if (this.isSubscribed) return;
+    if (this.isSubscribed) {
+      logDeduplicator.warn('SSE Manager already initialized');
+      return;
+    }
 
     // Subscribe to Redis channel for broadcast messages
     await redisService.subscribe(
@@ -68,7 +71,8 @@ export class SSEManagerService {
 
     logDeduplicator.info('SSE Manager initialized', {
       channel: SSEManagerService.REDIS_CHANNEL,
-      heartbeatIntervalMs: SSEManagerService.HEARTBEAT_INTERVAL_MS
+      heartbeatIntervalMs: SSEManagerService.HEARTBEAT_INTERVAL_MS,
+      isSubscribed: this.isSubscribed
     });
   }
 
@@ -174,11 +178,11 @@ export class SSEManagerService {
   public async broadcastNewLiquidations(liquidations: Liquidation[]): Promise<void> {
     if (liquidations.length === 0) return;
 
-    // Update last seen tid in Redis
-    const maxTid = Math.max(...liquidations.map(l => l.tid));
+    // Update last seen time_ms in Redis (use time_ms instead of tid)
+    const maxTimeMs = Math.max(...liquidations.map(l => l.time_ms));
     await redisService.set(
-      SSEManagerService.LAST_TID_KEY,
-      maxTid.toString()
+      SSEManagerService.LAST_TIME_MS_KEY,
+      maxTimeMs.toString()
     );
 
     // Publish to Redis for cross-instance communication
@@ -193,24 +197,24 @@ export class SSEManagerService {
 
     logDeduplicator.info('SSE broadcast published', {
       count: liquidations.length,
-      maxTid,
+      maxTimeMs,
       connectedClients: this.clients.size
     });
   }
 
   /**
-   * Get the last seen trade ID
+   * Get the last seen timestamp (time_ms)
    */
-  public async getLastSeenTid(): Promise<number | null> {
-    const tid = await redisService.get(SSEManagerService.LAST_TID_KEY);
-    return tid ? parseInt(tid, 10) : null;
+  public async getLastSeenTimeMs(): Promise<number | null> {
+    const timeMs = await redisService.get(SSEManagerService.LAST_TIME_MS_KEY);
+    return timeMs ? parseInt(timeMs, 10) : null;
   }
 
   /**
-   * Set the last seen trade ID (for initialization)
+   * Set the last seen timestamp (time_ms) for initialization
    */
-  public async setLastSeenTid(tid: number): Promise<void> {
-    await redisService.set(SSEManagerService.LAST_TID_KEY, tid.toString());
+  public async setLastSeenTimeMs(timeMs: number): Promise<void> {
+    await redisService.set(SSEManagerService.LAST_TIME_MS_KEY, timeMs.toString());
   }
 
   /**
@@ -219,6 +223,12 @@ export class SSEManagerService {
   private handleBroadcastMessage(messageStr: string): void {
     try {
       const message: SSEBroadcastMessage = JSON.parse(messageStr);
+      const clientCount = this.clients.size;
+
+      logDeduplicator.info('SSE received broadcast from Redis', {
+        liquidationsCount: message.newLiquidations.length,
+        connectedClients: clientCount
+      });
 
       for (const client of this.clients.values()) {
         const filteredLiquidations = this.filterLiquidations(
@@ -231,11 +241,16 @@ export class SSEManagerService {
             this.sendEvent(client, {
               type: 'liquidation',
               data: liquidation,
-              id: liquidation.tid,
+              id: liquidation.time_ms, // Use time_ms as event ID instead of tid
               timestamp: message.timestamp
             });
-            client.lastEventId = liquidation.tid;
+            client.lastEventId = liquidation.time_ms;
           }
+
+          logDeduplicator.info('SSE sent liquidations to client', {
+            clientId: client.id,
+            count: filteredLiquidations.length
+          });
         }
       }
     } catch (error) {
@@ -261,6 +276,10 @@ export class SSEManagerService {
       if (filters.minAmountDollars && liq.notional_total < filters.minAmountDollars) {
         return false;
       }
+      // User (wallet address) filter
+      if (filters.user && liq.liquidated_user.toLowerCase() !== filters.user.toLowerCase()) {
+        return false;
+      }
       return true;
     });
   }
@@ -279,6 +298,12 @@ export class SSEManagerService {
       message += `data: ${JSON.stringify(event)}\n\n`;
 
       client.res.write(message);
+
+      // CRITICAL: Flush immediately for SSE to work properly
+      // Without this, data stays in Node.js buffer and never reaches client
+      if (typeof client.res.flush === 'function') {
+        client.res.flush();
+      }
     } catch (error) {
       // Client likely disconnected
       logDeduplicator.warn('SSE send failed, removing client', {
@@ -291,6 +316,7 @@ export class SSEManagerService {
 
   /**
    * Send missed liquidations on reconnection
+   * Uses time_ms for filtering since tids are not monotonically increasing
    */
   private async sendMissedLiquidations(
     client: SSEClient,
@@ -301,15 +327,15 @@ export class SSEManagerService {
       const { LiquidationsService } = await import('./liquidations.service');
       const liquidationsService = LiquidationsService.getInstance();
 
-      // Fetch recent liquidations and filter by tid > lastEventId
+      // Fetch recent liquidations and filter by time_ms > lastEventId
       const response = await liquidationsService.getRecentLiquidations({
         hours: 1, // Only look back 1 hour for missed data
         limit: SSEManagerService.MISSED_DATA_LIMIT
       });
 
       const missedLiquidations = response.data
-        .filter(liq => liq.tid > lastEventId)
-        .sort((a, b) => a.tid - b.tid); // Send in chronological order
+        .filter(liq => liq.time_ms > lastEventId)
+        .sort((a, b) => a.time_ms - b.time_ms); // Send in chronological order by timestamp
 
       const filteredMissed = this.filterLiquidations(
         missedLiquidations,
@@ -321,10 +347,10 @@ export class SSEManagerService {
           this.sendEvent(client, {
             type: 'liquidation',
             data: liquidation,
-            id: liquidation.tid,
+            id: liquidation.time_ms, // Use time_ms as event ID
             timestamp: new Date().toISOString()
           });
-          client.lastEventId = liquidation.tid;
+          client.lastEventId = liquidation.time_ms;
         }
 
         logDeduplicator.info('SSE sent missed liquidations', {
@@ -348,11 +374,19 @@ export class SSEManagerService {
 
     this.heartbeatTimer = setInterval(() => {
       const now = new Date().toISOString();
+      const clientCount = this.clients.size;
 
-      for (const client of this.clients.values()) {
-        this.sendEvent(client, {
-          type: 'heartbeat',
-          data: null,
+      if (clientCount > 0) {
+        for (const client of this.clients.values()) {
+          this.sendEvent(client, {
+            type: 'heartbeat',
+            data: null,
+            timestamp: now
+          });
+        }
+
+        logDeduplicator.info('SSE heartbeat sent', {
+          connectedClients: clientCount,
           timestamp: now
         });
       }

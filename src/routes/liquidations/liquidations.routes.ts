@@ -312,6 +312,10 @@ router.get('/recent',
 router.get('/stream',
   validateRequest(sseStreamQuerySchema),
   (async (req: Request, res: Response) => {
+    // Disable timeouts for SSE long-lived connections
+    req.setTimeout(0);
+    res.setTimeout(0);
+
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
 
     // Parse filters from query
@@ -319,7 +323,8 @@ router.get('/stream',
       coin: req.query.coin as string | undefined,
       minAmountDollars: req.query.min_amount_dollars
         ? parseFloat(String(req.query.min_amount_dollars))
-        : undefined
+        : undefined,
+      user: req.query.user as string | undefined
     };
 
     // Get last event ID (from query or header)

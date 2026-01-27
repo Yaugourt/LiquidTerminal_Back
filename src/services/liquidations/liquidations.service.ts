@@ -182,40 +182,70 @@ export class LiquidationsService {
 
   /**
    * Detect and broadcast new liquidations via SSE
-   * Compares current liquidations with last seen tid and broadcasts new ones
+   * Compares current liquidations with last seen time_ms and broadcasts new ones
+   * Uses time_ms instead of tid because tids are not guaranteed to be monotonically increasing
    */
   private async detectAndBroadcastNewLiquidations(liquidations: Liquidation[]): Promise<void> {
     try {
-      const lastSeenTid = await this.sseManager.getLastSeenTid();
+      // Filter invalid timestamps (corrupted data from API)
+      const now = Date.now();
+      const twoYearsAgo = now - (2 * 365 * 24 * 60 * 60 * 1000);
+      const oneYearFromNow = now + (365 * 24 * 60 * 60 * 1000);
 
-      if (lastSeenTid === null) {
-        // First run - just set the baseline, don't broadcast
-        if (liquidations.length > 0) {
-          const maxTid = Math.max(...liquidations.map(l => l.tid));
-          await this.sseManager.setLastSeenTid(maxTid);
-          logDeduplicator.info('SSE baseline established', { maxTid });
+      const validLiquidations = liquidations.filter(liq => {
+        const isValid = liq.time_ms >= twoYearsAgo && liq.time_ms <= oneYearFromNow;
+        if (!isValid) {
+          logDeduplicator.warn('Invalid timestamp filtered', {
+            tid: liq.tid,
+            time_ms: liq.time_ms,
+            coin: liq.coin
+          });
+        }
+        return isValid;
+      });
+
+      const lastSeenTimeMs = await this.sseManager.getLastSeenTimeMs();
+      const currentMaxTimeMs = validLiquidations.length > 0 ? Math.max(...validLiquidations.map(l => l.time_ms)) : 0;
+
+      logDeduplicator.info('SSE detection check', {
+        lastSeenTimeMs,
+        currentMaxTimeMs,
+        totalLiquidations: liquidations.length,
+        validLiquidations: validLiquidations.length
+      });
+
+      if (lastSeenTimeMs === null) {
+        // First run - set baseline
+        if (validLiquidations.length > 0) {
+          const maxTimeMs = Math.max(...validLiquidations.map(l => l.time_ms));
+          await this.sseManager.setLastSeenTimeMs(maxTimeMs);
+          logDeduplicator.info('SSE baseline established', { maxTimeMs });
         }
         return;
       }
 
-      // Filter for new liquidations (tid > lastSeenTid)
-      const newLiquidations = liquidations
-        .filter(liq => liq.tid > lastSeenTid)
-        .sort((a, b) => a.tid - b.tid); // Chronological order
+      // Filter new liquidations
+      const newLiquidations = validLiquidations
+        .filter(liq => liq.time_ms > lastSeenTimeMs)
+        .sort((a, b) => a.time_ms - b.time_ms);
 
       if (newLiquidations.length > 0) {
         await this.sseManager.broadcastNewLiquidations(newLiquidations);
         logDeduplicator.info('SSE broadcasting new liquidations', {
           count: newLiquidations.length,
-          previousTid: lastSeenTid,
-          newMaxTid: newLiquidations[newLiquidations.length - 1].tid
+          previousTimeMs: lastSeenTimeMs,
+          newMaxTimeMs: newLiquidations[newLiquidations.length - 1].time_ms
+        });
+      } else {
+        logDeduplicator.info('SSE no new liquidations', {
+          lastSeenTimeMs,
+          currentMaxTimeMs
         });
       }
     } catch (error) {
       logDeduplicator.error('SSE broadcast detection failed', {
         error: error instanceof Error ? error.message : String(error)
       });
-      // Don't throw - polling should continue even if SSE fails
     }
   }
 

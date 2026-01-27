@@ -10,6 +10,9 @@ export const sseStreamQuerySchema = z.object({
       .number()
       .min(0, 'min_amount_dollars must be >= 0')
       .optional(),
+    user: z.string()
+      .regex(/^0x[a-fA-F0-9]{40}$/, 'user must be a valid Ethereum address')
+      .optional(),
     last_event_id: z.coerce
       .number()
       .int()

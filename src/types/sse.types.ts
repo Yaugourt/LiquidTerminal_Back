@@ -19,6 +19,7 @@ export interface SSEClient {
 export interface SSEClientFilters {
   coin?: string;                       // Filter by coin (e.g., "BTC", "ETH")
   minAmountDollars?: number;           // Minimum notional value filter
+  user?: string;                       // Filter by liquidated wallet address
 }
 
 /**
