@@ -485,3 +485,53 @@ model ResourceReport {
   @@index([reportedBy])
   @@map("resource_reports")
 }
+
+// === TELEGRAM BOT TABLES ===
+
+model TelegramUser {
+  id           String   @id @default(cuid())
+  telegramId   BigInt   @unique @map("telegram_id")
+  username     String?  @db.VarChar(255)
+  firstName    String?  @map("first_name") @db.VarChar(255)
+  linkedUserId Int?     @unique @map("linked_user_id")
+
+  subscriptions TelegramSubscription[]
+  sentAlerts    TelegramSentAlert[]
+
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("telegram_users")
+}
+
+model TelegramSubscription {
+  id               String       @id @default(cuid())
+  telegramUser     TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  name             String       @db.VarChar(100)
+  telegramUserId   String       @map("telegram_user_id")
+  isActive         Boolean      @default(true) @map("is_active")
+  subscriptionType String       @map("subscription_type") @db.VarChar(20)
+  filterCoins      String[]     @default([]) @map("filter_coins")
+  filterMinUsd     Float        @default(0) @map("filter_min_usd")
+  filterWallets    String[]     @default([]) @map("filter_wallets")
+  useLinkedWallets Boolean      @default(false) @map("use_linked_wallets")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@map("telegram_subscriptions")
+}
+
+model TelegramSentAlert {
+  id             String       @id @default(cuid())
+  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String       @map("telegram_user_id")
+  liquidationId  String       @map("liquidation_id") @db.VarChar(255)
+  sentAt         DateTime     @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([telegramUserId, liquidationId])
+  @@index([liquidationId])
+  @@index([sentAt])
+  @@map("telegram_sent_alerts")
+}
