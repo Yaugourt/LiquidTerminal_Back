@@ -10,7 +10,7 @@ export class HypurrscanClient extends BaseApiService {
   private static readonly API_URL = 'https://api.hypurrscan.io';
   private static readonly REQUEST_WEIGHT = 1;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
-  private static readonly UPDATE_INTERVAL = 30000; // 30 secondes
+  private static readonly UPDATE_INTERVAL = 20000; // 20 secondes
   private static readonly CACHE_KEY = 'hypurrscan:auctions';
   private static readonly UPDATE_CHANNEL = 'hypurrscan:auctions:updated';
 
