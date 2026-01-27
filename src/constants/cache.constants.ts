@@ -58,7 +58,7 @@ export const CACHE_KEYS = {
   STATS_LIST: (params: string) => `${CACHE_PREFIX.STATS}:list:${params}`,
   WALLET: (id: number) => `${CACHE_PREFIX.WALLET}:${id}`,
   WALLET_LIST: (params: string) => `${CACHE_PREFIX.WALLET}:list:${params}`,
-  // SSE-related keys
-  SSE_LAST_TID: `${CACHE_PREFIX.SSE}:liquidations:lastTid`,
+  // SSE-related keys (using time_ms instead of tid for monotonic tracking)
+  SSE_LAST_TIME_MS: `${CACHE_PREFIX.SSE}:liquidations:lastTimeMs`,
   SSE_BROADCAST_CHANNEL: `${CACHE_PREFIX.SSE}:liquidations:broadcast`
 } as const; 
