@@ -215,7 +215,7 @@ export interface WebSocketMarketData {
 }
 
 export interface MarketQueryParams {
-    sortBy?: 'volume' | 'marketCap' | 'change24h';
+    sortBy?: 'volume' | 'marketCap' | 'change24h' | 'name' | 'price';
     sortOrder?: 'asc' | 'desc';
     limit?: number;
     page?: number;
@@ -226,7 +226,7 @@ export interface MarketQueryParams {
 // PaginatedResponse est maintenant importé de common.types.ts
 
 export interface PerpMarketQueryParams {
-    sortBy?: 'volume' | 'openInterest' | 'change24h';
+    sortBy?: 'volume' | 'openInterest' | 'change24h' | 'name' | 'price';
     sortOrder?: 'asc' | 'desc';
     limit?: number;
     page?: number;
