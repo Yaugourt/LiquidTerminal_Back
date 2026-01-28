@@ -6,6 +6,8 @@ import {
   LiquidationStatsAllResponse,
   LiquidationStats,
   Liquidation,
+  AggregatedLiquidation,
+  LiquidationAggregationMetadata,
   ChartDataBucket,
   ChartInterval,
   ChartPeriod,
@@ -40,15 +42,19 @@ export class LiquidationsService {
   private static readonly DEFAULT_LIMIT = 100;
   private static readonly MAX_PAGES_FOR_STATS = 5; // Max 5 pages (5000 liquidations)
   
-  // Cache TTLs - optimized for 30s polling
-  private static readonly DATA_CACHE_TTL = 25; // Just under polling interval
-  private static readonly STATS_CACHE_TTL = 25; // Just under polling interval
-  private static readonly RECENT_CACHE_TTL = 25; // Just under polling interval
+  // Cache TTLs - optimized for 10s polling
+  private static readonly DATA_CACHE_TTL = 8; // Just under polling interval
+  private static readonly STATS_CACHE_TTL = 8; // Just under polling interval
+  private static readonly RECENT_CACHE_TTL = 8; // Just under polling interval
 
-  // Background refresh configuration - 30 seconds for near real-time SSE
-  private static readonly REFRESH_INTERVAL_MS = 30_000; // Refresh every 30 seconds
+  // Background refresh configuration - 10 seconds for near real-time SSE
+  private static readonly REFRESH_INTERVAL_MS = 10_000; // Refresh every 10 seconds
   private refreshTimer: NodeJS.Timeout | null = null;
   private isRefreshing = false;
+
+  // Aggregation configuration
+  private static readonly AGGREGATION_ENABLED = process.env.LIQUIDATIONS_AGGREGATION_ENABLED === 'true';
+  private static readonly MIN_AGGREGATION_COUNT = 2;
 
   // Chart data configuration per period (max 24h)
   private static readonly PERIOD_CONFIG: Record<ChartPeriod, PeriodConfig> = {
@@ -229,12 +235,23 @@ export class LiquidationsService {
         .filter(liq => liq.time_ms > lastSeenTimeMs)
         .sort((a, b) => a.time_ms - b.time_ms);
 
-      if (newLiquidations.length > 0) {
-        await this.sseManager.broadcastNewLiquidations(newLiquidations);
+      // Apply aggregation if enabled
+      const liquidationsToSend = LiquidationsService.AGGREGATION_ENABLED
+        ? this.aggregateLiquidations(newLiquidations)
+        : newLiquidations;
+
+      if (liquidationsToSend.length > 0) {
+        await this.sseManager.broadcastNewLiquidations(liquidationsToSend);
+
         logDeduplicator.info('SSE broadcasting new liquidations', {
-          count: newLiquidations.length,
+          originalCount: newLiquidations.length,
+          afterAggregation: liquidationsToSend.length,
+          aggregationEnabled: LiquidationsService.AGGREGATION_ENABLED,
+          reductionPercent: newLiquidations.length > 0
+            ? Math.round((1 - liquidationsToSend.length / newLiquidations.length) * 100)
+            : 0,
           previousTimeMs: lastSeenTimeMs,
-          newMaxTimeMs: newLiquidations[newLiquidations.length - 1].time_ms
+          newMaxTimeMs: liquidationsToSend[liquidationsToSend.length - 1].time_ms
         });
       } else {
         logDeduplicator.info('SSE no new liquidations', {
@@ -998,6 +1015,137 @@ export class LiquidationsService {
     result.sort((a, b) => a.timestampMs - b.timestampMs);
 
     return result;
+  }
+
+  /**
+   * Aggregate liquidations by (user, coin, direction)
+   */
+  private aggregateLiquidations(liquidations: Liquidation[]): AggregatedLiquidation[] {
+    if (!LiquidationsService.AGGREGATION_ENABLED) {
+      return liquidations;
+    }
+
+    if (liquidations.length === 0) {
+      return [];
+    }
+
+    // Group by (liquidated_user, coin, liq_dir)
+    const groups = new Map<string, Liquidation[]>();
+
+    for (const liq of liquidations) {
+      const key = `${liq.liquidated_user}_${liq.coin}_${liq.liq_dir}`;
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key)!.push(liq);
+    }
+
+    // Process each group
+    const result: AggregatedLiquidation[] = [];
+    let singleCount = 0;
+    let aggregatedCount = 0;
+
+    for (const [key, groupLiqs] of groups) {
+      if (groupLiqs.length < LiquidationsService.MIN_AGGREGATION_COUNT) {
+        result.push(...groupLiqs);
+        singleCount += groupLiqs.length;
+      } else {
+        const aggregated = this.createAggregatedLiquidation(groupLiqs);
+        result.push(aggregated);
+        aggregatedCount++;
+      }
+    }
+
+    logDeduplicator.info('Liquidations aggregation completed', {
+      total: liquidations.length,
+      groups: groups.size,
+      singleLiquidations: singleCount,
+      aggregatedGroups: aggregatedCount,
+      outputCount: result.length,
+      reductionPercent: Math.round((1 - result.length / liquidations.length) * 100)
+    });
+
+    // Sort by time_ms
+    result.sort((a, b) => a.time_ms - b.time_ms);
+    return result;
+  }
+
+  /**
+   * Create an aggregated liquidation from multiple liquidations
+   */
+  private createAggregatedLiquidation(liquidations: Liquidation[]): AggregatedLiquidation {
+    if (liquidations.length === 0) {
+      throw new Error('Cannot aggregate empty liquidation array');
+    }
+
+    // Sort by time_ms ascending
+    const sorted = [...liquidations].sort((a, b) => a.time_ms - b.time_ms);
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+
+    // Calculate sums
+    let totalNotional = 0;
+    let totalSize = 0;
+    let totalFeeToLiquidated = 0;
+    const allTids: number[] = [];
+    const liquidatorsSet = new Set<string>();
+
+    for (const liq of sorted) {
+      totalNotional += liq.notional_total;
+      totalSize += liq.size_total;
+      totalFeeToLiquidated += liq.fee_total_liquidated;
+      allTids.push(liq.tid);
+
+      for (const liquidator of liq.liquidators) {
+        liquidatorsSet.add(liquidator);
+      }
+    }
+
+    // Calculate weighted average prices
+    let weightedMarkPx = 0;
+    let weightedFillPx = 0;
+
+    for (const liq of sorted) {
+      const weight = liq.size_total / totalSize;
+      weightedMarkPx += liq.mark_px * weight;
+      weightedFillPx += liq.fill_px_vwap * weight;
+    }
+
+    const aggregated: AggregatedLiquidation = {
+      time: first.time,
+      time_ms: first.time_ms,
+      coin: first.coin,
+      hash: first.hash,
+      liquidated_user: first.liquidated_user,
+      liq_dir: first.liq_dir,
+      method: first.method,
+
+      // Aggregated values
+      size_total: Math.round(totalSize * 100) / 100,
+      notional_total: Math.round(totalNotional * 100) / 100,
+      fill_px_vwap: Math.round(weightedFillPx * 100) / 100,
+      mark_px: Math.round(weightedMarkPx * 100) / 100,
+      fee_total_liquidated: Math.round(totalFeeToLiquidated * 100) / 100,
+
+      liquidators: Array.from(liquidatorsSet),
+      liquidator_count: liquidatorsSet.size,
+      tid: first.tid,
+
+      // Aggregation metadata
+      aggregation: {
+        isAggregated: true,
+        count: sorted.length,
+        timeRangeMs: [first.time_ms, last.time_ms],
+        originalTids: allTids,
+        totalNotional: Math.round(totalNotional * 100) / 100,
+        totalSize: Math.round(totalSize * 100) / 100,
+        avgMarkPrice: Math.round(weightedMarkPx * 100) / 100,
+        avgFillPrice: Math.round(weightedFillPx * 100) / 100,
+        uniqueLiquidators: Array.from(liquidatorsSet)
+      }
+    };
+
+    return aggregated;
   }
 
   public checkRateLimit(ip: string): boolean {
