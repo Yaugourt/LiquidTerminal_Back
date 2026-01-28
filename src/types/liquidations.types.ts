@@ -21,6 +21,28 @@ export interface Liquidation {
 }
 
 /**
+ * Metadata for aggregated liquidations
+ */
+export interface LiquidationAggregationMetadata {
+  isAggregated: true;
+  count: number;
+  timeRangeMs: [number, number];
+  originalTids: number[];
+  totalNotional: number;
+  totalSize: number;
+  avgMarkPrice: number;
+  avgFillPrice: number;
+  uniqueLiquidators: string[];
+}
+
+/**
+ * Liquidation with optional aggregation support
+ */
+export interface AggregatedLiquidation extends Liquidation {
+  aggregation?: LiquidationAggregationMetadata;
+}
+
+/**
  * Response from HypeDexer API (original format)
  */
 export interface LiquidationResponse {
