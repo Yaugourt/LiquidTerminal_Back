@@ -16,6 +16,7 @@ import { HyperliquidLeaderboardClient } from '../clients/hyperliquid/leaderboard
 import { HypurrscanStakedHoldersClient } from '../clients/hypurrscan/stakedHolders.client';
 import { LiquidationsService } from '../services/liquidations/liquidations.service';
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
+import { TopTradersService } from '../services/toptraders/toptraders.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export class ClientInitializerService {
@@ -143,6 +144,11 @@ export class ClientInitializerService {
       await sseManager.initialize();
       this.clients.set('sseManager', sseManager);
       logDeduplicator.info('SSE Manager initialized successfully');
+
+      // Initialiser le service Top Traders (background polling every 60s)
+      const topTradersService = TopTradersService.getInstance();
+      this.clients.set('topTraders', topTradersService);
+      logDeduplicator.info('Top Traders service initialized successfully');
 
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
