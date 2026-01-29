@@ -45,6 +45,7 @@ import xpRoutes from './routes/xp/xp.routes';
 
 import healthRoutes from './routes/health.routes';
 import liquidationsRoutes from './routes/liquidations/liquidations.routes';
+import topTradersRoutes from './routes/toptraders/toptraders.routes';
 
 const app = express();
 const server = createServer(app);
@@ -127,6 +128,7 @@ app.use('/leaderboard', leaderboardRoutes);
 app.use('/xp', xpRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/liquidations', liquidationsRoutes);
+app.use('/top-traders', topTradersRoutes);
 
 const PORT = process.env.PORT || 3002;
 
