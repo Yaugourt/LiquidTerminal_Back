@@ -46,6 +46,7 @@ import xpRoutes from './routes/xp/xp.routes';
 import healthRoutes from './routes/health.routes';
 import liquidationsRoutes from './routes/liquidations/liquidations.routes';
 import topTradersRoutes from './routes/toptraders/toptraders.routes';
+import activeUsersRoutes from './routes/activeusers/activeusers.routes';
 
 const app = express();
 const server = createServer(app);
@@ -129,6 +130,7 @@ app.use('/xp', xpRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/liquidations', liquidationsRoutes);
 app.use('/top-traders', topTradersRoutes);
+app.use('/active-users', activeUsersRoutes);
 
 const PORT = process.env.PORT || 3002;
 
