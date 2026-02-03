@@ -52,8 +52,7 @@ export class LiquidationsService {
   private refreshTimer: NodeJS.Timeout | null = null;
   private isRefreshing = false;
 
-  // Aggregation configuration
-  private static readonly AGGREGATION_ENABLED = process.env.LIQUIDATIONS_AGGREGATION_ENABLED === 'true';
+  // Aggregation: groups multiple liquidations from same user/coin/direction into one
   private static readonly MIN_AGGREGATION_COUNT = 2;
 
   // Chart data configuration per period (max 24h)
@@ -235,10 +234,8 @@ export class LiquidationsService {
         .filter(liq => liq.time_ms > lastSeenTimeMs)
         .sort((a, b) => a.time_ms - b.time_ms);
 
-      // Apply aggregation if enabled
-      const liquidationsToSend = LiquidationsService.AGGREGATION_ENABLED
-        ? this.aggregateLiquidations(newLiquidations)
-        : newLiquidations;
+      // Aggregate liquidations from same user/coin/direction
+      const liquidationsToSend = this.aggregateLiquidations(newLiquidations);
 
       if (liquidationsToSend.length > 0) {
         await this.sseManager.broadcastNewLiquidations(liquidationsToSend);
@@ -246,7 +243,6 @@ export class LiquidationsService {
         logDeduplicator.info('SSE broadcasting new liquidations', {
           originalCount: newLiquidations.length,
           afterAggregation: liquidationsToSend.length,
-          aggregationEnabled: LiquidationsService.AGGREGATION_ENABLED,
           reductionPercent: newLiquidations.length > 0
             ? Math.round((1 - liquidationsToSend.length / newLiquidations.length) * 100)
             : 0,
@@ -1019,12 +1015,11 @@ export class LiquidationsService {
 
   /**
    * Aggregate liquidations by (user, coin, direction)
+   * Groups multiple liquidations from the same user/coin/direction into one with:
+   * - Summed notional_total
+   * - Weighted average mark_px (by size_total)
    */
   private aggregateLiquidations(liquidations: Liquidation[]): AggregatedLiquidation[] {
-    if (!LiquidationsService.AGGREGATION_ENABLED) {
-      return liquidations;
-    }
-
     if (liquidations.length === 0) {
       return [];
     }
