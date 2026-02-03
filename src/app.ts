@@ -12,6 +12,7 @@ import { securityHeaders } from './middleware/security.middleware';
 import { ClientInitializerService } from './core/client.initializer.service';
 import { prisma } from './core/prisma.service';
 import { FileCleanupService } from './utils/fileCleanup';
+import { InternalWebSocketServer } from './websocket';
 
 import authRoutes from './routes/auth/auth.routes';
 import userAuthRoutes from './routes/auth/user.auth.routes';
@@ -146,8 +147,14 @@ clientInitializer.initialize()
     const fileCleanupService = FileCleanupService.getInstance();
     fileCleanupService.startAutoCleanup();
 
+    // Initialiser le WebSocket Server interne (attache au HTTP server sur /ws)
+    const wsServer = InternalWebSocketServer.getInstance();
+    wsServer.initialize(server);
+    logDeduplicator.info('WebSocket Server initialized on /ws');
+
     server.listen(PORT, () => {
       logDeduplicator.info(`Server is running on port ${PORT}`);
+      logDeduplicator.info(`WebSocket available at ws://localhost:${PORT}/ws`);
     });
   })
   .catch((error) => {
@@ -158,6 +165,8 @@ clientInitializer.initialize()
 // Gestion de l'arrêt propre de l'application
 process.on('SIGINT', async () => {
   logDeduplicator.info('Received SIGINT. Performing graceful shutdown...');
+  // Shutdown WebSocket Server
+  InternalWebSocketServer.getInstance().shutdown();
   // Stop all polling and shutdown SSE connections
   clientInitializer.stopAllPolling();
   await prisma.$disconnect();
@@ -166,6 +175,8 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   logDeduplicator.info('Received SIGTERM. Performing graceful shutdown...');
+  // Shutdown WebSocket Server
+  InternalWebSocketServer.getInstance().shutdown();
   // Stop all polling and shutdown SSE connections
   clientInitializer.stopAllPolling();
   await prisma.$disconnect();

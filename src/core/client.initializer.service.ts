@@ -16,6 +16,7 @@ import { HyperliquidLeaderboardClient } from '../clients/hyperliquid/leaderboard
 import { HypurrscanStakedHoldersClient } from '../clients/hypurrscan/stakedHolders.client';
 import { LiquidationsService } from '../services/liquidations/liquidations.service';
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
+import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
 import { TopTradersService } from '../services/toptraders/toptraders.service';
 import { ActiveUsersService } from '../services/activeusers/activeusers.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
@@ -140,11 +141,16 @@ export class ClientInitializerService {
       const liquidationsService = LiquidationsService.getInstance();
       this.clients.set('liquidations', liquidationsService);
 
-      // Initialiser le SSE Manager pour les liquidations temps réel
+      // Initialiser le SSE Manager pour les liquidations temps réel (legacy, keep for backward compatibility)
       const sseManager = SSEManagerService.getInstance();
       await sseManager.initialize();
       this.clients.set('sseManager', sseManager);
       logDeduplicator.info('SSE Manager initialized successfully');
+
+      // Initialiser le WebSocket Service pour les liquidations temps réel (new)
+      const liquidationsWSService = LiquidationsWebSocketService.getInstance();
+      this.clients.set('liquidationsWS', liquidationsWSService);
+      logDeduplicator.info('Liquidations WebSocket Service initialized successfully');
 
       // Initialiser le service Top Traders (background polling every 60s)
       const topTradersService = TopTradersService.getInstance();
@@ -179,6 +185,15 @@ export class ClientInitializerService {
           logDeduplicator.error(`Error starting polling for ${name} client:`, { error });
         }
       }
+      // Start Liquidations WebSocket Service (uses start() not startPolling())
+      if ('start' in client && name === 'liquidationsWS') {
+        try {
+          client.start();
+          logDeduplicator.info('Started Liquidations WebSocket Service');
+        } catch (error) {
+          logDeduplicator.error('Error starting Liquidations WebSocket Service:', { error });
+        }
+      }
     }
     
     logDeduplicator.info('All client polling started successfully');
@@ -201,6 +216,15 @@ export class ClientInitializerService {
           logDeduplicator.info('SSE Manager shutdown successfully');
         } catch (error) {
           logDeduplicator.error('Error shutting down SSE Manager:', { error });
+        }
+      }
+      // Handle Liquidations WebSocket Service stop
+      if ('stop' in client && name === 'liquidationsWS') {
+        try {
+          client.stop();
+          logDeduplicator.info('Liquidations WebSocket Service stopped successfully');
+        } catch (error) {
+          logDeduplicator.error('Error stopping Liquidations WebSocket Service:', { error });
         }
       }
     }
