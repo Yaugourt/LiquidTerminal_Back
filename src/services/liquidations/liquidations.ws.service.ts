@@ -227,15 +227,10 @@ export class LiquidationsWebSocketService {
 
     const result: AggregatedLiquidation[] = [];
 
-    for (const [key, liquidations] of this.pendingAggregation) {
-      if (liquidations.length < LiquidationsWebSocketService.MIN_AGGREGATION_COUNT) {
-        // Not enough to aggregate, send as-is
-        result.push(...liquidations);
-      } else {
-        // Aggregate multiple liquidations
-        const aggregated = this.createAggregatedLiquidation(liquidations);
-        result.push(aggregated);
-      }
+    for (const [, liquidations] of this.pendingAggregation) {
+      // Always aggregate (even single liquidations get metadata)
+      const aggregated = this.createAggregatedLiquidation(liquidations);
+      result.push(aggregated);
     }
 
     // Clear buffer
@@ -327,7 +322,7 @@ export class LiquidationsWebSocketService {
 
       // Aggregation metadata
       aggregation: {
-        isAggregated: true,
+        isAggregated: sorted.length > 1,
         count: sorted.length,
         timeRangeMs: [first.time_ms, last.time_ms],
         originalTids: allTids,
