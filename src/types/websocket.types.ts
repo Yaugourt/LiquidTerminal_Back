@@ -82,12 +82,21 @@ export interface HypeDexerWSSubscriptionConfirm {
 }
 
 /**
+ * HypeDexer WebSocket welcome message (sent on connection)
+ */
+export interface HypeDexerWSWelcomeEvent {
+  type: 'welcome';
+  message?: string;
+}
+
+/**
  * All possible HypeDexer WebSocket events
  */
 export type HypeDexerWSEvent = 
   | HypeDexerWSLiquidationEvent 
   | HypeDexerWSErrorEvent 
-  | HypeDexerWSSubscriptionConfirm;
+  | HypeDexerWSSubscriptionConfirm
+  | HypeDexerWSWelcomeEvent;
 
 // ============================================================================
 // INTERNAL WEBSOCKET TYPES (Our API)

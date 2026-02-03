@@ -202,6 +202,11 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
           });
           break;
 
+        case 'welcome':
+          // HypeDexer sends a welcome message on connection - ignore it
+          logDeduplicator.info('HypeDexerLiquidationsWSClient: Welcome received');
+          break;
+
         default:
           logDeduplicator.warn('HypeDexerLiquidationsWSClient: Unknown event type', {
             type: (event as { type?: string }).type,
