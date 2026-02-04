@@ -322,7 +322,7 @@ export class LiquidationsWebSocketService {
 
       // Aggregation metadata
       aggregation: {
-        isAggregated: sorted.length > 1,
+        isAggregated: true as const,
         count: sorted.length,
         timeRangeMs: [first.time_ms, last.time_ms],
         originalTids: allTids,
