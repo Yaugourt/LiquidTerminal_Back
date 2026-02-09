@@ -15,6 +15,7 @@ import {
   LiquidationsDataResponse,
   PeriodData
 } from '../../types/liquidations.types';
+import { AnalyticsLiquidationStatsResponse } from '../../types/analytics-liquidations.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { redisService } from '../../core/redis.service';
 import { SSEManagerService } from './sse-manager.service';
@@ -264,12 +265,28 @@ export class LiquidationsService {
 
   /**
    * Build and cache unified data (stats + chart) for all periods
+   * Uses analytics API for 24h stats (no 5K limit)
    */
   private async buildAndCacheUnifiedData(allLiquidations: Liquidation[]): Promise<void> {
     const cacheKey = 'liquidations:all-data';
     const periods: ChartPeriod[] = ['2h', '4h', '8h', '12h', '24h'];
     const now = Date.now();
     const periodsData: Record<string, PeriodData> = {};
+
+    // Fetch analytics stats for 24h (bypasses 5K limit)
+    let analytics24hStats: LiquidationStats | null = null;
+    try {
+      const analyticsResponse = await this.client.getAnalyticsStats({ days: 1 });
+      analytics24hStats = this.convertAnalyticsToStats(analyticsResponse);
+      logDeduplicator.info('Analytics 24h stats fetched for unified data', {
+        liquidationsCount: analytics24hStats.liquidationsCount,
+        totalVolume: analytics24hStats.totalVolume
+      });
+    } catch (error) {
+      logDeduplicator.warn('Failed to fetch analytics 24h stats, falling back to calculated stats', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
     for (const period of periods) {
       const config = LiquidationsService.PERIOD_CONFIG[period];
@@ -280,7 +297,14 @@ export class LiquidationsService {
         return liqTime >= cutoffTime;
       });
 
-      const stats = this.calculateStats(periodLiquidations);
+      // Use analytics stats for 24h if available, otherwise calculate from fetched data
+      let stats: LiquidationStats;
+      if (period === '24h' && analytics24hStats) {
+        stats = analytics24hStats;
+      } else {
+        stats = this.calculateStats(periodLiquidations);
+      }
+
       const buckets = this.aggregateIntoBuckets(periodLiquidations, config.intervalMs, config.hours);
 
       periodsData[period] = {
@@ -304,12 +328,28 @@ export class LiquidationsService {
 
   /**
    * Build and cache stats for /stats/all endpoint
+   * Uses analytics API for 24h stats (no 5K limit)
    */
   private async buildAndCacheStatsAll(allLiquidations: Liquidation[]): Promise<void> {
     const cacheKey = 'liquidations:stats';
     const periods = [2, 4, 8, 12, 24] as const;
     const now = Date.now();
     const results: Record<string, LiquidationStats | null> = {};
+
+    // Fetch analytics stats for 24h (bypasses 5K limit)
+    let analytics24hStats: LiquidationStats | null = null;
+    try {
+      const analyticsResponse = await this.client.getAnalyticsStats({ days: 1 });
+      analytics24hStats = this.convertAnalyticsToStats(analyticsResponse);
+      logDeduplicator.info('Analytics 24h stats fetched for stats all', {
+        liquidationsCount: analytics24hStats.liquidationsCount,
+        totalVolume: analytics24hStats.totalVolume
+      });
+    } catch (error) {
+      logDeduplicator.warn('Failed to fetch analytics 24h stats for stats all, falling back', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
     for (const hours of periods) {
       const cutoffTime = now - (hours * 60 * 60 * 1000);
@@ -318,7 +358,12 @@ export class LiquidationsService {
         return liqTime >= cutoffTime;
       });
 
-      results[`${hours}h`] = this.calculateStats(periodLiquidations);
+      // Use analytics stats for 24h if available
+      if (hours === 24 && analytics24hStats) {
+        results[`${hours}h`] = analytics24hStats;
+      } else {
+        results[`${hours}h`] = this.calculateStats(periodLiquidations);
+      }
     }
 
     const result: LiquidationStatsAllResponse = {
@@ -510,6 +555,84 @@ export class LiquidationsService {
       maxLiq: Math.round(maxLiq * 100) / 100,
       longVolume: Math.round(longVolume * 100) / 100,
       shortVolume: Math.round(shortVolume * 100) / 100
+    };
+  }
+
+  /**
+   * Get analytics stats for 24h from HypeDexer API
+   * This provides complete stats without the 5K liquidation limit
+   */
+  public async getAnalyticsStats24h(): Promise<AnalyticsLiquidationStatsResponse> {
+    const cacheKey = 'liquidations:analytics:24h';
+
+    // Check cache first
+    try {
+      const cached = await redisService.get(cacheKey);
+      if (cached) {
+        logDeduplicator.info('Analytics 24h stats cache hit');
+        return JSON.parse(cached);
+      }
+    } catch (cacheError) {
+      logDeduplicator.warn('Redis cache error for analytics stats', { error: String(cacheError) });
+    }
+
+    try {
+      const response = await this.client.getAnalyticsStats({ days: 1 });
+
+      // Cache the response
+      try {
+        await redisService.set(cacheKey, JSON.stringify(response), LiquidationsService.STATS_CACHE_TTL);
+        logDeduplicator.info('Analytics 24h stats cached');
+      } catch (cacheError) {
+        logDeduplicator.warn('Failed to cache analytics stats', { error: String(cacheError) });
+      }
+
+      return response;
+    } catch (error) {
+      logDeduplicator.error('Failed to fetch analytics 24h stats', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new LiquidationsError(
+        error instanceof Error ? error.message : 'Failed to fetch analytics stats',
+        500,
+        'ANALYTICS_STATS_ERROR'
+      );
+    }
+  }
+
+  /**
+   * Convert analytics stats response to LiquidationStats format
+   * Note: longVolume, shortVolume, maxLiq, topCoinVolume are estimated
+   */
+  private convertAnalyticsToStats(analytics: AnalyticsLiquidationStatsResponse): LiquidationStats {
+    const data = analytics.data;
+    const totalVolume = data.amount_liquidated_usd;
+    const liquidationsCount = data.number_liquidation;
+    const longCount = data.number_long_liquidated;
+    const shortCount = data.number_short_liquidated;
+
+    // Estimate longVolume and shortVolume based on count ratio
+    const longRatio = liquidationsCount > 0 ? longCount / liquidationsCount : 0.5;
+    const shortRatio = liquidationsCount > 0 ? shortCount / liquidationsCount : 0.5;
+    const longVolume = Math.round(totalVolume * longRatio * 100) / 100;
+    const shortVolume = Math.round(totalVolume * shortRatio * 100) / 100;
+
+    // Calculate average size
+    const avgSize = liquidationsCount > 0 
+      ? Math.round((totalVolume / liquidationsCount) * 100) / 100 
+      : 0;
+
+    return {
+      totalVolume: Math.round(totalVolume * 100) / 100,
+      liquidationsCount,
+      longCount,
+      shortCount,
+      topCoin: data.top_token_liquidated || 'N/A',
+      topCoinVolume: 0, // Not available in analytics API
+      avgSize,
+      maxLiq: 0, // Not available in analytics API
+      longVolume,
+      shortVolume
     };
   }
 

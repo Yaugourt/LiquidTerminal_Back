@@ -197,6 +197,38 @@ router.get('/data',
 );
 
 /**
+ * GET /liquidations/analytics/stats
+ * Get analytics liquidation stats for 24h from HypeDexer API
+ * This endpoint provides complete stats without the 5K limit
+ */
+router.get('/analytics/stats',
+  marketRateLimiter,
+  (async (req: Request, res: Response) => {
+    try {
+      logDeduplicator.info('GET /liquidations/analytics/stats request');
+
+      const response = await liquidationsService.getAnalyticsStats24h();
+      res.json(response);
+    } catch (error) {
+      logDeduplicator.error('Error fetching analytics liquidation stats:', { error });
+
+      if (error instanceof LiquidationsError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          error: error.message
+        });
+      }
+      
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Internal server error'
+      });
+    }
+  }) as RequestHandler
+);
+
+
+/**
  * GET /liquidations/stats/all
  * Get aggregated stats for ALL time periods (2h, 4h, 8h, 12h, 24h) in one call
  * Uses sequential fetching and caching to avoid rate limiting

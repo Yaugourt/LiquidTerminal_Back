@@ -1,5 +1,6 @@
 import { BaseApiService } from '../../../core/base.api.service';
 import { LiquidationResponse, LiquidationQueryParams, LiquidationsError } from '../../../types/liquidations.types';
+import { AnalyticsLiquidationStatsResponse, AnalyticsLiquidationStatsParams } from '../../../types/analytics-liquidations.types';
 import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
@@ -126,7 +127,38 @@ export class HLIndexerLiquidationsClient extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
+  /**
+   * Get analytics liquidation stats from HypeDexer
+   * Endpoint: GET /analytics/liquidations/stats
+   * This endpoint provides complete stats without the 5K limit
+   */
+  public async getAnalyticsStats(params: AnalyticsLiquidationStatsParams): Promise<AnalyticsLiquidationStatsResponse> {
+    return this.circuitBreaker.execute(async () => {
+      const queryParams = new URLSearchParams();
+      queryParams.append('days', params.days.toString());
+      if (params.coin) queryParams.append('coin', params.coin);
+
+      const endpoint = `/analytics/liquidations/stats?${queryParams.toString()}`;
+
+      logDeduplicator.info('Fetching analytics liquidation stats from HypeDexer', {
+        endpoint,
+        params
+      });
+
+      const response = await this.get<AnalyticsLiquidationStatsResponse>(endpoint);
+
+      logDeduplicator.info('Successfully fetched analytics liquidation stats', {
+        numberLiquidations: response.data?.number_liquidation,
+        amountUsd: response.data?.amount_liquidated_usd,
+        executionTime: response.execution_time_ms
+      });
+
+      return response;
+    });
+  }
+
   public static getRequestWeight(): number {
     return HLIndexerLiquidationsClient.REQUEST_WEIGHT;
   }
 }
+
