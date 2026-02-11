@@ -274,8 +274,10 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
       fee_total_liquidated: raw.fee_total_liquidated,
       liquidators: raw.liquidators,
       liquidator_count: raw.liquidator_count,
-      // Normalize liq_dir: "long" -> "Long", "short" -> "Short"
-      liq_dir: raw.liq_dir === 'long' ? 'Long' : 'Short',
+      // Normalize liq_dir to PascalCase (case-insensitive)
+      liq_dir: String(raw.liq_dir).toLowerCase() === 'long' ? 'Long' 
+             : String(raw.liq_dir).toLowerCase() === 'short' ? 'Short' 
+             : 'Short', // Fallback si valeur inattendue
     };
   }
 
