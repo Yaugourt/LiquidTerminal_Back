@@ -559,17 +559,19 @@ export class LiquidationsService {
   }
 
   /**
-   * Get analytics stats for 24h from HypeDexer API
+   * Get analytics stats from HypeDexer API
    * This provides complete stats without the 5K liquidation limit
+   * @param days Window in days (1-30, default 1)
+   * @param coin Optional coin filter (case insensitive)
    */
-  public async getAnalyticsStats24h(): Promise<AnalyticsLiquidationStatsResponse> {
-    const cacheKey = 'liquidations:analytics:24h';
+  public async getAnalyticsStats(days: number = 1, coin?: string): Promise<AnalyticsLiquidationStatsResponse> {
+    const cacheKey = `liquidations:analytics:${days}d${coin ? `:${coin.toUpperCase()}` : ''}`;
 
     // Check cache first
     try {
       const cached = await redisService.get(cacheKey);
       if (cached) {
-        logDeduplicator.info('Analytics 24h stats cache hit');
+        logDeduplicator.info('Analytics stats cache hit', { days, coin });
         return JSON.parse(cached);
       }
     } catch (cacheError) {
@@ -577,19 +579,21 @@ export class LiquidationsService {
     }
 
     try {
-      const response = await this.client.getAnalyticsStats({ days: 1 });
+      const response = await this.client.getAnalyticsStats({ days, coin });
 
       // Cache the response
       try {
         await redisService.set(cacheKey, JSON.stringify(response), LiquidationsService.STATS_CACHE_TTL);
-        logDeduplicator.info('Analytics 24h stats cached');
+        logDeduplicator.info('Analytics stats cached', { days, coin });
       } catch (cacheError) {
         logDeduplicator.warn('Failed to cache analytics stats', { error: String(cacheError) });
       }
 
       return response;
     } catch (error) {
-      logDeduplicator.error('Failed to fetch analytics 24h stats', {
+      logDeduplicator.error('Failed to fetch analytics stats', {
+        days,
+        coin,
         error: error instanceof Error ? error.message : String(error)
       });
       throw new LiquidationsError(
@@ -598,6 +602,13 @@ export class LiquidationsService {
         'ANALYTICS_STATS_ERROR'
       );
     }
+  }
+
+  /**
+   * Backward-compatible shortcut for 24h analytics stats
+   */
+  public async getAnalyticsStats24h(): Promise<AnalyticsLiquidationStatsResponse> {
+    return this.getAnalyticsStats(1);
   }
 
   /**

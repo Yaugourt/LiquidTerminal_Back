@@ -44,6 +44,8 @@ import dashboardGlobalStatsRoutes from './routes/globalStats.routes';
 import leaderboardRoutes from './routes/leaderboard/leaderboard.routes';
 import xpRoutes from './routes/xp/xp.routes';
 
+import telegramRoutes from './routes/telegram';
+
 import healthRoutes from './routes/health.routes';
 import liquidationsRoutes from './routes/liquidations/liquidations.routes';
 import topTradersRoutes from './routes/toptraders/toptraders.routes';
@@ -128,6 +130,7 @@ app.use('/market/spot/globalstats', globalSpotStatsRoutes);
 app.use('/market/perp/globalstats', globalPerpStatsRoutes);
 app.use('/leaderboard', leaderboardRoutes);
 app.use('/xp', xpRoutes);
+app.use('/telegram', telegramRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/liquidations', liquidationsRoutes);
 app.use('/top-traders', topTradersRoutes);

@@ -198,16 +198,37 @@ router.get('/data',
 
 /**
  * GET /liquidations/analytics/stats
- * Get analytics liquidation stats for 24h from HypeDexer API
+ * Get analytics liquidation stats from HypeDexer API
  * This endpoint provides complete stats without the 5K limit
+ * 
+ * Query params:
+ * - days: Window in days (1-30, default: 1)
+ * - coin: Coin symbol filter, case insensitive (optional)
  */
 router.get('/analytics/stats',
   marketRateLimiter,
   (async (req: Request, res: Response) => {
     try {
-      logDeduplicator.info('GET /liquidations/analytics/stats request');
+      // Parse days param (default 1, clamp 1-30)
+      let days = 1;
+      if (req.query.days !== undefined) {
+        const parsed = parseInt(String(req.query.days), 10);
+        if (!isNaN(parsed) && parsed >= 1 && parsed <= 30) {
+          days = parsed;
+        } else {
+          return res.status(400).json({
+            success: false,
+            error: 'days must be an integer between 1 and 30'
+          });
+        }
+      }
 
-      const response = await liquidationsService.getAnalyticsStats24h();
+      // Parse optional coin param
+      const coin = typeof req.query.coin === 'string' ? req.query.coin : undefined;
+
+      logDeduplicator.info('GET /liquidations/analytics/stats request', { days, coin });
+
+      const response = await liquidationsService.getAnalyticsStats(days, coin);
       res.json(response);
     } catch (error) {
       logDeduplicator.error('Error fetching analytics liquidation stats:', { error });

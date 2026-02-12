@@ -778,3 +778,195 @@ As of January 2026, the Telegram bot supports up to 3 subscriptions per user.
 - Applied via `prisma db push` on 2026-01-27
 - Existing subscriptions were renamed to "Main Subscription"
 - See `MIGRATION_GUIDE.md` and `MULTIPLE_SUBSCRIPTIONS_SUMMARY.md` for full details
+
+---
+
+## Account Linking & Bot API Routes (2026-02-01)
+
+### Overview
+
+The backend now provides dedicated API routes for the Telegram bot to access linked user data (wallets, wallet lists). This enables the bot to synchronize with LiquidTerminal user accounts via Privy.
+
+### Architecture
+
+```
+Frontend (Privy SDK)                    Telegram Bot
+       │                                      │
+       │ POST /auth/link-telegram             │ GET /telegram/account
+       │ (Bearer JWT)                         │ GET /telegram/wallets
+       │                                      │ GET /telegram/wallet-lists
+       │                                      │ GET /telegram/wallet-lists/:id/items
+       ▼                                      │ (Authorization: Bot <API_KEY>)
+  ┌─────────────────────────────────────────┐ │
+  │           Backend                       │◄┘
+  │  TelegramService (Singleton)            │
+  │    ├── resolveUserId(telegramId)        │
+  │    ├── getLinkedAccount()               │
+  │    ├── getLinkedWallets()               │
+  │    ├── getLinkedWalletLists()           │
+  │    ├── getWalletListItems()             │
+  │    ├── linkAccount()                    │
+  │    └── unlinkAccount()                  │
+  └─────────────────────────────────────────┘
+```
+
+### Authentication
+
+Bot routes use a shared API key (not Privy JWT):
+
+```
+Authorization: Bot <TELEGRAM_BOT_API_KEY>
+```
+
+Set `TELEGRAM_BOT_API_KEY` in your environment variables on both the backend and bot.
+
+### Bot API Routes
+
+All routes require `Authorization: Bot <key>` header.
+
+#### GET /telegram/account?telegramId=XXX
+
+Check if a Telegram user is linked to a LiquidTerminal account.
+
+**Response (linked):**
+```json
+{
+  "success": true,
+  "data": {
+    "linked": true,
+    "userId": 42,
+    "email": "user@example.com",
+    "name": "john",
+    "walletCount": 12
+  }
+}
+```
+
+**Response (not linked):**
+```json
+{
+  "success": true,
+  "data": {
+    "linked": false,
+    "walletCount": 0
+  }
+}
+```
+
+#### GET /telegram/wallets?telegramId=XXX
+
+Get wallets of the linked user. Supports pagination with `page` and `limit` query params.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": 1,
+      "address": "0x1234...5678",
+      "name": "Main Wallet",
+      "addedAt": "2026-01-15T10:30:00.000Z"
+    }
+  ],
+  "pagination": {
+    "total": 12,
+    "page": 1,
+    "limit": 50,
+    "totalPages": 1,
+    "hasNext": false,
+    "hasPrevious": false
+  }
+}
+```
+
+#### GET /telegram/wallet-lists?telegramId=XXX
+
+Get wallet lists of the linked user.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": 1,
+      "name": "Whale Watchers",
+      "description": "Top whale wallets",
+      "isPublic": true,
+      "itemsCount": 5,
+      "createdAt": "2026-01-15T10:30:00.000Z"
+    }
+  ]
+}
+```
+
+#### GET /telegram/wallet-lists/:id/items?telegramId=XXX
+
+Get items of a specific wallet list. Returns the same format as `GET /walletlists/:id/items`.
+
+### Frontend: Linking a Telegram Account
+
+After the user links their Telegram via Privy SDK (`linkTelegram()`), the frontend calls:
+
+```
+POST /auth/link-telegram
+Authorization: Bearer <privy-jwt>
+Content-Type: application/json
+
+{
+  "telegramUserId": "123456789"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Telegram account linked successfully"
+}
+```
+
+To unlink:
+```
+DELETE /auth/unlink-telegram
+Authorization: Bearer <privy-jwt>
+```
+
+### Database Changes
+
+- Added Prisma relation `TelegramUser.linkedUser -> User` (FK on existing `linked_user_id` column)
+- Added inverse relation `User.telegramUser -> TelegramUser`
+- Migration: `20260201180000_add_telegram_user_relation`
+
+### Environment Variables
+
+```env
+# Add to backend .env
+TELEGRAM_BOT_API_KEY=your_shared_secret_key_here
+```
+
+### Bot Implementation: Using Linked Wallets
+
+When `useLinkedWallets: true` on a subscription, the bot should:
+
+1. NOT store wallets locally
+2. On each liquidation, call `GET /telegram/wallets?telegramId=XXX`
+3. Filter the liquidation against the returned wallet addresses
+4. This ensures real-time sync with LiquidTerminal
+
+```python
+# Example: fetch linked wallets for filtering
+import requests
+
+def get_linked_wallets(telegram_id: int) -> list[str]:
+    response = requests.get(
+        f"{API_BASE_URL}/telegram/wallets",
+        params={"telegramId": str(telegram_id)},
+        headers={"Authorization": f"Bot {BOT_API_KEY}"}
+    )
+    if response.ok:
+        data = response.json()
+        return [w["address"] for w in data.get("data", [])]
+    return []
+```

@@ -227,6 +227,7 @@ model User {
   dailyTaskProgress               DailyTaskProgress[]
   weeklyChallenges                WeeklyChallenge[]
   dailyActionCounts               DailyActionCount[]
+  telegramUser                    TelegramUser?
   
   @@index([totalXp])
   @@index([level])
@@ -494,6 +495,7 @@ model TelegramUser {
   username     String?  @db.VarChar(255)
   firstName    String?  @map("first_name") @db.VarChar(255)
   linkedUserId Int?     @unique @map("linked_user_id")
+  linkedUser   User?    @relation(fields: [linkedUserId], references: [id])
 
   subscriptions TelegramSubscription[]
   sentAlerts    TelegramSentAlert[]
