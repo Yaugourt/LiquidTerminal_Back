@@ -1,16 +1,21 @@
 import { Router, Request, Response } from "express";
 import { AuthService } from "../../services/auth/auth.service";
 import { ReferralService } from "../../services/auth/referral.service";
+import { TelegramService } from "../../services/telegram/telegram.service";
 import { userRepository } from "../../repositories/user.repository";
 import { validatePrivyToken } from "../../middleware/authMiddleware";
 import { validateLogin, validateUserParams } from "../../middleware/validation/authValidation.middleware";
+import { validateRequest } from "../../middleware/validation/validation.middleware";
 import { marketRateLimiter } from "../../middleware/apiRateLimiter";
 import { UserNotFoundError } from "../../errors/auth.errors";
+import { TelegramError } from "../../errors/telegram.errors";
+import { linkTelegramBodySchema } from "../../schemas/telegram.schema";
 import { logDeduplicator } from "../../utils/logDeduplicator";
 
 const router = Router();
 const authService = AuthService.getInstance();
 const referralService = ReferralService.getInstance();
+const telegramService = TelegramService.getInstance();
 
 // Appliquer le rate limiting à toutes les routes d'authentification
 router.use(marketRateLimiter);
@@ -245,6 +250,151 @@ router.get("/user/:privyUserId", validatePrivyToken, validateUserParams, (req: R
         code: "INTERNAL_SERVER_ERROR"
       });
     });
+});
+
+// Route pour lier un compte Telegram via Privy
+// Le frontend appelle cette route après linkTelegram() de Privy
+router.post("/link-telegram", validatePrivyToken, validateRequest(linkTelegramBodySchema), async (req: Request, res: Response) => {
+  try {
+    const privyUserId = req.user?.sub;
+
+    if (!privyUserId) {
+      res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        code: 'UNAUTHENTICATED',
+      });
+      return;
+    }
+
+    const user = await userRepository.findByPrivyUserId(privyUserId);
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    const { telegramUserId } = req.body;
+    const telegramId = BigInt(telegramUserId);
+
+    // Extract optional info from Privy linked_accounts if available
+    const telegramInfo = req.user?.linked_accounts?.telegram;
+
+    await telegramService.linkAccount(
+      telegramId,
+      user.id,
+      telegramInfo?.username || undefined,
+      telegramInfo?.firstName || undefined,
+    );
+
+    logDeduplicator.info('Telegram account linked via Privy', {
+      userId: user.id,
+      telegramId: telegramId.toString(),
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Telegram account linked successfully',
+    });
+  } catch (error) {
+    logDeduplicator.error('Error linking telegram account:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      path: req.path,
+    });
+
+    if (error instanceof TelegramError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+      });
+      return;
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+});
+
+// Route pour délier un compte Telegram
+router.delete("/unlink-telegram", validatePrivyToken, async (req: Request, res: Response) => {
+  try {
+    const privyUserId = req.user?.sub;
+
+    if (!privyUserId) {
+      res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        code: 'UNAUTHENTICATED',
+      });
+      return;
+    }
+
+    const user = await userRepository.findByPrivyUserId(privyUserId);
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    // Find the telegram user linked to this LT user
+    const { prisma } = await import("../../core/prisma.service");
+    const telegramUser = await prisma.telegramUser.findFirst({
+      where: { linkedUserId: user.id },
+    });
+
+    if (!telegramUser) {
+      res.status(404).json({
+        success: false,
+        message: 'No Telegram account linked',
+        code: 'TELEGRAM_ACCOUNT_NOT_LINKED',
+      });
+      return;
+    }
+
+    await telegramService.unlinkAccount(telegramUser.telegramId);
+
+    logDeduplicator.info('Telegram account unlinked', {
+      userId: user.id,
+      telegramId: telegramUser.telegramId.toString(),
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Telegram account unlinked successfully',
+    });
+  } catch (error) {
+    logDeduplicator.error('Error unlinking telegram account:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      path: req.path,
+    });
+
+    if (error instanceof TelegramError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+      });
+      return;
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
 });
 
 // Route pour récupérer les statistiques de referral
