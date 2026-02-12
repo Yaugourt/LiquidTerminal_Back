@@ -1,4 +1,6 @@
+import crypto from 'crypto';
 import { prisma } from '../../core/prisma.service';
+import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { WalletService } from '../wallet/wallet.service';
 import { WalletListService } from '../walletlist/walletlist.service';
@@ -9,6 +11,7 @@ import {
   LinkedWalletListResponse,
 } from '../../types/telegram.types';
 import {
+  TelegramError,
   TelegramUserNotFoundError,
   TelegramAccountNotLinkedError,
   TelegramAlreadyLinkedError,
@@ -189,19 +192,78 @@ export class TelegramService {
     }
   }
 
-  // ==================== ACCOUNT LINKING ====================
+  // ==================== DEEP LINK CODE SYSTEM ====================
+
+  private static readonly LINK_CODE_PREFIX = 'telegram:link:';
+  private static readonly LINK_CODE_TTL = 300; // 5 minutes
+  private static readonly LINK_CODE_LENGTH = 8;
 
   /**
-   * Link a Telegram account to a LiquidTerminal user.
-   * Called when user links via Privy on the frontend (POST /auth/link-telegram).
+   * Generate a temporary link code for a user.
+   * Called by frontend: POST /auth/telegram/generate-link
+   * Returns a code the user sends to the bot via deep link.
    */
-  public async linkAccount(
+  public async generateLinkCode(userId: number): Promise<{ code: string; deepLink: string }> {
+    try {
+      // Check if user already has a linked telegram
+      const existingLink = await prisma.telegramUser.findFirst({
+        where: { linkedUserId: userId },
+      });
+
+      if (existingLink) {
+        throw new TelegramAlreadyLinkedError('Your account is already linked to a Telegram account');
+      }
+
+      // Generate a random code
+      const code = crypto.randomBytes(TelegramService.LINK_CODE_LENGTH).toString('hex').slice(0, TelegramService.LINK_CODE_LENGTH).toUpperCase();
+
+      // Store in Redis: code -> userId (TTL 5 min)
+      const redisKey = `${TelegramService.LINK_CODE_PREFIX}${code}`;
+      await redisService.set(redisKey, JSON.stringify({ userId }), TelegramService.LINK_CODE_TTL);
+
+      const botUsername = process.env.TELEGRAM_BOT_USERNAME || 'LiquidTerminalBot';
+      const deepLink = `https://t.me/${botUsername}?start=LINK_${code}`;
+
+      logDeduplicator.info('TelegramService: Link code generated', {
+        userId,
+        code,
+      });
+
+      return { code, deepLink };
+    } catch (error) {
+      if (error instanceof TelegramError) {
+        throw error;
+      }
+      logDeduplicator.error('TelegramService: Error generating link code', {
+        userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Verify a link code and link the Telegram account.
+   * Called by bot: POST /telegram/verify-link
+   * The bot extracts the code from /start LINK_XXXXX and sends it here with the telegramId.
+   */
+  public async verifyLinkCode(
+    code: string,
     telegramId: bigint,
-    userId: number,
     username?: string,
     firstName?: string
-  ): Promise<void> {
+  ): Promise<{ userId: number }> {
     try {
+      // Get the code from Redis
+      const redisKey = `${TelegramService.LINK_CODE_PREFIX}${code}`;
+      const stored = await redisService.get(redisKey);
+
+      if (!stored) {
+        throw new TelegramError('Invalid or expired link code', 400, 'INVALID_LINK_CODE');
+      }
+
+      const { userId } = JSON.parse(stored) as { userId: number };
+
       // Check if this telegramId is already linked to another user
       const existing = await prisma.telegramUser.findUnique({
         where: { telegramId },
@@ -211,8 +273,8 @@ export class TelegramService {
         throw new TelegramAlreadyLinkedError();
       }
 
+      // Link the account
       if (existing) {
-        // Update existing telegram user
         await prisma.telegramUser.update({
           where: { telegramId },
           data: {
@@ -222,7 +284,6 @@ export class TelegramService {
           },
         });
       } else {
-        // Create new telegram user with link
         await prisma.telegramUser.create({
           data: {
             telegramId,
@@ -233,16 +294,58 @@ export class TelegramService {
         });
       }
 
-      logDeduplicator.info('TelegramService: Account linked', {
+      // Delete the code from Redis (one-time use)
+      await redisService.delete(redisKey);
+
+      logDeduplicator.info('TelegramService: Account linked via deep link', {
         telegramId: telegramId.toString(),
         userId,
+        code,
       });
+
+      return { userId };
     } catch (error) {
-      if (error instanceof TelegramAlreadyLinkedError) {
+      if (error instanceof TelegramError) {
         throw error;
       }
-      logDeduplicator.error('TelegramService: Error linking account', {
+      logDeduplicator.error('TelegramService: Error verifying link code', {
+        code,
         telegramId: telegramId.toString(),
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Check if a link code has been consumed (account linked).
+   * Called by frontend to poll: GET /auth/telegram/link-status/:code
+   */
+  public async getLinkStatus(code: string, userId: number): Promise<{ linked: boolean; telegramUsername?: string }> {
+    try {
+      // Check if user now has a linked telegram
+      const telegramUser = await prisma.telegramUser.findFirst({
+        where: { linkedUserId: userId },
+      });
+
+      if (telegramUser) {
+        return {
+          linked: true,
+          telegramUsername: telegramUser.username || undefined,
+        };
+      }
+
+      // Check if the code is still valid (pending)
+      const redisKey = `${TelegramService.LINK_CODE_PREFIX}${code}`;
+      const stored = await redisService.get(redisKey);
+
+      return {
+        linked: false,
+        // Code still pending = user hasn't clicked the bot link yet
+      };
+    } catch (error) {
+      logDeduplicator.error('TelegramService: Error checking link status', {
+        code,
         userId,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -252,31 +355,33 @@ export class TelegramService {
 
   /**
    * Unlink a Telegram account from a LiquidTerminal user.
+   * Called by frontend: DELETE /auth/telegram/unlink
    */
-  public async unlinkAccount(telegramId: bigint): Promise<void> {
+  public async unlinkAccount(userId: number): Promise<void> {
     try {
-      const telegramUser = await prisma.telegramUser.findUnique({
-        where: { telegramId },
+      const telegramUser = await prisma.telegramUser.findFirst({
+        where: { linkedUserId: userId },
       });
 
       if (!telegramUser) {
-        throw new TelegramUserNotFoundError();
+        throw new TelegramAccountNotLinkedError();
       }
 
       await prisma.telegramUser.update({
-        where: { telegramId },
+        where: { id: telegramUser.id },
         data: { linkedUserId: null },
       });
 
       logDeduplicator.info('TelegramService: Account unlinked', {
-        telegramId: telegramId.toString(),
+        userId,
+        telegramId: telegramUser.telegramId.toString(),
       });
     } catch (error) {
-      if (error instanceof TelegramUserNotFoundError) {
+      if (error instanceof TelegramError) {
         throw error;
       }
       logDeduplicator.error('TelegramService: Error unlinking account', {
-        telegramId: telegramId.toString(),
+        userId,
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;

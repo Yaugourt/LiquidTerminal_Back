@@ -181,4 +181,81 @@ router.get('/wallet-lists/:id/items',
   }) as RequestHandler
 );
 
+/**
+ * POST /telegram/verify-link
+ * Called by bot when user clicks deep link with /start LINK_XXXXX.
+ * Bot sends the code + telegramId, backend verifies and links the account.
+ */
+router.post('/verify-link',
+  validateTelegramBotApiKey,
+  marketRateLimiter,
+  (async (req: Request, res: Response) => {
+    try {
+      const { code, telegramId, username, firstName } = req.body;
+
+      if (!code || typeof code !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'code is required',
+          code: 'INVALID_CODE',
+        });
+      }
+
+      if (!telegramId || typeof telegramId !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'telegramId is required as a string',
+          code: 'INVALID_TELEGRAM_ID',
+        });
+      }
+
+      let telegramIdBigInt: bigint;
+      try {
+        telegramIdBigInt = BigInt(telegramId);
+        if (telegramIdBigInt <= 0n) throw new Error();
+      } catch {
+        return res.status(400).json({
+          success: false,
+          message: 'telegramId must be a valid positive numeric ID',
+          code: 'INVALID_TELEGRAM_ID',
+        });
+      }
+
+      logDeduplicator.info('POST /telegram/verify-link', {
+        code,
+        telegramId,
+      });
+
+      const result = await telegramService.verifyLinkCode(
+        code,
+        telegramIdBigInt,
+        username || undefined,
+        firstName || undefined,
+      );
+
+      res.json({
+        success: true,
+        message: 'Account linked successfully',
+        data: { userId: result.userId },
+      });
+    } catch (error) {
+      logDeduplicator.error('Error verifying telegram link:', { error });
+
+      if (error instanceof TelegramError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          message: error.message,
+          code: error.code,
+        });
+      }
+
+      res.status(500).json({
+        success: false,
+        message: 'Internal server error',
+        code: 'INTERNAL_SERVER_ERROR',
+      });
+    }
+  }) as RequestHandler
+);
+
 export default router;

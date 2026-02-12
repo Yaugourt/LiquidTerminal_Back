@@ -5,11 +5,9 @@ import { TelegramService } from "../../services/telegram/telegram.service";
 import { userRepository } from "../../repositories/user.repository";
 import { validatePrivyToken } from "../../middleware/authMiddleware";
 import { validateLogin, validateUserParams } from "../../middleware/validation/authValidation.middleware";
-import { validateRequest } from "../../middleware/validation/validation.middleware";
 import { marketRateLimiter } from "../../middleware/apiRateLimiter";
 import { UserNotFoundError } from "../../errors/auth.errors";
 import { TelegramError } from "../../errors/telegram.errors";
-import { linkTelegramBodySchema } from "../../schemas/telegram.schema";
 import { logDeduplicator } from "../../utils/logDeduplicator";
 
 const router = Router();
@@ -252,9 +250,15 @@ router.get("/user/:privyUserId", validatePrivyToken, validateUserParams, (req: R
     });
 });
 
-// Route pour lier un compte Telegram via Privy
-// Le frontend appelle cette route après linkTelegram() de Privy
-router.post("/link-telegram", validatePrivyToken, validateRequest(linkTelegramBodySchema), async (req: Request, res: Response) => {
+// ==================== TELEGRAM DEEP LINK SYSTEM ====================
+// No Privy Telegram integration needed - bypasses .xyz domain limitation
+
+/**
+ * POST /auth/telegram/generate-link
+ * Generates a temporary code + deep link to the bot.
+ * Frontend shows the deep link as a button, user clicks -> opens bot -> bot verifies.
+ */
+router.post("/telegram/generate-link", validatePrivyToken, async (req: Request, res: Response) => {
   try {
     const privyUserId = req.user?.sub;
 
@@ -277,30 +281,19 @@ router.post("/link-telegram", validatePrivyToken, validateRequest(linkTelegramBo
       return;
     }
 
-    const { telegramUserId } = req.body;
-    const telegramId = BigInt(telegramUserId);
-
-    // Extract optional info from Privy linked_accounts if available
-    const telegramInfo = req.user?.linked_accounts?.telegram;
-
-    await telegramService.linkAccount(
-      telegramId,
-      user.id,
-      telegramInfo?.username || undefined,
-      telegramInfo?.firstName || undefined,
-    );
-
-    logDeduplicator.info('Telegram account linked via Privy', {
-      userId: user.id,
-      telegramId: telegramId.toString(),
-    });
+    const result = await telegramService.generateLinkCode(user.id);
 
     res.status(200).json({
       success: true,
-      message: 'Telegram account linked successfully',
+      message: 'Link code generated',
+      data: {
+        code: result.code,
+        deepLink: result.deepLink,
+        expiresIn: 300, // 5 minutes
+      },
     });
   } catch (error) {
-    logDeduplicator.error('Error linking telegram account:', {
+    logDeduplicator.error('Error generating telegram link code:', {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
       path: req.path,
@@ -323,8 +316,11 @@ router.post("/link-telegram", validatePrivyToken, validateRequest(linkTelegramBo
   }
 });
 
-// Route pour délier un compte Telegram
-router.delete("/unlink-telegram", validatePrivyToken, async (req: Request, res: Response) => {
+/**
+ * GET /auth/telegram/link-status/:code
+ * Frontend polls this to know when the user has completed the linking in the bot.
+ */
+router.get("/telegram/link-status/:code", validatePrivyToken, async (req: Request, res: Response) => {
   try {
     const privyUserId = req.user?.sub;
 
@@ -347,26 +343,68 @@ router.delete("/unlink-telegram", validatePrivyToken, async (req: Request, res: 
       return;
     }
 
-    // Find the telegram user linked to this LT user
-    const { prisma } = await import("../../core/prisma.service");
-    const telegramUser = await prisma.telegramUser.findFirst({
-      where: { linkedUserId: user.id },
-    });
-
-    if (!telegramUser) {
-      res.status(404).json({
+    const code = String(req.params.code);
+    if (!code || code.length !== 8) {
+      res.status(400).json({
         success: false,
-        message: 'No Telegram account linked',
-        code: 'TELEGRAM_ACCOUNT_NOT_LINKED',
+        message: 'Invalid code format',
+        code: 'INVALID_CODE',
       });
       return;
     }
 
-    await telegramService.unlinkAccount(telegramUser.telegramId);
+    const status = await telegramService.getLinkStatus(code, user.id);
+
+    res.status(200).json({
+      success: true,
+      data: status,
+    });
+  } catch (error) {
+    logDeduplicator.error('Error checking telegram link status:', {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      path: req.path,
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+});
+
+/**
+ * DELETE /auth/telegram/unlink
+ * Frontend calls this to unlink Telegram from the user's account.
+ */
+router.delete("/telegram/unlink", validatePrivyToken, async (req: Request, res: Response) => {
+  try {
+    const privyUserId = req.user?.sub;
+
+    if (!privyUserId) {
+      res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        code: 'UNAUTHENTICATED',
+      });
+      return;
+    }
+
+    const user = await userRepository.findByPrivyUserId(privyUserId);
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    await telegramService.unlinkAccount(user.id);
 
     logDeduplicator.info('Telegram account unlinked', {
       userId: user.id,
-      telegramId: telegramUser.telegramId.toString(),
     });
 
     res.status(200).json({
