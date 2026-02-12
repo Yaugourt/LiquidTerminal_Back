@@ -805,7 +805,9 @@ Frontend (Privy SDK)                    Telegram Bot
   │    ├── getLinkedWallets()               │
   │    ├── getLinkedWalletLists()           │
   │    ├── getWalletListItems()             │
-  │    ├── linkAccount()                    │
+  │    ├── generateLinkCode()               │
+  │    ├── verifyLinkCode()                 │
+  │    ├── getLinkStatus()                  │
   │    └── unlinkAccount()                  │
   └─────────────────────────────────────────┘
 ```
@@ -905,32 +907,154 @@ Get wallet lists of the linked user.
 
 Get items of a specific wallet list. Returns the same format as `GET /walletlists/:id/items`.
 
-### Frontend: Linking a Telegram Account
+#### POST /telegram/verify-link
 
-After the user links their Telegram via Privy SDK (`linkTelegram()`), the frontend calls:
+Called by the bot when a user starts the bot with a deep link code (`/start LINK_XXXXX`). The bot extracts the code and sends it with the user's Telegram info.
+
+**Request:**
+```json
+{
+  "code": "A1B2C3D4",
+  "telegramId": "123456789",
+  "username": "john_doe",
+  "firstName": "John"
+}
+```
+
+**Response (success):**
+```json
+{
+  "success": true,
+  "message": "Account linked successfully",
+  "data": { "userId": 42 }
+}
+```
+
+**Response (expired/invalid code):**
+```json
+{
+  "success": false,
+  "message": "Invalid or expired link code",
+  "code": "INVALID_LINK_CODE"
+}
+```
+
+**Response (already linked to another user):**
+```json
+{
+  "success": false,
+  "message": "This Telegram account is already linked to another user",
+  "code": "TELEGRAM_ALREADY_LINKED"
+}
+```
+
+### Frontend: Linking a Telegram Account (Deep Link System)
+
+Privy Telegram authentication is **not supported on `.xyz` domains**. Instead, we use a deep link system that bypasses Privy entirely for Telegram:
+
+#### Flow
 
 ```
-POST /auth/link-telegram
-Authorization: Bearer <privy-jwt>
-Content-Type: application/json
+Frontend                    Backend                    Telegram Bot
+   │                           │                           │
+   ├─ POST /auth/telegram/     │                           │
+   │  generate-link            │                           │
+   │  (Privy JWT)              │                           │
+   │                           │                           │
+   │◄── { code, deepLink,     │                           │
+   │      expiresIn: 300 }     │                           │
+   │                           │                           │
+   │  Show "Link Telegram"     │                           │
+   │  button with deepLink     │                           │
+   │  ─────────────────────────────────────────────────►   │
+   │                           │                           │
+   │                           │     User clicks deep link │
+   │                           │     Bot receives /start   │
+   │                           │     LINK_A1B2C3D4         │
+   │                           │                           │
+   │                           │◄── POST /telegram/        │
+   │                           │    verify-link             │
+   │                           │    { code, telegramId,    │
+   │                           │      username, firstName } │
+   │                           │                           │
+   │                           │──► { success: true }      │
+   │                           │                           │
+   │  Poll every 2s:           │                           │
+   │  GET /auth/telegram/      │                           │
+   │  link-status/:code        │                           │
+   │  (Privy JWT)              │                           │
+   │                           │                           │
+   │◄── { linked: true,       │                           │
+   │      telegramUsername }   │                           │
+   │                           │                           │
+   │  Show success UI          │                           │
+```
 
-{
-  "telegramUserId": "123456789"
-}
+#### Step 1: Generate Link Code
+
+```
+POST /auth/telegram/generate-link
+Authorization: Bearer <privy-jwt>
 ```
 
 **Response:**
 ```json
 {
   "success": true,
-  "message": "Telegram account linked successfully"
+  "message": "Link code generated",
+  "data": {
+    "code": "A1B2C3D4",
+    "deepLink": "https://t.me/LiquidTerminalBot?start=LINK_A1B2C3D4",
+    "expiresIn": 300
+  }
 }
 ```
 
-To unlink:
+#### Step 2: Show Deep Link Button
+
+Display the `deepLink` URL as a button (e.g. "Open Telegram"). When clicked, it opens the bot in Telegram. The bot automatically receives the code via `/start LINK_A1B2C3D4`.
+
+#### Step 3: Poll Link Status
+
 ```
-DELETE /auth/unlink-telegram
+GET /auth/telegram/link-status/:code
 Authorization: Bearer <privy-jwt>
+```
+
+**Response (pending):**
+```json
+{
+  "success": true,
+  "data": { "linked": false }
+}
+```
+
+**Response (completed):**
+```json
+{
+  "success": true,
+  "data": {
+    "linked": true,
+    "telegramUsername": "john_doe"
+  }
+}
+```
+
+Poll every 2-3 seconds. Stop when `linked: true` or after 5 minutes (code expired).
+
+#### Step 4: Unlink
+
+```
+DELETE /auth/telegram/unlink
+Authorization: Bearer <privy-jwt>
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Telegram account unlinked successfully"
+}
 ```
 
 ### Database Changes
@@ -944,6 +1068,51 @@ Authorization: Bearer <privy-jwt>
 ```env
 # Add to backend .env
 TELEGRAM_BOT_API_KEY=your_shared_secret_key_here
+TELEGRAM_BOT_USERNAME=LiquidTerminalBot
+```
+
+### Bot Implementation: Handling Deep Link
+
+When the bot receives `/start LINK_XXXXX`, it must:
+
+1. Extract the code from the start parameter (strip `LINK_` prefix)
+2. Call `POST /telegram/verify-link` with the code + user's Telegram info
+3. Confirm to the user that linking succeeded (or show error)
+
+```python
+# Example: handling deep link in bot
+import requests
+
+async def handle_start(update, context):
+    args = context.args  # e.g. ["LINK_A1B2C3D4"]
+    
+    if args and args[0].startswith("LINK_"):
+        code = args[0][5:]  # Remove "LINK_" prefix
+        telegram_user = update.effective_user
+        
+        response = requests.post(
+            f"{API_BASE_URL}/telegram/verify-link",
+            json={
+                "code": code,
+                "telegramId": str(telegram_user.id),
+                "username": telegram_user.username,
+                "firstName": telegram_user.first_name,
+            },
+            headers={"Authorization": f"Bot {BOT_API_KEY}"}
+        )
+        
+        if response.ok:
+            await update.message.reply_text(
+                "Account linked successfully! You can now use /wallets."
+            )
+        else:
+            error = response.json()
+            await update.message.reply_text(
+                f"Failed to link: {error.get('message', 'Unknown error')}"
+            )
+        return
+    
+    # Normal /start behavior...
 ```
 
 ### Bot Implementation: Using Linked Wallets
