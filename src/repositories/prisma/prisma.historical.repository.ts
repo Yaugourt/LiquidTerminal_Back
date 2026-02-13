@@ -78,15 +78,18 @@ export class PrismaHistoricalLiquidationRepository
     );
   }
 
-  async getStats(since: Date): Promise<HistoricalStats> {
+  async getStats(since: Date, coin?: string): Promise<HistoricalStats> {
     return this.executeWithErrorHandling(
       async () => {
-        const timeFilter = { time: { gte: since } };
+        const whereFilter: Record<string, unknown> = { time: { gte: since } };
+        if (coin) {
+          whereFilter.coin = coin;
+        }
 
         const [aggregates, dirGroups, topCoinGroup] = await Promise.all([
           // 1. Global aggregates: totalVolume, maxLiq, count
           this.prismaClient.rawLiquidation.aggregate({
-            where: timeFilter,
+            where: whereFilter,
             _sum: { notionalTotal: true },
             _max: { notionalTotal: true },
             _count: true,
@@ -94,14 +97,14 @@ export class PrismaHistoricalLiquidationRepository
           // 2. Group by liqDir for long/short counts + volumes
           this.prismaClient.rawLiquidation.groupBy({
             by: ['liqDir'],
-            where: timeFilter,
+            where: whereFilter,
             _sum: { notionalTotal: true },
             _count: true,
           }),
           // 3. Group by coin, ordered by volume DESC, take top 1
           this.prismaClient.rawLiquidation.groupBy({
             by: ['coin'],
-            where: timeFilter,
+            where: whereFilter,
             _sum: { notionalTotal: true },
             orderBy: { _sum: { notionalTotal: 'desc' } },
             take: 1,
@@ -151,7 +154,7 @@ export class PrismaHistoricalLiquidationRepository
         };
       },
       'computing historical stats',
-      { since: since.toISOString() }
+      { since: since.toISOString(), coin }
     );
   }
 }
