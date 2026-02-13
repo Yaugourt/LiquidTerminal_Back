@@ -1,9 +1,8 @@
 import { BaseRepository } from './base.repository.interface';
-import { RawLiquidationCreateInput, IngestionStateResponse } from '../../types/historical.types';
+import { RawLiquidationCreateInput, IngestionStateResponse, HistoricalStats } from '../../types/historical.types';
 
 /**
- * Repository interface for historical liquidation data (write-only ingestion).
- * Read/analytics methods will be added in a future PR.
+ * Repository interface for historical liquidation data.
  */
 export interface HistoricalLiquidationRepository extends BaseRepository {
   /**
@@ -26,4 +25,10 @@ export interface HistoricalLiquidationRepository extends BaseRepository {
    * Get current ingestion state (for monitoring)
    */
   getIngestionState(): Promise<IngestionStateResponse | null>;
+
+  /**
+   * Get aggregated stats for liquidations since a given date.
+   * Uses DB-level aggregation (aggregate + groupBy) for performance.
+   */
+  getStats(since: Date): Promise<HistoricalStats>;
 }
