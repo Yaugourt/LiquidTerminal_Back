@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Raw liquidation data from HypeDexer WebSocket/REST API
+model RawLiquidation {
+  id                 BigInt   @id @default(autoincrement())
+  tid                Int      @unique
+  time               DateTime @db.Timestamptz(3)
+  timeMs             BigInt   @map("time_ms")
+  coin               String   @db.VarChar(20)
+  hash               String   @db.VarChar(255)
+  liquidatedUser     String   @map("liquidated_user") @db.VarChar(255)
+  sizeTotal          Float    @map("size_total")
+  notionalTotal      Float    @map("notional_total")
+  fillPxVwap         Float    @map("fill_px_vwap")
+  markPx             Float    @map("mark_px")
+  method             String   @db.VarChar(50)
+  feeTotalLiquidated Float    @map("fee_total_liquidated")
+  liquidators        String[]
+  liquidatorCount    Int      @map("liquidator_count")
+  liqDir             String   @map("liq_dir") @db.VarChar(10)
+  rawData            Json     @map("raw_data")
+  ingestedAt         DateTime @default(now()) @map("ingested_at") @db.Timestamptz(3)
+
+  @@index([time])
+  @@index([coin])
+  @@index([liquidatedUser])
+  @@index([coin, time])
+  @@index([coin, liqDir, time])
+  @@index([notionalTotal])
+  @@map("raw_liquidations")
+}
+
+/// Ingestion state watermark for monitoring and crash recovery
+model IngestionState {
+  id            Int      @id @default(1)
+  lastTid       Int      @map("last_tid")
+  lastTimeMs    BigInt   @map("last_time_ms")
+  totalIngested BigInt   @default(0) @map("total_ingested")
+  lastError     String?  @map("last_error") @db.Text
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("ingestion_state")
+}
