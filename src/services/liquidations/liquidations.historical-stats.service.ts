@@ -30,8 +30,8 @@ export class HistoricalStatsService {
    * @param coin Optional coin filter (e.g. "BTC")
    */
   async getStats24h(coin?: string): Promise<{ stats: HistoricalStats; filters: { period: string; coin: string | null }; metadata: { computedAt: string; cacheTTL: number; nextUpdateAt: string; dataFrom: string; dataTo: string } }> {
-    const normalizedCoin = coin?.toUpperCase();
-    const cacheKey = CACHE_KEYS.HISTORICAL_STATS_24H(normalizedCoin);
+    // Keep original casing: prefixes are lowercase (flx:, cash:, km:, xyz:) but symbols are uppercase
+    const cacheKey = CACHE_KEYS.HISTORICAL_STATS_24H(coin);
 
     // Check cache
     const cached = await redisService.get(cacheKey);
@@ -41,14 +41,14 @@ export class HistoricalStatsService {
 
     // Compute from DB
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const stats = await this.repository.getStats(since, normalizedCoin);
+    const stats = await this.repository.getStats(since, coin);
 
     const now = new Date();
     const result = {
       stats,
       filters: {
         period: '24h',
-        coin: normalizedCoin ?? null,
+        coin: coin ?? null,
       },
       metadata: {
         computedAt: now.toISOString(),
@@ -65,7 +65,7 @@ export class HistoricalStatsService {
     logDeduplicator.info('Historical stats 24h computed', {
       liquidationsCount: stats.liquidationsCount,
       totalVolume_USD: stats.totalVolume_USD,
-      coin: normalizedCoin,
+      coin,
     });
 
     return result;
