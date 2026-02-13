@@ -436,13 +436,17 @@ router.get('/stream/stats',
 /**
  * GET /liquidations/historical/stats
  * Get aggregated stats from the historical database (last 24h)
+ *
+ * Query params:
+ * - coin: Coin symbol filter, case insensitive (optional, e.g. "BTC")
  */
 router.get('/historical/stats',
   marketRateLimiter,
-  (async (_req: Request, res: Response) => {
+  (async (req: Request, res: Response) => {
     try {
-      const stats = await historicalStatsService.getStats24h();
-      res.json({ success: true, data: stats });
+      const coin = typeof req.query.coin === 'string' ? req.query.coin : undefined;
+      const result = await historicalStatsService.getStats24h(coin);
+      res.json({ success: true, data: result });
     } catch (error) {
       logDeduplicator.error('Error fetching historical stats:', { error });
 

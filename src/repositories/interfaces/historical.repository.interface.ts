@@ -29,6 +29,7 @@ export interface HistoricalLiquidationRepository extends BaseRepository {
   /**
    * Get aggregated stats for liquidations since a given date.
    * Uses DB-level aggregation (aggregate + groupBy) for performance.
+   * @param coin Optional coin filter (e.g. "BTC")
    */
-  getStats(since: Date): Promise<HistoricalStats>;
+  getStats(since: Date, coin?: string): Promise<HistoricalStats>;
 }
