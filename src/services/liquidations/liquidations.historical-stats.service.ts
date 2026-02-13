@@ -5,6 +5,23 @@ import { redisService } from '../../core/redis.service';
 import { CACHE_KEYS, CACHE_TTL } from '../../constants/cache.constants';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
+export type HistoricalStatsPeriod = '24h' | '7d' | '14d' | '30d';
+
+const PERIOD_HOURS: Record<HistoricalStatsPeriod, number> = {
+  '24h': 24,
+  '7d': 7 * 24,
+  '14d': 14 * 24,
+  '30d': 30 * 24,
+};
+
+// Longer periods get longer cache TTL (less volatile data)
+const PERIOD_CACHE_TTL: Record<HistoricalStatsPeriod, number> = {
+  '24h': CACHE_TTL.SHORT,    // 60s
+  '7d': CACHE_TTL.MEDIUM,    // 300s
+  '14d': CACHE_TTL.MEDIUM,   // 300s
+  '30d': CACHE_TTL.MEDIUM,   // 300s
+};
+
 /**
  * Service for computing aggregated stats from the historical liquidation database.
  * Follows the Singleton pattern as per architecture.
@@ -25,13 +42,17 @@ export class HistoricalStatsService {
   }
 
   /**
-   * Get aggregated stats for the last 24 hours.
-   * Cached in Redis for 60 seconds.
-   * @param coin Optional coin filter (e.g. "BTC")
+   * Get aggregated stats for a given period.
+   * @param period Time window: '24h', '7d', '14d', '30d'
+   * @param coin Optional coin filter (e.g. "BTC", "flx:SILVER")
    */
-  async getStats24h(coin?: string): Promise<{ stats: HistoricalStats; filters: { period: string; coin: string | null }; metadata: { computedAt: string; cacheTTL: number; nextUpdateAt: string; dataFrom: string; dataTo: string } }> {
-    // Keep original casing: prefixes are lowercase (flx:, cash:, km:, xyz:) but symbols are uppercase
-    const cacheKey = CACHE_KEYS.HISTORICAL_STATS_24H(coin);
+  async getStats(period: HistoricalStatsPeriod = '24h', coin?: string): Promise<{
+    stats: HistoricalStats;
+    filters: { period: string; coin: string | null };
+    metadata: { computedAt: string; cacheTTL: number; nextUpdateAt: string; dataFrom: string; dataTo: string };
+  }> {
+    const cacheTTL = PERIOD_CACHE_TTL[period];
+    const cacheKey = CACHE_KEYS.HISTORICAL_STATS(period, coin);
 
     // Check cache
     const cached = await redisService.get(cacheKey);
@@ -40,29 +61,31 @@ export class HistoricalStatsService {
     }
 
     // Compute from DB
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const hours = PERIOD_HOURS[period];
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000);
     const stats = await this.repository.getStats(since, coin);
 
     const now = new Date();
     const result = {
       stats,
       filters: {
-        period: '24h',
+        period,
         coin: coin ?? null,
       },
       metadata: {
         computedAt: now.toISOString(),
-        cacheTTL: CACHE_TTL.SHORT,
-        nextUpdateAt: new Date(now.getTime() + CACHE_TTL.SHORT * 1000).toISOString(),
+        cacheTTL,
+        nextUpdateAt: new Date(now.getTime() + cacheTTL * 1000).toISOString(),
         dataFrom: since.toISOString(),
         dataTo: now.toISOString(),
       },
     };
 
     // Cache result
-    await redisService.set(cacheKey, JSON.stringify(result), CACHE_TTL.SHORT);
+    await redisService.set(cacheKey, JSON.stringify(result), cacheTTL);
 
-    logDeduplicator.info('Historical stats 24h computed', {
+    logDeduplicator.info('Historical stats computed', {
+      period,
       liquidationsCount: stats.liquidationsCount,
       totalVolume_USD: stats.totalVolume_USD,
       coin,

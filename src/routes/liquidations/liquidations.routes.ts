@@ -3,7 +3,7 @@ import { LiquidationsService } from '../../services/liquidations/liquidations.se
 import { SSEManagerService } from '../../services/liquidations/sse-manager.service';
 import { LiquidationsIngestionService } from '../../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../../services/liquidations/liquidations.backfill.service';
-import { HistoricalStatsService } from '../../services/liquidations/liquidations.historical-stats.service';
+import { HistoricalStatsService, HistoricalStatsPeriod } from '../../services/liquidations/liquidations.historical-stats.service';
 import { LiquidationQueryParams, LiquidationsError, ChartPeriod } from '../../types/liquidations.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
@@ -435,17 +435,29 @@ router.get('/stream/stats',
 
 /**
  * GET /liquidations/historical/stats
- * Get aggregated stats from the historical database (last 24h)
+ * Get aggregated stats from the historical database
  *
  * Query params:
- * - coin: Coin symbol filter, case insensitive (optional, e.g. "BTC")
+ * - period: '24h' | '7d' | '14d' | '30d' (default: '24h')
+ * - coin: Coin symbol filter, case sensitive (optional, e.g. "BTC", "flx:SILVER")
  */
 router.get('/historical/stats',
   marketRateLimiter,
   (async (req: Request, res: Response) => {
     try {
+      const validPeriods: HistoricalStatsPeriod[] = ['24h', '7d', '14d', '30d'];
+      const periodParam = (req.query.period as string) || '24h';
+
+      if (!validPeriods.includes(periodParam as HistoricalStatsPeriod)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid period. Valid values: ${validPeriods.join(', ')}`
+        });
+      }
+
+      const period = periodParam as HistoricalStatsPeriod;
       const coin = typeof req.query.coin === 'string' ? req.query.coin : undefined;
-      const result = await historicalStatsService.getStats24h(coin);
+      const result = await historicalStatsService.getStats(period, coin);
       res.json({ success: true, data: result });
     } catch (error) {
       logDeduplicator.error('Error fetching historical stats:', { error });
