@@ -112,7 +112,7 @@ export class LiquidationsBackfillService {
    */
   private toCreateInput(liq: Liquidation): RawLiquidationCreateInput {
     return {
-      tid: liq.tid,
+      tid: BigInt(liq.tid),
       time: new Date(liq.time),
       timeMs: BigInt(liq.time_ms),
       coin: liq.coin,
@@ -278,11 +278,11 @@ export class LiquidationsBackfillService {
 
     // Update ingestion state watermark
     if (inserted > 0) {
-      const maxTid = Math.max(...liquidations.map((l) => l.tid));
-      const maxTimeMs = Math.max(...liquidations.map((l) => l.time_ms));
+      const maxTid = liquidations.reduce((max, l) => l.tid > max ? l.tid : max, liquidations[0].tid);
+      const maxTimeMs = liquidations.reduce((max, l) => l.time_ms > max ? l.time_ms : max, liquidations[0].time_ms);
 
       try {
-        await this.repository.upsertIngestionState(maxTid, maxTimeMs, inserted);
+        await this.repository.upsertIngestionState(BigInt(maxTid), BigInt(maxTimeMs), inserted);
       } catch (error) {
         logDeduplicator.error('LiquidationsBackfillService: Failed to update ingestion state', {
           error: error instanceof Error ? error.message : String(error),

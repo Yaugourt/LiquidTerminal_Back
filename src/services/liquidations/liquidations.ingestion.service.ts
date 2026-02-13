@@ -164,7 +164,7 @@ export class LiquidationsIngestionService {
    */
   private toCreateInput(liq: Liquidation): RawLiquidationCreateInput {
     return {
-      tid: liq.tid,
+      tid: BigInt(liq.tid),
       time: new Date(liq.time),
       timeMs: BigInt(liq.time_ms),
       coin: liq.coin,
@@ -240,13 +240,13 @@ export class LiquidationsIngestionService {
       this.lastFlushAt = new Date();
 
       // Track watermark
-      const maxTid = Math.max(...batch.map((l) => l.tid));
-      const maxTimeMs = Math.max(...batch.map((l) => l.time_ms));
+      const maxTid = batch.reduce((max, l) => l.tid > max ? l.tid : max, batch[0].tid);
+      const maxTimeMs = batch.reduce((max, l) => l.time_ms > max ? l.time_ms : max, batch[0].time_ms);
       this.lastTid = maxTid;
       this.lastTimeMs = maxTimeMs;
 
       // Update ingestion state in DB
-      await this.updateIngestionState(maxTid, maxTimeMs, inserted);
+      await this.updateIngestionState(BigInt(maxTid), BigInt(maxTimeMs), inserted);
 
       if (inserted > 0) {
         logDeduplicator.info('LiquidationsIngestionService: Batch flushed', {
@@ -268,7 +268,7 @@ export class LiquidationsIngestionService {
   /**
    * Update ingestion state watermark in the database
    */
-  private async updateIngestionState(lastTid: number, lastTimeMs: number, newCount: number): Promise<void> {
+  private async updateIngestionState(lastTid: bigint, lastTimeMs: bigint, newCount: number): Promise<void> {
     try {
       await this.repository.upsertIngestionState(lastTid, lastTimeMs, newCount);
     } catch (error) {

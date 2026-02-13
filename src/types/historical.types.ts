@@ -5,7 +5,7 @@ import type { Prisma } from '../../prisma-historical/generated/client';
  * Maps from the WebSocket/REST Liquidation type to the Prisma model.
  */
 export interface RawLiquidationCreateInput {
-  tid: number;
+  tid: bigint;
   time: Date;
   timeMs: bigint;
   coin: string;
@@ -28,7 +28,7 @@ export interface RawLiquidationCreateInput {
  */
 export interface IngestionStateResponse {
   id: number;
-  lastTid: number;
+  lastTid: bigint;
   lastTimeMs: bigint;
   totalIngested: bigint;
   lastError: string | null;

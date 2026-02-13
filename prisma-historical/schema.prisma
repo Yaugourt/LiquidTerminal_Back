@@ -10,7 +10,7 @@ datasource db {
 /// Raw liquidation data from HypeDexer WebSocket/REST API
 model RawLiquidation {
   id                 BigInt   @id @default(autoincrement())
-  tid                Int      @unique
+  tid                BigInt   @unique
   time               DateTime @db.Timestamptz(3)
   timeMs             BigInt   @map("time_ms")
   coin               String   @db.VarChar(20)
@@ -40,7 +40,7 @@ model RawLiquidation {
 /// Ingestion state watermark for monitoring and crash recovery
 model IngestionState {
   id            Int      @id @default(1)
-  lastTid       Int      @map("last_tid")
+  lastTid       BigInt   @map("last_tid")
   lastTimeMs    BigInt   @map("last_time_ms")
   totalIngested BigInt   @default(0) @map("total_ingested")
   lastError     String?  @map("last_error") @db.Text
