@@ -20,7 +20,7 @@ export interface HistoricalLiquidationRepository extends BaseRepository {
   /**
    * Upsert the single-row ingestion state watermark
    */
-  upsertIngestionState(lastTid: number, lastTimeMs: number, newCount: number): Promise<void>;
+  upsertIngestionState(lastTid: bigint, lastTimeMs: bigint, newCount: number): Promise<void>;
 
   /**
    * Get current ingestion state (for monitoring)

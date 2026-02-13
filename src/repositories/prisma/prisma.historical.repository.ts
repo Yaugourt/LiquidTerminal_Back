@@ -43,27 +43,27 @@ export class PrismaHistoricalLiquidationRepository
     );
   }
 
-  async upsertIngestionState(lastTid: number, lastTimeMs: number, newCount: number): Promise<void> {
+  async upsertIngestionState(lastTid: bigint, lastTimeMs: bigint, newCount: number): Promise<void> {
     return this.executeWithErrorHandling(
       async () => {
         await this.prismaClient.ingestionState.upsert({
           where: { id: 1 },
           update: {
             lastTid,
-            lastTimeMs: BigInt(lastTimeMs),
+            lastTimeMs,
             totalIngested: { increment: BigInt(newCount) },
             lastError: null,
           },
           create: {
             id: 1,
             lastTid,
-            lastTimeMs: BigInt(lastTimeMs),
+            lastTimeMs,
             totalIngested: BigInt(newCount),
           },
         });
       },
       'upserting ingestion state',
-      { lastTid, newCount }
+      { lastTid: Number(lastTid), newCount }
     );
   }
 
