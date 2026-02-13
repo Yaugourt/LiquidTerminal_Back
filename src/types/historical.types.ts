@@ -34,3 +34,19 @@ export interface IngestionStateResponse {
   lastError: string | null;
   updatedAt: Date;
 }
+
+/**
+ * Aggregated stats computed from historical liquidation data.
+ */
+export interface HistoricalStats {
+  totalVolume: number;
+  liquidationsCount: number;
+  longCount: number;
+  shortCount: number;
+  longVolume: number;
+  shortVolume: number;
+  topCoin: string;
+  topCoinVolume: number;
+  avgSize: number;
+  maxLiq: number;
+}

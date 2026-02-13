@@ -3,6 +3,7 @@ import { LiquidationsService } from '../../services/liquidations/liquidations.se
 import { SSEManagerService } from '../../services/liquidations/sse-manager.service';
 import { LiquidationsIngestionService } from '../../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../../services/liquidations/liquidations.backfill.service';
+import { HistoricalStatsService } from '../../services/liquidations/liquidations.historical-stats.service';
 import { LiquidationQueryParams, LiquidationsError, ChartPeriod } from '../../types/liquidations.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
@@ -14,6 +15,7 @@ import { serializeBigInts } from '../../utils/bigint.utils';
 const router = Router();
 const liquidationsService = LiquidationsService.getInstance();
 const sseManager = SSEManagerService.getInstance();
+const historicalStatsService = HistoricalStatsService.getInstance();
 
 /**
  * Parse validated query parameters into LiquidationQueryParams
@@ -428,6 +430,34 @@ router.get('/stream/stats',
       success: true,
       data: stats
     });
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/historical/stats
+ * Get aggregated stats from the historical database (last 24h)
+ */
+router.get('/historical/stats',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    try {
+      const stats = await historicalStatsService.getStats24h();
+      res.json({ success: true, data: stats });
+    } catch (error) {
+      logDeduplicator.error('Error fetching historical stats:', { error });
+
+      if (error instanceof LiquidationsError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          error: error.message
+        });
+      }
+
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Internal server error'
+      });
+    }
   }) as RequestHandler
 );
 
