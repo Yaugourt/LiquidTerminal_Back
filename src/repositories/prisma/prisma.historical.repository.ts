@@ -141,16 +141,16 @@ export class PrismaHistoricalLiquidationRepository
           : 0;
 
         return {
-          totalVolume: Math.round(totalVolume * 100) / 100,
+          totalVolume_USD: Math.round(totalVolume * 100) / 100,
           liquidationsCount,
           longCount,
           shortCount,
-          longVolume: Math.round(longVolume * 100) / 100,
-          shortVolume: Math.round(shortVolume * 100) / 100,
+          longVolume_USD: Math.round(longVolume * 100) / 100,
+          shortVolume_USD: Math.round(shortVolume * 100) / 100,
           topCoin,
-          topCoinVolume: Math.round(topCoinVolume * 100) / 100,
-          avgSize,
-          maxLiq: Math.round(maxLiq * 100) / 100,
+          topCoinVolume_USD: Math.round(topCoinVolume * 100) / 100,
+          avgSize_USD: avgSize,
+          maxLiq_USD: Math.round(maxLiq * 100) / 100,
         };
       },
       'computing historical stats',
