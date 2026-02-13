@@ -11,6 +11,7 @@ import { securityHeaders } from './middleware/security.middleware';
 
 import { ClientInitializerService } from './core/client.initializer.service';
 import { prisma } from './core/prisma.service';
+import { PrismaHistoricalService } from './core/prisma.historical.service';
 import { FileCleanupService } from './utils/fileCleanup';
 import { InternalWebSocketServer } from './websocket';
 
@@ -170,9 +171,10 @@ process.on('SIGINT', async () => {
   logDeduplicator.info('Received SIGINT. Performing graceful shutdown...');
   // Shutdown WebSocket Server
   InternalWebSocketServer.getInstance().shutdown();
-  // Stop all polling and shutdown SSE connections
-  clientInitializer.stopAllPolling();
+  // Stop all polling, flush ingestion buffer, shutdown SSE connections
+  await clientInitializer.stopAllPolling();
   await prisma.$disconnect();
+  await PrismaHistoricalService.disconnect();
   process.exit(0);
 });
 
@@ -180,9 +182,10 @@ process.on('SIGTERM', async () => {
   logDeduplicator.info('Received SIGTERM. Performing graceful shutdown...');
   // Shutdown WebSocket Server
   InternalWebSocketServer.getInstance().shutdown();
-  // Stop all polling and shutdown SSE connections
-  clientInitializer.stopAllPolling();
+  // Stop all polling, flush ingestion buffer, shutdown SSE connections
+  await clientInitializer.stopAllPolling();
   await prisma.$disconnect();
+  await PrismaHistoricalService.disconnect();
   process.exit(0);
 });
 

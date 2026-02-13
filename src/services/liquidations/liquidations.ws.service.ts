@@ -25,8 +25,11 @@ export class LiquidationsWebSocketService {
   // External WS client
   private readonly hypeDexerClient: HypeDexerLiquidationsWSClient;
 
-  // Callbacks for processed liquidations
+  // Callbacks for processed liquidations (aggregated)
   private processedCallbacks: Set<ProcessedLiquidationCallback> = new Set();
+
+  // Callbacks for raw validated liquidations (before aggregation) — used by ingestion service
+  private rawLiquidationCallbacks: Set<(liquidations: Liquidation[]) => void> = new Set();
 
   // Deduplication: track recently seen tids to avoid duplicates
   private recentTids: Set<number> = new Set();
@@ -84,6 +87,7 @@ export class LiquidationsWebSocketService {
     logDeduplicator.info('LiquidationsWebSocketService: Stopping');
     this.hypeDexerClient.stop();
     this.processedCallbacks.clear();
+    this.rawLiquidationCallbacks.clear();
 
     if (this.aggregationTimer) {
       clearTimeout(this.aggregationTimer);
@@ -92,13 +96,25 @@ export class LiquidationsWebSocketService {
   }
 
   /**
-   * Register a callback for processed liquidation events
+   * Register a callback for processed liquidation events (aggregated)
    * Returns unsubscribe function
    */
   public onProcessedLiquidation(callback: ProcessedLiquidationCallback): () => void {
     this.processedCallbacks.add(callback);
     return () => {
       this.processedCallbacks.delete(callback);
+    };
+  }
+
+  /**
+   * Register a callback for raw validated liquidations (before aggregation)
+   * Used by ingestion service to persist individual liquidations to DB
+   * Returns unsubscribe function
+   */
+  public onRawLiquidation(callback: (liquidations: Liquidation[]) => void): () => void {
+    this.rawLiquidationCallbacks.add(callback);
+    return () => {
+      this.rawLiquidationCallbacks.delete(callback);
     };
   }
 
@@ -141,6 +157,17 @@ export class LiquidationsWebSocketService {
       received: liquidations.length,
       valid: validLiquidations.length,
     });
+
+    // Notify raw liquidation consumers (historical DB ingestion) before aggregation
+    for (const callback of this.rawLiquidationCallbacks) {
+      try {
+        callback(validLiquidations);
+      } catch (error) {
+        logDeduplicator.error('LiquidationsWebSocketService: Raw liquidation callback error', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     // Add to aggregation buffer
     for (const liq of validLiquidations) {

@@ -19,6 +19,8 @@ import { SSEManagerService } from '../services/liquidations/sse-manager.service'
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
 import { TopTradersService } from '../services/toptraders/toptraders.service';
 import { ActiveUsersService } from '../services/activeusers/activeusers.service';
+import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
+import { LiquidationsBackfillService } from '../services/liquidations/liquidations.backfill.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export class ClientInitializerService {
@@ -68,7 +70,7 @@ export class ClientInitializerService {
   public async initialize(): Promise<void> {
     try {
       logDeduplicator.info('Starting client initialization...');
-      
+
       // ✅ Redis est déjà prêt, on peut initialiser les clients directement
       logDeduplicator.info('Redis is ready, initializing clients...');
 
@@ -162,6 +164,16 @@ export class ClientInitializerService {
       this.clients.set('activeUsers', activeUsersService);
       logDeduplicator.info('Active Users service initialized successfully');
 
+      // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
+      const ingestionService = LiquidationsIngestionService.getInstance();
+      this.clients.set('liquidationsIngestion', ingestionService);
+      logDeduplicator.info('Liquidations Ingestion service initialized successfully');
+
+      // Initialiser le service de backfill des liquidations (REST → DB historique)
+      const backfillService = LiquidationsBackfillService.getInstance();
+      this.clients.set('liquidationsBackfill', backfillService);
+      logDeduplicator.info('Liquidations Backfill service initialized successfully');
+
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
@@ -175,7 +187,8 @@ export class ClientInitializerService {
 
   private async startAllPolling(): Promise<void> {
     logDeduplicator.info('Starting polling for all clients...');
-    
+
+    // 1. Start all standard polling clients
     for (const [name, client] of this.clients.entries()) {
       if ('startPolling' in client) {
         try {
@@ -185,21 +198,91 @@ export class ClientInitializerService {
           logDeduplicator.error(`Error starting polling for ${name} client:`, { error });
         }
       }
-      // Start Liquidations WebSocket Service (uses start() not startPolling())
-      if ('start' in client && name === 'liquidationsWS') {
-        try {
-          client.start();
-          logDeduplicator.info('Started Liquidations WebSocket Service');
-        } catch (error) {
-          logDeduplicator.error('Error starting Liquidations WebSocket Service:', { error });
-        }
+    }
+
+    // 2. Start Liquidations WebSocket (connects and starts receiving data)
+    const wsClient = this.clients.get('liquidationsWS');
+    if (wsClient) {
+      try {
+        wsClient.start();
+        logDeduplicator.info('Started Liquidations WebSocket Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Liquidations WebSocket Service:', { error });
       }
     }
-    
+
+    // 3. Start Ingestion Service (subscribes to WS, buffers + flushes to DB)
+    const ingestionClient = this.clients.get('liquidationsIngestion');
+    if (ingestionClient) {
+      try {
+        ingestionClient.start();
+        logDeduplicator.info('Started Liquidations Ingestion Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Liquidations Ingestion Service:', { error });
+      }
+    }
+
+    // 4. Run Backfill (REST → DB, awaits completion)
+    //    WS ingestion runs in parallel — skipDuplicates handles overlap
+    const backfillClient = this.clients.get('liquidationsBackfill');
+    if (backfillClient) {
+      try {
+        await backfillClient.start();
+        logDeduplicator.info('Liquidations Backfill completed');
+      } catch (error) {
+        logDeduplicator.error('Error during Liquidations Backfill:', { error });
+      }
+    }
+
     logDeduplicator.info('All client polling started successfully');
   }
 
-  public stopAllPolling(): void {
+  public async stopAllPolling(): Promise<void> {
+    // Stop ingestion FIRST — flush remaining batch before disconnecting DB
+    const ingestionClient = this.clients.get('liquidationsIngestion');
+    if (ingestionClient) {
+      try {
+        await ingestionClient.stop();
+        logDeduplicator.info('Liquidations Ingestion Service stopped (final flush complete)');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Liquidations Ingestion Service:', { error });
+      }
+    }
+
+    // Stop backfill (sets flag to halt on next page)
+    const backfillClient = this.clients.get('liquidationsBackfill');
+    if (backfillClient) {
+      try {
+        backfillClient.stop();
+        logDeduplicator.info('Liquidations Backfill Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Liquidations Backfill Service:', { error });
+      }
+    }
+
+    // Stop WS
+    const wsClient = this.clients.get('liquidationsWS');
+    if (wsClient) {
+      try {
+        wsClient.stop();
+        logDeduplicator.info('Liquidations WebSocket Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Liquidations WebSocket Service:', { error });
+      }
+    }
+
+    // Stop SSE Manager
+    const sseClient = this.clients.get('sseManager');
+    if (sseClient && 'shutdown' in sseClient) {
+      try {
+        sseClient.shutdown();
+        logDeduplicator.info('SSE Manager shutdown successfully');
+      } catch (error) {
+        logDeduplicator.error('Error shutting down SSE Manager:', { error });
+      }
+    }
+
+    // Stop all standard polling clients
     for (const [name, client] of this.clients.entries()) {
       if ('stopPolling' in client) {
         try {
@@ -209,24 +292,6 @@ export class ClientInitializerService {
           logDeduplicator.error(`Error stopping polling for ${name} client:`, { error });
         }
       }
-      // Handle SSE Manager shutdown
-      if ('shutdown' in client && name === 'sseManager') {
-        try {
-          client.shutdown();
-          logDeduplicator.info('SSE Manager shutdown successfully');
-        } catch (error) {
-          logDeduplicator.error('Error shutting down SSE Manager:', { error });
-        }
-      }
-      // Handle Liquidations WebSocket Service stop
-      if ('stop' in client && name === 'liquidationsWS') {
-        try {
-          client.stop();
-          logDeduplicator.info('Liquidations WebSocket Service stopped successfully');
-        } catch (error) {
-          logDeduplicator.error('Error stopping Liquidations WebSocket Service:', { error });
-        }
-      }
     }
   }
-} 
+}

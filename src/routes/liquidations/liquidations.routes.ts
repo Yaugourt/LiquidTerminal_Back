@@ -1,12 +1,15 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { LiquidationsService } from '../../services/liquidations/liquidations.service';
 import { SSEManagerService } from '../../services/liquidations/sse-manager.service';
+import { LiquidationsIngestionService } from '../../services/liquidations/liquidations.ingestion.service';
+import { LiquidationsBackfillService } from '../../services/liquidations/liquidations.backfill.service';
 import { LiquidationQueryParams, LiquidationsError, ChartPeriod } from '../../types/liquidations.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { liquidationsQuerySchema, recentLiquidationsQuerySchema } from '../../schemas/liquidations.schema';
 import { sseStreamQuerySchema } from '../../schemas/sse.schema';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { serializeBigInts } from '../../utils/bigint.utils';
 
 const router = Router();
 const liquidationsService = LiquidationsService.getInstance();
@@ -425,6 +428,26 @@ router.get('/stream/stats',
       success: true,
       data: stats
     });
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/ingestion/stats
+ * Get historical data ingestion statistics (monitoring)
+ */
+router.get('/ingestion/stats',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    const ingestionService = LiquidationsIngestionService.getInstance();
+    const backfillService = LiquidationsBackfillService.getInstance();
+
+    res.json(serializeBigInts({
+      success: true,
+      data: {
+        ingestion: ingestionService.getStats(),
+        backfill: backfillService.getStats(),
+      },
+    }));
   }) as RequestHandler
 );
 

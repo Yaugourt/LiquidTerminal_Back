@@ -30,6 +30,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Prisma generated clients
+prisma-historical/generated/
+
 # TypeScript cache
 *.tsbuildinfo
 
