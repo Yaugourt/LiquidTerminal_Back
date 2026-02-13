@@ -29,7 +29,7 @@ export class HistoricalStatsService {
    * Cached in Redis for 60 seconds.
    * @param coin Optional coin filter (e.g. "BTC")
    */
-  async getStats24h(coin?: string): Promise<{ stats: HistoricalStats; units: Record<string, string>; filters: { period: string; coin: string | null } }> {
+  async getStats24h(coin?: string): Promise<{ stats: HistoricalStats; filters: { period: string; coin: string | null }; metadata: { computedAt: string; cacheTTL: number; nextUpdateAt: string; dataFrom: string; dataTo: string } }> {
     const normalizedCoin = coin?.toUpperCase();
     const cacheKey = CACHE_KEYS.HISTORICAL_STATS_24H(normalizedCoin);
 
@@ -46,18 +46,6 @@ export class HistoricalStatsService {
     const now = new Date();
     const result = {
       stats,
-      units: {
-        totalVolume: 'USD',
-        liquidationsCount: 'count',
-        longCount: 'count',
-        shortCount: 'count',
-        longVolume: 'USD',
-        shortVolume: 'USD',
-        topCoin: 'symbol',
-        topCoinVolume: 'USD',
-        avgSize: 'USD',
-        maxLiq: 'USD',
-      },
       filters: {
         period: '24h',
         coin: normalizedCoin ?? null,
@@ -76,7 +64,7 @@ export class HistoricalStatsService {
 
     logDeduplicator.info('Historical stats 24h computed', {
       liquidationsCount: stats.liquidationsCount,
-      totalVolume: stats.totalVolume,
+      totalVolume_USD: stats.totalVolume_USD,
       coin: normalizedCoin,
     });
 
