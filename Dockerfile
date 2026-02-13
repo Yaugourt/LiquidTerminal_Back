@@ -10,13 +10,15 @@ ENV DATABASE_URL=$DATABASE_URL
 # Copie des fichiers de dépendances
 COPY package*.json ./
 COPY prisma ./prisma/
+COPY prisma-historical ./prisma-historical/
 COPY prisma.config.ts ./
 
 # Installation de TOUTES les dépendances (y compris devDeps pour prisma CLI + tsc)
 RUN npm ci
 
-# Génération du client Prisma
+# Génération des deux clients Prisma
 RUN npx prisma generate
+RUN npx prisma generate --schema ./prisma-historical/schema.prisma
 
 # Copie du reste du code
 COPY . .
@@ -30,5 +32,5 @@ RUN npm prune --omit=dev
 # Expose le port (Railway injecte PORT automatiquement)
 EXPOSE 3002
 
-# Commande de démarrage (applique les migrations puis lance le serveur)
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/app.js"]
+# Commande de démarrage (applique les migrations des deux bases puis lance le serveur)
+CMD ["sh", "-c", "npx prisma migrate deploy && npx prisma migrate deploy --schema ./prisma-historical/schema.prisma --config ./prisma-historical/prisma.config.ts && node dist/app.js"]
