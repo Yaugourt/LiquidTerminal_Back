@@ -5,17 +5,18 @@ import { redisService } from '../../core/redis.service';
 import { CACHE_KEYS, CACHE_TTL } from '../../constants/cache.constants';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
-export type HistoricalStatsPeriod = '24h' | '7d' | '14d' | '30d';
+export type HistoricalStatsPeriod = '1h' | '24h' | '7d' | '14d' | '30d';
 
 const PERIOD_HOURS: Record<HistoricalStatsPeriod, number> = {
+  '1h': 1,
   '24h': 24,
   '7d': 7 * 24,
   '14d': 14 * 24,
   '30d': 30 * 24,
 };
 
-// Longer periods get longer cache TTL (less volatile data)
 const PERIOD_CACHE_TTL: Record<HistoricalStatsPeriod, number> = {
+  '1h': 30,                  // 30s — short window, needs fresher data
   '24h': CACHE_TTL.SHORT,    // 60s
   '7d': CACHE_TTL.MEDIUM,    // 300s
   '14d': CACHE_TTL.MEDIUM,   // 300s

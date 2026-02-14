@@ -445,7 +445,7 @@ router.get('/historical/stats',
   marketRateLimiter,
   (async (req: Request, res: Response) => {
     try {
-      const validPeriods: HistoricalStatsPeriod[] = ['24h', '7d', '14d', '30d'];
+      const validPeriods: HistoricalStatsPeriod[] = ['1h', '24h', '7d', '14d', '30d'];
       const periodParam = (req.query.period as string) || '24h';
 
       if (!validPeriods.includes(periodParam as HistoricalStatsPeriod)) {
