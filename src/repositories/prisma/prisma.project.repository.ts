@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { ProjectRepository } from '../interfaces/project.repository.interface';
 import { Project, ProjectCreateInput, ProjectUpdateInput } from '../../types/project.types';
 import { BasePagination } from '../../types/common.types';
@@ -19,7 +20,7 @@ export class PrismaProjectRepository extends BasePrismaRepository implements Pro
         }
       }
     }
-  };
+  } as const;
 
   async findAll(params: {
     page?: number;
@@ -110,24 +111,34 @@ export class PrismaProjectRepository extends BasePrismaRepository implements Pro
       async () => {
         const { categoryIds, ...projectData } = data;
         
+        const createData: Prisma.ProjectCreateInput = {
+          title: projectData.title,
+          desc: projectData.desc,
+          logo: projectData.logo ?? '',
+          banner: projectData.banner,
+          token: projectData.token,
+          twitter: projectData.twitter,
+          discord: projectData.discord,
+          telegram: projectData.telegram,
+          website: projectData.website,
+          ...(categoryIds && categoryIds.length > 0 ? {
+            categories: {
+              create: categoryIds.map(categoryId => ({
+                categoryId
+              }))
+            }
+          } : {})
+        };
+
         const project = await this.prismaClient.project.create({
-          data: {
-            ...projectData,
-            ...(categoryIds && categoryIds.length > 0 ? {
-              categories: {
-                create: categoryIds.map(categoryId => ({
-                  categoryId
-                }))
-              }
-            } : {})
-          },
+          data: createData,
           include: this.includeConfig
         });
 
         return {
           ...project,
-          categories: project.categories.map((pc: any) => pc.category)
-        };
+          categories: (project as typeof project & { categories: { category: unknown }[] }).categories.map((pc) => pc.category)
+        } as Project;
       },
       'creating project',
       { title: data.title }

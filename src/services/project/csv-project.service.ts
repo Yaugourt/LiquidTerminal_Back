@@ -133,7 +133,7 @@ export class CsvProjectService {
       if (exactMatch) {
         logDeduplicator.warn('Project already exists, skipping', { 
           title: normalizedRow.title,
-          existingId: exactMatch.id 
+          existingId: (exactMatch as unknown as { id: number }).id 
         });
         return;
       }

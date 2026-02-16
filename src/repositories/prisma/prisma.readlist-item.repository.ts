@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import { ReadListItemRepository } from '../interfaces/readlist-item.repository.interface';
 import { 
   ReadListItemResponse, 
@@ -193,9 +194,10 @@ export class PrismaReadListItemRepository extends BasePrismaRepository implement
   async reorderItems(readListId: number, itemOrders: { id: number; order: number }[]): Promise<void> {
     return this.executeWithErrorHandling(
       async () => {
-        await this.prismaClient.$transaction(
+        const client = this.prismaClient as PrismaClient;
+        await client.$transaction(
           itemOrders.map(({ id, order }) =>
-            this.prismaClient.readListItem.update({
+            client.readListItem.update({
               where: { id, readListId },
               data: { order }
             })

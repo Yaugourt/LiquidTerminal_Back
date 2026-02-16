@@ -7,6 +7,7 @@ import {
   TopTradersSortType
 } from '../../types/toptraders.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { withDistributedLock } from '../../utils/distributedLock';
 import { redisService } from '../../core/redis.service';
 
 /**
@@ -95,6 +96,7 @@ export class TopTradersService {
       return;
     }
 
+    const executed = await withDistributedLock('poll:toptraders', 90, async () => {
     this.isRefreshing = true;
     const startTime = Date.now();
 
@@ -147,6 +149,11 @@ export class TopTradersService {
       });
     } finally {
       this.isRefreshing = false;
+    }
+    });
+
+    if (!executed) {
+      logDeduplicator.info('Top Traders refresh skipped - another instance holds the lock');
     }
   }
 

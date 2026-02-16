@@ -1,9 +1,12 @@
+import { PrismaClient } from '@prisma/client';
 import { prisma } from '../../core/prisma.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { BasePagination } from '../../types/common.types';
 
+export type PrismaTransactionClient = Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
+
 export abstract class BasePrismaRepository {
-  protected prismaClient: any = prisma;
+  protected prismaClient: PrismaClient | PrismaTransactionClient = prisma;
 
   // Constantes communes pour les sélections
   protected static readonly UserSelect = {
@@ -16,7 +19,7 @@ export abstract class BasePrismaRepository {
     creator: { select: BasePrismaRepository.UserSelect }
   } as const;
 
-  setPrismaClient(prismaClient: any): void {
+  setPrismaClient(prismaClient: PrismaClient | PrismaTransactionClient): void {
     this.prismaClient = prismaClient;
     logDeduplicator.info(`Prisma client updated in ${this.constructor.name}`);
   }
@@ -30,7 +33,7 @@ export abstract class BasePrismaRepository {
   protected async executeWithErrorHandling<T>(
     operation: () => Promise<T>,
     operationName: string,
-    context?: any
+    context?: Record<string, unknown>
   ): Promise<T> {
     try {
       if (context) {
@@ -87,8 +90,8 @@ export abstract class BasePrismaRepository {
     isPublic?: boolean;
     addedBy?: number;
     categoryId?: number;
-  }): any {
-    const where: any = {};
+  }): Record<string, unknown> {
+    const where: Record<string, unknown> = {};
     
     if (params.search) {
       where.OR = [
@@ -127,7 +130,7 @@ export abstract class BasePrismaRepository {
   }): {
     skip: number;
     take: number;
-    orderBy: any;
+    orderBy: Record<string, string>;
   } {
     const { page = 1, limit = 10, sort = 'createdAt', order = 'desc' } = params;
     

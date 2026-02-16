@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { transactionService } from './transaction.service';
 import { cacheService } from './cache.service';
@@ -5,12 +6,39 @@ import { logDeduplicator } from '../utils/logDeduplicator';
 import { CACHE_TTL } from '../constants/cache.constants';
 
 /**
- * Interface pour les paramètres de requête de base
+ * Type for Prisma transaction clients (PrismaClient without connection/transaction methods)
+ */
+type PrismaTransactionClient = Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
+
+/**
+ * Interface pour les paramètres de requête de base.
+ * Subtypes can add additional properties via structural typing (extends).
  */
 export interface BaseQueryParams {
   page?: number;
   limit?: number;
-  [key: string]: any;
+}
+
+/**
+ * Interface minimale que tous les repositories doivent satisfaire.
+ * Garantit le support des transactions Prisma.
+ */
+export interface BaseServiceRepository {
+  setPrismaClient(client: PrismaTransactionClient): void;
+  resetPrismaClient(): void;
+}
+
+/**
+ * Contrat CRUD complet pour les repositories utilisés par les méthodes par défaut de BaseService.
+ * Les repositories qui ne satisfont pas ce contrat doivent avoir leurs services
+ * qui surchargent les méthodes correspondantes de BaseService.
+ */
+export interface CrudRepository<T, CreateInput, UpdateInput, QueryParams> extends BaseServiceRepository {
+  findAll(query: QueryParams): Promise<{ data: T[]; pagination: { total: number } }>;
+  findById(id: number | string): Promise<T | null>;
+  create(data: CreateInput): Promise<T>;
+  update(id: number | string, data: UpdateInput): Promise<T>;
+  delete(id: number | string): Promise<void>;
 }
 
 /**
@@ -19,9 +47,11 @@ export interface BaseQueryParams {
  */
 export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams extends BaseQueryParams> {
   /**
-   * Repository utilisé par le service
+   * Repository utilisé par le service.
+   * Les méthodes CRUD par défaut castent vers CrudRepository<T, ...> en interne.
+   * Les services dont le repository ne satisfait pas CrudRepository doivent surcharger ces méthodes.
    */
-  protected abstract repository: any;
+  protected abstract repository: BaseServiceRepository;
 
   /**
    * Préfixe pour les clés de cache
@@ -45,6 +75,15 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
     alreadyExists: new (message?: string) => Error;
     validation: new (message?: string) => Error;
   };
+
+  /**
+   * Accès typé au repository en tant que CrudRepository.
+   * Les services dont le repository ne satisfait pas CrudRepository doivent surcharger
+   * les méthodes CRUD correspondantes.
+   */
+  protected get crudRepo(): CrudRepository<T, CreateInput, UpdateInput, QueryParams> {
+    return this.repository as unknown as CrudRepository<T, CreateInput, UpdateInput, QueryParams>;
+  }
 
   /**
    * Invalide le cache d'une entité spécifique
@@ -93,10 +132,10 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
       return await cacheService.getOrSet(
         cacheKey,
         async () => {
-          const result = await this.repository.findAll(validatedQuery);
+          const result = await this.crudRepo.findAll(validatedQuery);
           
           // Extraire les informations de pagination pour le logging
-          const paginationInfo: Record<string, any> = {
+          const paginationInfo: Record<string, unknown> = {
             count: result.data.length,
             total: result.pagination.total
           };
@@ -135,7 +174,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
       return await cacheService.getOrSet(
         `${this.cacheKeyPrefix}:${id}`,
         async () => {
-          const entity = await this.repository.findById(id);
+          const entity = await this.crudRepo.findById(id);
           if (!entity) {
             throw new this.errorClasses.notFound();
           }
@@ -176,23 +215,26 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
         }
 
         // Créer l'entité
-        return this.repository.create(validatedData);
+        return this.crudRepo.create(validatedData);
       });
 
       // Réinitialiser le client Prisma
       this.repository.resetPrismaClient();
 
       // Mettre en cache la nouvelle entité
-      await cacheService.getOrSet(
-        `${this.cacheKeyPrefix}:${entity.id}`,
-        async () => entity,
-        CACHE_TTL.MEDIUM
-      );
+      const entityId = (entity as T & { id?: number | string }).id;
+      if (entityId !== undefined) {
+        await cacheService.getOrSet(
+          `${this.cacheKeyPrefix}:${entityId}`,
+          async () => entity,
+          CACHE_TTL.MEDIUM
+        );
+      }
 
       // Invalider le cache des listes d'entités
       await this.invalidateEntityListCache();
 
-      logDeduplicator.info(`${this.constructor.name}: Entity created successfully`, { id: entity.id });
+      logDeduplicator.info(`${this.constructor.name}: Entity created successfully`, { id: entityId });
       return entity;
     } catch (error) {
       if (error instanceof this.errorClasses.alreadyExists || error instanceof this.errorClasses.validation) {
@@ -221,7 +263,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
         this.repository.setPrismaClient(tx);
         
         // Vérifier si l'entité existe
-        const entity = await this.repository.findById(id);
+        const entity = await this.crudRepo.findById(id);
         if (!entity) {
           throw new this.errorClasses.notFound();
         }
@@ -232,7 +274,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
         }
 
         // Mettre à jour l'entité
-        return this.repository.update(id, validatedData);
+        return this.crudRepo.update(id, validatedData);
       });
 
       // Réinitialiser le client Prisma
@@ -275,7 +317,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
         this.repository.setPrismaClient(tx);
         
         // Vérifier si l'entité existe
-        const entity = await this.repository.findById(id);
+        const entity = await this.crudRepo.findById(id);
         if (!entity) {
           throw new this.errorClasses.notFound();
         }
@@ -284,7 +326,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
         await this.checkCanDelete(id);
 
         // Supprimer l'entité
-        await this.repository.delete(id);
+        await this.crudRepo.delete(id);
       });
 
       // Réinitialiser le client Prisma

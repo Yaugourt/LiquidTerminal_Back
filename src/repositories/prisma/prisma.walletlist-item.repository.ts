@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import { WalletListItemRepository } from '../interfaces/walletlist-item.repository.interface';
 import { 
   WalletListItemResponse, 
@@ -172,9 +173,10 @@ export class PrismaWalletListItemRepository extends BasePrismaRepository impleme
   async reorderItems(walletListId: number, itemOrders: { id: number; order: number }[]): Promise<void> {
     return this.executeWithErrorHandling(
       async () => {
-        await this.prismaClient.$transaction(
+        const client = this.prismaClient as PrismaClient;
+        await client.$transaction(
           itemOrders.map(({ id, order }) =>
-            this.prismaClient.walletListItem.update({
+            client.walletListItem.update({
               where: { id, walletListId },
               data: { order }
             })

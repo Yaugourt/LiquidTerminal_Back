@@ -3,6 +3,7 @@ import { CircuitBreakerService } from '../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { UnstakingQueueRawData } from '../../types/staking.types';
 import { redisService } from '../../core/redis.service';
+import { withDistributedLock } from '../../utils/distributedLock';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 export class HypurrscanUnstakingClient extends BaseApiService {
@@ -64,6 +65,7 @@ export class HypurrscanUnstakingClient extends BaseApiService {
   }
 
   private async updateUnstakingQueue(): Promise<void> {
+    const executed = await withDistributedLock('poll:unstaking', 60, async () => {
     try {
       const data = await this.circuitBreaker.execute(() => 
         this.get<UnstakingQueueRawData[]>('/unstakingQueue')
@@ -83,6 +85,11 @@ export class HypurrscanUnstakingClient extends BaseApiService {
     } catch (error) {
       logDeduplicator.error('Failed to update unstaking queue data:', { error });
       throw error;
+    }
+    });
+
+    if (!executed) {
+      logDeduplicator.info('Unstaking queue refresh skipped - another instance holds the lock');
     }
   }
 

@@ -17,6 +17,7 @@ import {
 } from '../../types/liquidations.types';
 import { AnalyticsLiquidationStatsResponse } from '../../types/analytics-liquidations.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { withDistributedLock } from '../../utils/distributedLock';
 import { redisService } from '../../core/redis.service';
 import { SSEManagerService } from './sse-manager.service';
 
@@ -127,6 +128,7 @@ export class LiquidationsService {
       return;
     }
 
+    const executed = await withDistributedLock('poll:liquidations', 30, async () => {
     this.isRefreshing = true;
     const startTime = Date.now();
 
@@ -183,6 +185,11 @@ export class LiquidationsService {
       });
     } finally {
       this.isRefreshing = false;
+    }
+    });
+
+    if (!executed) {
+      logDeduplicator.info('Liquidations refresh skipped - another instance holds the lock');
     }
   }
 

@@ -3,6 +3,7 @@ import { CircuitBreakerService } from '../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { ValidationRawData } from '../../types/staking.types';
 import { redisService } from '../../core/redis.service';
+import { withDistributedLock } from '../../utils/distributedLock';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 export class HypurrscanValidationClient extends BaseApiService {
@@ -64,6 +65,7 @@ export class HypurrscanValidationClient extends BaseApiService {
   }
 
   private async updateValidations(): Promise<void> {
+    const executed = await withDistributedLock('poll:validation', 75, async () => {
     try {
       const data = await this.circuitBreaker.execute(() => 
         this.get<ValidationRawData[]>('/validating')
@@ -83,6 +85,11 @@ export class HypurrscanValidationClient extends BaseApiService {
     } catch (error) {
       logDeduplicator.error('Failed to update validations data:', { error });
       throw error;
+    }
+    });
+
+    if (!executed) {
+      logDeduplicator.info('Validation refresh skipped - another instance holds the lock');
     }
   }
 
