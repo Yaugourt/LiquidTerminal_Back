@@ -7,7 +7,7 @@ import { logDeduplicator } from '../../../utils/logDeduplicator';
 
 export class ValidatorClient extends BaseApiService {
   private static instance: ValidatorClient;
-  private static readonly API_URL = 'https://api.hyperliquid.xyz/info';
+  private static readonly API_URL = (process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info';
   private static readonly REQUEST_WEIGHT = 20;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
 

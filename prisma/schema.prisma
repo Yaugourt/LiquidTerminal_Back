@@ -238,7 +238,7 @@ model User {
 
 model Wallet {
   id          Int         @id @default(autoincrement())
-  address     String      @unique @db.VarChar(255)
+  address     String      @unique @db.VarChar(42)
   addedAt     DateTime    @default(now()) @db.Timestamp(6)
   UserWallets UserWallet[]
 }

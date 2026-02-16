@@ -7,7 +7,7 @@ import { redisService } from '../../../core/redis.service';
 
 export class HyperliquidVaultClient extends BaseApiService {
   private static instance: HyperliquidVaultClient;
-  private static readonly API_URL = 'https://api.hyperliquid.xyz/info';
+  private static readonly API_URL = (process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info';
   private static readonly REQUEST_WEIGHT = 20; // Poids standard pour les requêtes info
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
   private static readonly HLP_VAULT_ADDRESS = '0xdfc24b077bc1425ad1dea75bcb6f8158e10df303';

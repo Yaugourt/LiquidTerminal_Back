@@ -8,7 +8,7 @@ import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 
 export class SpotUSDCClient extends BaseApiService {
   private static instance: SpotUSDCClient;
-  private static readonly API_URL = 'https://api.hypurrscan.io';
+  private static readonly API_URL = process.env.HYPURRSCAN_API_URL || 'https://api.hypurrscan.io';
   private static readonly REQUEST_WEIGHT = 1;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
 

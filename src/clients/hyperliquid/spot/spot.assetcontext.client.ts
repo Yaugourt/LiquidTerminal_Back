@@ -8,7 +8,7 @@ import * as unitTokens from './unit.json';
 
 export class HyperliquidSpotClient extends BaseApiService {
   private static instance: HyperliquidSpotClient;
-  private static readonly API_URL = 'https://api.hyperliquid.xyz/info';
+  private static readonly API_URL = (process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info';
   private static readonly REQUEST_WEIGHT = 20;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
 
