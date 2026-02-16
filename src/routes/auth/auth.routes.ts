@@ -22,8 +22,8 @@ router.use(marketRateLimiter);
 router.post("/login", validatePrivyToken, validateLogin, (req: Request, res: Response): void => {
   logDeduplicator.info('POST /auth/login called', { 
     method: req.method,
-    headers: req.headers,
-    body: req.body 
+    origin: req.headers.origin,
+    contentType: req.headers['content-type'],
   });
   
   const { privyUserId, name, referrerName } = req.body;
@@ -523,7 +523,7 @@ router.all("/login", (req: Request, res: Response): void => {
   logDeduplicator.warn('Wrong method on /auth/login', { 
     method: req.method,
     path: req.path,
-    headers: req.headers 
+    origin: req.headers.origin
   });
   
   res.status(405).json({ 

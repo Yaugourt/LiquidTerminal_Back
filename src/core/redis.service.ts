@@ -124,17 +124,29 @@ export class RedisService {
     }
   }
 
-  public async keys(pattern: string): Promise<string[]> {
+  public async scan(pattern: string): Promise<string[]> {
     try {
-      return await redisNormal.keys(pattern);
+      const keys: string[] = [];
+      let cursor = '0';
+      do {
+        const [nextCursor, batch] = await redisNormal.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = nextCursor;
+        keys.push(...batch);
+      } while (cursor !== '0');
+      return keys;
     } catch (error) {
-      logDeduplicator.error('Redis keys error', {
+      logDeduplicator.error('Redis scan error', {
         pattern,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
       });
       return [];
     }
+  }
+
+  /** @deprecated Use scan() instead — KEYS blocks Redis in production */
+  public async keys(pattern: string): Promise<string[]> {
+    return this.scan(pattern);
   }
 
   public async publish(channel: string, message: string): Promise<void> {

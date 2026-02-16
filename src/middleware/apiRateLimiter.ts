@@ -28,6 +28,43 @@ const getRedisKeys = (ip: string) => ({
   hourKey: `ratelimit:${ip}:hour`
 });
 
+// In-memory fallback when Redis is down (fail-secure)
+const inMemoryCounters = new Map<string, { count: number; resetAt: number }>();
+const FALLBACK_MAX_PER_SECOND = 10;
+const FALLBACK_MAX_IPS = 10000;
+
+function checkInMemoryFallback(ip: string): boolean {
+  const now = Date.now();
+  const counter = inMemoryCounters.get(ip);
+
+  if (!counter || now > counter.resetAt) {
+    // Evict oldest if at capacity
+    if (!inMemoryCounters.has(ip) && inMemoryCounters.size >= FALLBACK_MAX_IPS) {
+      const firstKey = inMemoryCounters.keys().next().value;
+      if (firstKey) inMemoryCounters.delete(firstKey);
+    }
+    inMemoryCounters.set(ip, { count: 1, resetAt: now + 1000 });
+    return true;
+  }
+
+  if (counter.count >= FALLBACK_MAX_PER_SECOND) {
+    return false;
+  }
+
+  counter.count++;
+  return true;
+}
+
+// Periodic cleanup of stale entries (every 60s)
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, counter] of inMemoryCounters) {
+    if (now > counter.resetAt) {
+      inMemoryCounters.delete(ip);
+    }
+  }
+}, 60000).unref();
+
 export const marketRateLimiter = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const ip = req.ip;
   
@@ -65,15 +102,17 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
 
     next();
   } catch (error) {
-    logDeduplicator.error('Rate limiter error', {
+    logDeduplicator.error('Rate limiter Redis error, using in-memory fallback', {
       error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
       path: req.path,
-      method: req.method,
       ip: req.ip
     });
-    // En cas d'erreur Redis, on laisse passer la requête
-    return next();
+    // Fail-secure: use in-memory fallback instead of letting everything through
+    if (checkInMemoryFallback(ip)) {
+      next();
+    } else {
+      sendLimitExceededResponse(res, 'Too many requests (fallback mode)');
+    }
   }
 };
 

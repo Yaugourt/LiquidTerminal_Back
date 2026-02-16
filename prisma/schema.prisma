@@ -137,6 +137,7 @@ model XpTransaction {
   @@index([userId])
   @@index([actionType])
   @@index([createdAt])
+  @@index([userId, actionType, createdAt])
   @@map("xp_transactions")
 }
 
@@ -231,6 +232,8 @@ model User {
   
   @@index([totalXp])
   @@index([level])
+  @@index([role, verified])
+  @@index([referredBy, createdAt])
 }
 
 model Wallet {
@@ -350,6 +353,7 @@ model EducationalResource {
   
   @@index([status])
   @@index([addedBy])
+  @@index([status, createdAt])
 }
 
 model EducationalResourceCategory {
@@ -466,6 +470,8 @@ model PublicGood {
   @@index([category])
   @@index([submitterId])
   @@index([developmentStatus])
+  @@index([status, submittedAt])
+  @@index([category, status])
   @@map("public_goods")
 }
 
@@ -514,7 +520,7 @@ model TelegramSubscription {
   isActive         Boolean      @default(true) @map("is_active")
   subscriptionType String       @map("subscription_type") @db.VarChar(20)
   filterCoins      String[]     @default([]) @map("filter_coins")
-  filterMinUsd     Float        @default(0) @map("filter_min_usd")
+  filterMinUsd     Decimal      @default(0) @map("filter_min_usd") @db.Decimal(20, 2)
   filterWallets    String[]     @default([]) @map("filter_wallets")
   useLinkedWallets Boolean      @default(false) @map("use_linked_wallets")
   createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
@@ -535,5 +541,6 @@ model TelegramSentAlert {
   @@unique([telegramUserId, liquidationId])
   @@index([liquidationId])
   @@index([sentAt])
+  @@index([telegramUserId, sentAt])
   @@map("telegram_sent_alerts")
 }

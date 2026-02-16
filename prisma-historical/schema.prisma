@@ -16,12 +16,12 @@ model RawLiquidation {
   coin               String   @db.VarChar(20)
   hash               String   @db.VarChar(255)
   liquidatedUser     String   @map("liquidated_user") @db.VarChar(255)
-  sizeTotal          Float    @map("size_total")
-  notionalTotal      Float    @map("notional_total")
-  fillPxVwap         Float    @map("fill_px_vwap")
-  markPx             Float    @map("mark_px")
+  sizeTotal          Decimal  @map("size_total") @db.Decimal(30, 10)
+  notionalTotal      Decimal  @map("notional_total") @db.Decimal(30, 10)
+  fillPxVwap         Decimal  @map("fill_px_vwap") @db.Decimal(30, 10)
+  markPx             Decimal  @map("mark_px") @db.Decimal(30, 10)
   method             String   @db.VarChar(50)
-  feeTotalLiquidated Float    @map("fee_total_liquidated")
+  feeTotalLiquidated Decimal  @map("fee_total_liquidated") @db.Decimal(30, 10)
   liquidators        String[]
   liquidatorCount    Int      @map("liquidator_count")
   liqDir             String   @map("liq_dir") @db.VarChar(10)
@@ -34,6 +34,8 @@ model RawLiquidation {
   @@index([coin, time])
   @@index([coin, liqDir, time])
   @@index([notionalTotal])
+  @@index([liquidatedUser, time])
+  @@index([time, notionalTotal])
   @@map("raw_liquidations")
 }
 
