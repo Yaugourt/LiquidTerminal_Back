@@ -70,8 +70,12 @@ export const contributionRateLimiter = async (
             error: error instanceof Error ? error.message : String(error),
             stack: error instanceof Error ? error.stack : undefined
         });
-        // En cas d'erreur Redis, on laisse passer la requête
-        next();
+        // Fail-secure: block on Redis error to prevent abuse
+        res.status(503).json({
+            success: false,
+            error: 'Service temporarily unavailable',
+            code: 'SERVICE_UNAVAILABLE',
+        });
     }
 };
 

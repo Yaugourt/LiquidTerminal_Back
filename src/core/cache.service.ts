@@ -20,23 +20,48 @@ export class CacheService {
     ttl: number = CACHE_TTL.MEDIUM
   ): Promise<T> {
     try {
-      // Essayer de récupérer la donnée du cache
       const cachedData = await redisService.get(key);
       if (cachedData) {
-        logDeduplicator.info('Data retrieved from cache', { key });
         return JSON.parse(cachedData);
       }
-      
-      // Si pas en cache, récupérer la donnée et la mettre en cache
-      const data = await fetchFn();
-      await redisService.set(key, JSON.stringify(data), ttl);
-      logDeduplicator.info('Data cached successfully', { key });
-      
-      return data;
+
+      // Try to acquire lock to prevent cache stampede
+      const lockKey = `lock:${key}`;
+      const redis = redisService.getClient();
+      const acquired = await redis.set(lockKey, '1', 'EX', 30, 'NX');
+
+      if (acquired) {
+        try {
+          // Double-check cache (another request may have populated it)
+          const freshCache = await redisService.get(key);
+          if (freshCache) {
+            await redisService.delete(lockKey);
+            return JSON.parse(freshCache);
+          }
+
+          const data = await fetchFn();
+          await redisService.set(key, JSON.stringify(data), ttl);
+          await redisService.delete(lockKey);
+          return data;
+        } catch (error) {
+          await redisService.delete(lockKey);
+          throw error;
+        }
+      }
+
+      // Lock not acquired — wait for the lock holder to populate cache
+      for (let i = 0; i < 3; i++) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        const retryCache = await redisService.get(key);
+        if (retryCache) {
+          return JSON.parse(retryCache);
+        }
+      }
+
+      // Lock holder may have failed, fetch directly
+      return await fetchFn();
     } catch (error) {
-      // En cas d'erreur de cache, récupérer la donnée directement
-      logDeduplicator.warn('Cache error, falling back to database', { 
-        error, 
+      logDeduplicator.warn('Cache error, falling back to direct fetch', { 
         key,
         errorMessage: error instanceof Error ? error.message : 'Unknown error'
       });
@@ -67,7 +92,7 @@ export class CacheService {
    */
   async invalidateByPattern(pattern: string): Promise<void> {
     try {
-      const keys = await redisService.keys(pattern);
+      const keys = await redisService.scan(pattern);
       if (keys && keys.length > 0) {
         await Promise.all(keys.map(key => redisService.delete(key)));
         logDeduplicator.info('Cache invalidated by pattern', { 

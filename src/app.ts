@@ -14,6 +14,7 @@ import { prisma } from './core/prisma.service';
 import { PrismaHistoricalService } from './core/prisma.historical.service';
 import { FileCleanupService } from './utils/fileCleanup';
 import { InternalWebSocketServer } from './websocket';
+import { redisService } from './core/redis.service';
 
 import authRoutes from './routes/auth/auth.routes';
 import userAuthRoutes from './routes/auth/user.auth.routes';
@@ -67,20 +68,13 @@ app.use(requestIdMiddleware);
 // Configuration CORS basée sur les constantes de sécurité
 app.use(cors({
   origin: (origin, callback) => {
-    // ✅ CORS Strategy:
-    // - DEV: Permissive (facilitates local development, tunnels, mobile testing)
-    // - PROD: Whitelist only (SECURITY_CONSTANTS.ALLOWED_ORIGINS)
-    // This is intentional and follows industry best practices
-    if (process.env.NODE_ENV === 'development') {
-      callback(null, true);
-    }
-    // En production, vérifier contre les origines autorisées
-    else if (!origin || SECURITY_CONSTANTS.ALLOWED_ORIGINS.includes(origin as typeof SECURITY_CONSTANTS.ALLOWED_ORIGINS[number])) {
+    // Always validate against allowed origins (defense in depth)
+    // In development, localhost origins are included via SECURITY_CONSTANTS defaults
+    if (!origin || SECURITY_CONSTANTS.ALLOWED_ORIGINS.includes(origin as typeof SECURITY_CONSTANTS.ALLOWED_ORIGINS[number])) {
       callback(null, true);
     } else {
       logDeduplicator.warn('CORS blocked origin', {
         origin,
-        allowedOrigins: SECURITY_CONSTANTS.ALLOWED_ORIGINS,
         nodeEnv: process.env.NODE_ENV
       });
       callback(new Error('Not allowed by CORS'));
@@ -166,27 +160,47 @@ clientInitializer.initialize()
     process.exit(1); // Arrêter l'app si l'initialisation échoue
   });
 
-// Gestion de l'arrêt propre de l'application
-process.on('SIGINT', async () => {
-  logDeduplicator.info('Received SIGINT. Performing graceful shutdown...');
-  // Shutdown WebSocket Server
+async function gracefulShutdown(signal: string): Promise<void> {
+  logDeduplicator.info(`Received ${signal}. Performing graceful shutdown...`);
+
+  // 1. Stop accepting new connections
+  server.close(() => {
+    logDeduplicator.info('HTTP server closed');
+  });
+
+  // 2. Shutdown WebSocket Server
   InternalWebSocketServer.getInstance().shutdown();
-  // Stop all polling, flush ingestion buffer, shutdown SSE connections
+
+  // 3. Stop all polling, flush ingestion buffer, shutdown SSE connections
   await clientInitializer.stopAllPolling();
+
+  // 4. Disconnect databases
   await prisma.$disconnect();
   await PrismaHistoricalService.disconnect();
+
+  // 5. Disconnect Redis
+  await redisService.disconnect();
+
+  logDeduplicator.info('Graceful shutdown complete');
   process.exit(0);
+}
+
+// Force exit after 30s if graceful shutdown hangs
+function forceExit(signal: string): void {
+  setTimeout(() => {
+    logDeduplicator.error(`Forced exit after ${signal} - shutdown took too long`);
+    process.exit(1);
+  }, 30000).unref();
+}
+
+process.on('SIGINT', () => {
+  forceExit('SIGINT');
+  gracefulShutdown('SIGINT');
 });
 
-process.on('SIGTERM', async () => {
-  logDeduplicator.info('Received SIGTERM. Performing graceful shutdown...');
-  // Shutdown WebSocket Server
-  InternalWebSocketServer.getInstance().shutdown();
-  // Stop all polling, flush ingestion buffer, shutdown SSE connections
-  await clientInitializer.stopAllPolling();
-  await prisma.$disconnect();
-  await PrismaHistoricalService.disconnect();
-  process.exit(0);
+process.on('SIGTERM', () => {
+  forceExit('SIGTERM');
+  gracefulShutdown('SIGTERM');
 });
 
 export default app;

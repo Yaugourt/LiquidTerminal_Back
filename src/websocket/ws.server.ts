@@ -127,6 +127,7 @@ export class InternalWebSocketServer {
     this.clients.clear();
     this.clientsBySocket.clear();
     this.ipConnectionCount.clear();
+    this.messageCounters.clear();
 
     logDeduplicator.info('InternalWebSocketServer: Shutdown complete');
   }
@@ -353,6 +354,7 @@ export class InternalWebSocketServer {
     this.decrementIpCount(client.ip);
     this.clients.delete(clientId);
     this.clientsBySocket.delete(ws);
+    this.messageCounters.delete(clientId);
 
     logDeduplicator.info('InternalWebSocketServer: Client disconnected', {
       clientId,

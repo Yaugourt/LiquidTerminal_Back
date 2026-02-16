@@ -21,7 +21,18 @@ class PrismaService {
       // Adapter officiel Prisma 7 pour Postgres (engine type "client")
       const pool = new Pool({
         connectionString: process.env.DATABASE_URL,
+        max: parseInt(process.env.DB_POOL_MAX || '20', 10),
+        min: parseInt(process.env.DB_POOL_MIN || '2', 10),
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
       });
+
+      pool.on('error', (err) => {
+        logDeduplicator.error('PostgreSQL pool error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       const adapter = new PrismaPg(pool);
 
       PrismaService.instance = new PrismaClient({
