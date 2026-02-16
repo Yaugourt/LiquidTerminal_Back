@@ -7,7 +7,7 @@ import { logDeduplicator } from '../../../utils/logDeduplicator';
 
 export class HyperliquidTokenInfoClient extends BaseApiService {
   private static instance: HyperliquidTokenInfoClient;
-  private static readonly API_URL = 'https://api.hyperliquid.xyz/info';
+  private static readonly API_URL = (process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info';
   private static readonly REQUEST_WEIGHT = 20; // Poids standard pour les requêtes info
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
   private readonly CACHE_KEY = 'token:info:';

@@ -26,7 +26,7 @@ const storage = multer.diskStorage({
 
 // Filtre pour les fichiers CSV
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  logDeduplicator.info('DEBUG: fileFilter called', { 
+  logDeduplicator.info('fileFilter called', { 
     originalname: file.originalname,
     mimetype: file.mimetype,
     size: file.size
@@ -34,7 +34,7 @@ const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilt
 
   // 1. Vérifier le type MIME
   if (file.mimetype !== 'text/csv' && !file.mimetype.includes('csv')) {
-    logDeduplicator.error('DEBUG: Invalid MIME type', { mimetype: file.mimetype });
+    logDeduplicator.error('Invalid MIME type', { mimetype: file.mimetype });
     return cb(new Error('Seuls les fichiers CSV sont autorisés.'));
   }
 
@@ -43,13 +43,13 @@ const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilt
   const ext = path.extname(file.originalname).toLowerCase();
   
   if (!allowedExtensions.includes(ext)) {
-    logDeduplicator.error('DEBUG: Invalid extension', { extension: ext });
+    logDeduplicator.error('Invalid extension', { extension: ext });
     return cb(new Error('Format de fichier non supporté. Utilisez CSV.'));
   }
 
   // 3. Vérifier la taille du fichier (10MB max pour les CSV)
   if (file.size > 10 * 1024 * 1024) {
-    logDeduplicator.error('DEBUG: File too large', { size: file.size });
+    logDeduplicator.error('File too large', { size: file.size });
     return cb(new Error('Le fichier est trop volumineux. Taille maximum: 10MB'));
   }
 
@@ -62,7 +62,7 @@ const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilt
     });
   }
 
-  logDeduplicator.info('DEBUG: fileFilter passed, calling cb(null, true)');
+  logDeduplicator.info('fileFilter passed, calling cb(null, true)');
   cb(null, true);
 };
 
@@ -128,10 +128,10 @@ export const handleCsvUploadError = (error: Error, req: Request, res: Response, 
 
 // Middleware de validation post-upload pour CSV
 export const validateCsvFile = async (req: Request, res: Response, next: NextFunction) => {
-  logDeduplicator.info('DEBUG: validateCsvFile middleware called');
+  logDeduplicator.info('validateCsvFile middleware called');
   
   if (!req.file) {
-    logDeduplicator.error('DEBUG: No file provided in validateCsvFile');
+    logDeduplicator.error('No file provided in validateCsvFile');
     return res.status(400).json({
       success: false,
       error: 'Aucun fichier CSV fourni',
@@ -139,7 +139,7 @@ export const validateCsvFile = async (req: Request, res: Response, next: NextFun
     });
   }
 
-  logDeduplicator.info('DEBUG: File exists in validateCsvFile', { 
+  logDeduplicator.info('File exists in validateCsvFile', { 
     filename: req.file.filename,
     path: req.file.path
   });
@@ -147,7 +147,7 @@ export const validateCsvFile = async (req: Request, res: Response, next: NextFun
   try {
     // Vérifier que le fichier existe
     if (!fs.existsSync(req.file.path)) {
-      logDeduplicator.error('DEBUG: File not found on disk', { path: req.file.path });
+      logDeduplicator.error('File not found on disk', { path: req.file.path });
       return res.status(400).json({
         success: false,
         error: 'Fichier CSV introuvable',
@@ -158,7 +158,7 @@ export const validateCsvFile = async (req: Request, res: Response, next: NextFun
     // Vérifier la taille du fichier
     const stats = fs.statSync(req.file.path);
     if (stats.size === 0) {
-      logDeduplicator.error('DEBUG: File is empty');
+      logDeduplicator.error('File is empty');
       // Supprimer le fichier vide
       fs.unlinkSync(req.file.path);
       return res.status(400).json({
@@ -174,7 +174,7 @@ export const validateCsvFile = async (req: Request, res: Response, next: NextFun
       originalName: req.file.originalname
     });
     
-    logDeduplicator.info('DEBUG: validateCsvFile calling next()');
+    logDeduplicator.info('validateCsvFile calling next()');
     next();
   } catch (error) {
     logDeduplicator.error('Error during CSV file validation', { error });

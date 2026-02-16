@@ -7,7 +7,7 @@ import { logDeduplicator } from '../../../utils/logDeduplicator';
 
 export class HyperliquidLeaderboardClient extends BaseApiService {
   private static instance: HyperliquidLeaderboardClient;
-  private static readonly API_URL = 'https://stats-data.hyperliquid.xyz/Mainnet';
+  private static readonly API_URL = process.env.HYPERLIQUID_STATS_URL || 'https://stats-data.hyperliquid.xyz/Mainnet';
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
 

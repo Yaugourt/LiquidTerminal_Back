@@ -29,7 +29,7 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
   private static instance: HypeDexerLiquidationsWSClient;
 
   // Configuration
-  private static readonly WS_URL = 'wss://api-eu.hypedexer.com/ws';
+  private static readonly WS_URL = process.env.HYPEDEXER_WS_URL || 'wss://api-eu.hypedexer.com/ws';
   private static readonly API_KEY = process.env.HL_INDEXER_API_KEY || '';
 
   // Subscription state

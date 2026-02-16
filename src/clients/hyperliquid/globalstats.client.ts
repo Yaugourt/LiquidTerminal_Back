@@ -13,7 +13,7 @@ interface RawGlobalStats {
 
 export class HyperliquidGlobalStatsClient extends BaseApiService {
   private static instance: HyperliquidGlobalStatsClient;
-  private static readonly API_URL = 'https://api.hyperliquid.xyz/info';
+  private static readonly API_URL = (process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info';
   private static readonly REQUEST_WEIGHT = 20;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
 

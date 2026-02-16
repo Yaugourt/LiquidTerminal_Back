@@ -8,7 +8,7 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 
 export class HypurrscanUnstakingClient extends BaseApiService {
   private static instance: HypurrscanUnstakingClient;
-  private static readonly API_URL = 'https://api.hypurrscan.io';
+  private static readonly API_URL = process.env.HYPURRSCAN_API_URL || 'https://api.hypurrscan.io';
   private static readonly REQUEST_WEIGHT = 2;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
   private static readonly UPDATE_INTERVAL = 40000; // 20 secondes
