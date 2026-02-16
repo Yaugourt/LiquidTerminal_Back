@@ -32,8 +32,8 @@ export class PrismaWalletListRepository extends BasePrismaRepository implements 
         }
       },
       orderBy: [
-        { order: 'asc' },
-        { addedAt: 'asc' }
+        { order: 'asc' as const },
+        { addedAt: 'asc' as const }
       ]
     }
   };

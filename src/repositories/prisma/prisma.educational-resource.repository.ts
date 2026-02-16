@@ -103,7 +103,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
       });
 
       return {
-        data: resources,
+        data: resources as unknown as EducationalResourceResponse[],
         pagination: this.buildPagination(total, page, limit)
       };
     }, 'finding all educational resources', { page: params.page, limit: params.limit, sort: params.sort, order: params.order, search: params.search, addedBy: params.addedBy, categoryId: params.categoryId });
@@ -115,7 +115,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         return await this.prismaClient.educationalResource.findUnique({
           where: { id },
           include: this.includeConfig
-        });
+        }) as EducationalResourceResponse | null;
       },
       'finding educational resource by ID',
       { id }
@@ -140,7 +140,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
             } : {})
           },
           include: this.includeConfig
-        });
+        }) as EducationalResourceResponse;
       },
       'creating educational resource',
       { url: data.url, addedBy: data.addedBy }
@@ -154,7 +154,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
           where: { id },
           data,
           include: this.includeConfig
-        });
+        }) as EducationalResourceResponse;
       },
       'updating educational resource',
       { id, ...data }
@@ -193,7 +193,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
           where: { addedBy: userId },
           include: this.includeConfig,
           orderBy: { createdAt: 'desc' }
-        });
+        }) as EducationalResourceResponse[];
       },
       'finding educational resources by creator',
       { userId }
@@ -239,7 +239,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         });
       },
       'assigning resource to category',
-      data
+      { resourceId: data.resourceId, categoryId: data.categoryId, assignedBy: data.assignedBy }
     );
   }
 
@@ -304,7 +304,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         return await this.prismaClient.educationalResource.findFirst({
           where: { url },
           include: this.includeConfig
-        });
+        }) as EducationalResourceResponse | null;
       },
       'finding resource by URL',
       { url }
@@ -377,7 +377,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
             reviewNotes: notes
           },
           include: this.includeConfig
-        });
+        }) as EducationalResourceResponse;
       },
       'updating resource review status',
       { id, status, reviewerId }
@@ -391,7 +391,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
           where: { status },
           include: this.includeConfig,
           orderBy: { createdAt: 'desc' }
-        });
+        }) as EducationalResourceResponse[];
       },
       'finding resources by status',
       { status }

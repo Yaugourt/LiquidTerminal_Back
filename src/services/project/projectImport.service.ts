@@ -116,7 +116,7 @@ export class ProjectImportService {
       // Rechercher la catégorie existante
       const existingCategories = await this.categoryService.getAll({});
       
-      const exactMatch = existingCategories.find(
+      const exactMatch = existingCategories.data.find(
         (cat: { name: string }) => cat.name.toLowerCase() === categoryName.toLowerCase()
       );
 

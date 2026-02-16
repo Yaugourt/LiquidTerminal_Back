@@ -6,6 +6,7 @@ import {
   ActiveUser
 } from '../../types/activeusers.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { withDistributedLock } from '../../utils/distributedLock';
 import { redisService } from '../../core/redis.service';
 
 /**
@@ -94,6 +95,7 @@ export class ActiveUsersService {
       return;
     }
 
+    const executed = await withDistributedLock('poll:activeusers', 90, async () => {
     this.isRefreshing = true;
     const startTime = Date.now();
 
@@ -147,6 +149,11 @@ export class ActiveUsersService {
       });
     } finally {
       this.isRefreshing = false;
+    }
+    });
+
+    if (!executed) {
+      logDeduplicator.info('Active Users refresh skipped - another instance holds the lock');
     }
   }
 

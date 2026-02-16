@@ -138,7 +138,7 @@ export class PrismaCategoryRepository extends BasePrismaRepository implements Ca
               }
             }
           }
-        });
+        }) as CategoryWithProjects | null;
       },
       'finding category with projects',
       { id }
@@ -159,7 +159,7 @@ export class PrismaCategoryRepository extends BasePrismaRepository implements Ca
               }
             }
           }
-        });
+        }) as CategoryWithProjects | null;
       },
       'finding category with projects by ID',
       { id }

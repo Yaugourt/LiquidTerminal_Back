@@ -25,8 +25,8 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
         }
       },
       orderBy: [
-        { order: 'asc' },
-        { addedAt: 'asc' }
+        { order: 'asc' as const },
+        { addedAt: 'asc' as const }
       ]
     }
   };

@@ -33,32 +33,26 @@ redisNormal.setMaxListeners(20);
 
 // Configuration des listeners d'événements pour le diagnostic
 redis.on('ready', () => {
-  console.log('✅ Redis is ready');
   logDeduplicator.info('Redis is ready');
 });
 
 redis.on('connecting', () => {
-  console.log('🔄 Connecting to Redis...');
   logDeduplicator.info('Connecting to Redis');
 });
 
 redis.on('connect', () => {
-  console.log('✅ Redis connected successfully');
   logDeduplicator.info('Redis connected successfully');
 });
 
 redis.on('reconnecting', () => {
-  console.log('🔄 Reconnecting to Redis...');
   logDeduplicator.info('Reconnecting to Redis');
 });
 
 redis.on('close', () => {
-  console.log('❌ Redis connection closed');
   logDeduplicator.warn('Redis connection closed');
 });
 
 redis.on('error', (err) => {
-  console.error('❌ Redis Error:', err);
   logDeduplicator.error('Redis Error', {
     error: err instanceof Error ? err.message : String(err),
     stack: err instanceof Error ? err.stack : undefined
@@ -67,10 +61,8 @@ redis.on('error', (err) => {
 
 // Test de connexion au démarrage
 redis.ping().then(() => {
-  console.log('✅ Redis PING successful');
   logDeduplicator.info('Redis PING successful');
 }).catch((err) => {
-  console.error('❌ Redis PING failed:', err);
   logDeduplicator.error('Redis PING failed', {
     error: err instanceof Error ? err.message : String(err),
     stack: err instanceof Error ? err.stack : undefined
