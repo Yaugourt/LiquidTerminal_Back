@@ -10,6 +10,7 @@ import {
   SSEConnectionStats
 } from '../../types/sse.types';
 import { Liquidation } from '../../types/liquidations.types';
+import { LiquidationDataProvider } from '../../types/liquidation-provider.interface';
 
 /**
  * SSE Manager Service
@@ -38,8 +39,18 @@ export class SSEManagerService {
   private ipConnectionCount: Map<string, number> = new Map();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private isSubscribed = false;
+  private dataProvider: LiquidationDataProvider | null = null;
 
   private constructor() {}
+
+  /**
+   * Register a data provider for fetching missed liquidations on reconnection.
+   * Called by LiquidationsService during initialization to break the circular dependency.
+   */
+  public setDataProvider(provider: LiquidationDataProvider): void {
+    this.dataProvider = provider;
+    logDeduplicator.info('SSE Manager data provider registered');
+  }
 
   public static getInstance(): SSEManagerService {
     if (!SSEManagerService.instance) {
@@ -323,12 +334,13 @@ export class SSEManagerService {
     lastEventId: number
   ): Promise<void> {
     try {
-      // Import dynamically to avoid circular dependency
-      const { LiquidationsService } = await import('./liquidations.service');
-      const liquidationsService = LiquidationsService.getInstance();
+      if (!this.dataProvider) {
+        logDeduplicator.warn('SSE cannot send missed liquidations - no data provider registered');
+        return;
+      }
 
       // Fetch recent liquidations and filter by time_ms > lastEventId
-      const response = await liquidationsService.getRecentLiquidations({
+      const response = await this.dataProvider.getRecentLiquidations({
         hours: 1, // Only look back 1 hour for missed data
         limit: SSEManagerService.MISSED_DATA_LIMIT
       });

@@ -20,6 +20,7 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 import { withDistributedLock } from '../../utils/distributedLock';
 import { redisService } from '../../core/redis.service';
 import { SSEManagerService } from './sse-manager.service';
+import { LiquidationDataProvider } from '../../types/liquidation-provider.interface';
 
 /**
  * Period configuration for chart data aggregation
@@ -38,16 +39,16 @@ interface PeriodConfig {
  * Follows the Singleton pattern as per architecture
  * Returns original HypeDexer API format
  */
-export class LiquidationsService {
+export class LiquidationsService implements LiquidationDataProvider {
   private static instance: LiquidationsService;
   private readonly client: HLIndexerLiquidationsClient;
   private static readonly DEFAULT_LIMIT = 100;
   private static readonly MAX_PAGES_FOR_STATS = 5; // Max 5 pages (5000 liquidations)
   
-  // Cache TTLs - optimized for 10s polling
-  private static readonly DATA_CACHE_TTL = 8; // Just under polling interval
-  private static readonly STATS_CACHE_TTL = 8; // Just under polling interval
-  private static readonly RECENT_CACHE_TTL = 8; // Just under polling interval
+  // Cache TTLs - 1.5x polling interval to avoid misses during refresh
+  private static readonly DATA_CACHE_TTL = 15;
+  private static readonly STATS_CACHE_TTL = 15;
+  private static readonly RECENT_CACHE_TTL = 15;
 
   // Background refresh configuration - 10 seconds for near real-time SSE
   private static readonly REFRESH_INTERVAL_MS = 10_000; // Refresh every 10 seconds
@@ -73,6 +74,9 @@ export class LiquidationsService {
   private constructor() {
     this.client = HLIndexerLiquidationsClient.getInstance();
     this.sseManager = SSEManagerService.getInstance();
+    // Register this service as the data provider for SSE missed-event recovery.
+    // This breaks the circular dependency: SSEManager no longer imports LiquidationsService.
+    this.sseManager.setDataProvider(this);
   }
 
   public static getInstance(): LiquidationsService {

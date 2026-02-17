@@ -19,9 +19,12 @@ declare global {
  * Only the bot should be able to query user data by telegramId.
  */
 export const validateTelegramBotApiKey = (req: Request, res: Response, next: NextFunction): void => {
-  const apiKey = process.env.TELEGRAM_BOT_API_KEY;
+  const validKeys = [
+    process.env.TELEGRAM_BOT_API_KEY,
+    process.env.TELEGRAM_BOT_API_KEY_SECONDARY,
+  ].filter(Boolean) as string[];
   
-  if (!apiKey) {
+  if (validKeys.length === 0) {
     logDeduplicator.error('TELEGRAM_BOT_API_KEY not configured');
     res.status(500).json({
       success: false,
@@ -44,7 +47,7 @@ export const validateTelegramBotApiKey = (req: Request, res: Response, next: Nex
 
   const providedKey = authHeader.slice(4); // Remove 'Bot ' prefix
 
-  if (providedKey !== apiKey) {
+  if (!validKeys.includes(providedKey)) {
     logDeduplicator.warn('Invalid Telegram Bot API key attempt', {
       ip: req.ip,
       path: req.path,

@@ -195,6 +195,8 @@ export class RedisService {
 
   public async disconnect(): Promise<void> {
     try {
+      redis.removeAllListeners();
+      redisNormal.removeAllListeners();
       await redis.quit();
       await redisNormal.quit();
     } catch (error) {
