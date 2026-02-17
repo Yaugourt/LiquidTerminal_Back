@@ -488,15 +488,55 @@ router.get("/referral/stats", validatePrivyToken, async (req: Request, res: Resp
 });
 
 // Route pour valider un name de parrain
+// Rate limited per-user to prevent username enumeration
+const referralValidationLimits = new Map<number, { count: number; resetAt: number }>();
+const REFERRAL_VALIDATE_MAX = 10; // 10 validations per minute per user
+const REFERRAL_VALIDATE_WINDOW = 60000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, counter] of referralValidationLimits) {
+    if (now > counter.resetAt) referralValidationLimits.delete(userId);
+  }
+}, 60000).unref();
+
 router.get("/referral/validate/:name", validatePrivyToken, async (req: Request, res: Response) => {
   try {
+    // Per-user rate limiting for this endpoint
+    const privyUserId = req.user?.sub;
+    if (!privyUserId) {
+      res.status(401).json({ success: false, message: 'User not authenticated', code: 'UNAUTHENTICATED' });
+      return;
+    }
+
+    const user = await userRepository.findByPrivyUserId(privyUserId);
+    if (!user) {
+      res.status(404).json({ success: false, message: 'User not found', code: 'USER_NOT_FOUND' });
+      return;
+    }
+
+    const now = Date.now();
+    const counter = referralValidationLimits.get(user.id);
+    if (counter && now < counter.resetAt && counter.count >= REFERRAL_VALIDATE_MAX) {
+      res.status(429).json({
+        success: false,
+        message: 'Too many validation requests',
+        code: 'RATE_LIMIT_EXCEEDED',
+      });
+      return;
+    }
+
+    if (!counter || now > counter.resetAt) {
+      referralValidationLimits.set(user.id, { count: 1, resetAt: now + REFERRAL_VALIDATE_WINDOW });
+    } else {
+      counter.count++;
+    }
+
     const name = String(req.params.name);
     const isValid = await referralService.validateReferrerName(name);
-    
-    logDeduplicator.info('Referrer validation completed', { 
-      name, 
-      isValid 
-    });
+
+    // Random delay to prevent timing-based enumeration
+    await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 100));
     
     res.status(200).json({
       success: true,

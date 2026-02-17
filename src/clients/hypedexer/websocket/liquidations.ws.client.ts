@@ -49,7 +49,7 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
         reconnect: true,
         reconnectInterval: 5000,
         reconnectMaxInterval: 60000,
-        reconnectMaxAttempts: 0, // Infinite
+        reconnectMaxAttempts: 20, // ~10 min with backoff 5s->60s
         pingInterval: 30000,
         pingTimeout: 10000,
       },

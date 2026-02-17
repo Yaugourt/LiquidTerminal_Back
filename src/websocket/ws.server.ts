@@ -395,9 +395,21 @@ export class InternalWebSocketServer {
 
   /**
    * Broadcast liquidations to all subscribed clients
+   * Pre-serializes each message once to avoid redundant JSON.stringify per client.
    */
   private broadcastLiquidations(liquidations: AggregatedLiquidation[]): void {
     if (!this.wss || liquidations.length === 0) return;
+
+    // Pre-serialize each liquidation message once before the client loop
+    const timestamp = new Date().toISOString();
+    const serializedMessages = liquidations.map((liq) => ({
+      liq,
+      serialized: JSON.stringify({
+        type: 'liquidation',
+        data: liq,
+        timestamp,
+      } satisfies WSServerMessage),
+    }));
 
     let sentCount = 0;
 
@@ -409,17 +421,27 @@ export class InternalWebSocketServer {
       const subscription = client.subscriptions.find((s) => s.type === 'liquidation');
       if (!subscription) continue;
 
-      // Filter liquidations based on client's filters
-      const filtered = this.filterLiquidations(liquidations, subscription.filters);
-      if (filtered.length === 0) continue;
+      const filters = subscription.filters;
+      const hasFilters =
+        (filters.coins && filters.coins.length > 0) ||
+        (filters.minAmountUsd !== undefined && filters.minAmountUsd !== null) ||
+        (filters.wallets && filters.wallets.length > 0);
 
-      // Send each liquidation as a separate event
-      for (const liq of filtered) {
-        this.sendMessage(ws, {
-          type: 'liquidation',
-          data: liq,
-          timestamp: new Date().toISOString(),
-        });
+      if (hasFilters) {
+        // Filter first, then send matching pre-serialized messages
+        const filtered = serializedMessages.filter((m) =>
+          this.matchesFilters(m.liq, filters)
+        );
+        if (filtered.length === 0) continue;
+
+        for (const { serialized } of filtered) {
+          this.sendRawMessage(ws, serialized);
+        }
+      } else {
+        // No filters — send all pre-serialized messages directly
+        for (const { serialized } of serializedMessages) {
+          this.sendRawMessage(ws, serialized);
+        }
       }
 
       sentCount++;
@@ -434,34 +456,32 @@ export class InternalWebSocketServer {
   }
 
   /**
-   * Filter liquidations based on client's subscription filters
+   * Check if a single liquidation matches the client's subscription filters
    */
-  private filterLiquidations(
-    liquidations: AggregatedLiquidation[],
+  private matchesFilters(
+    liq: AggregatedLiquidation,
     filters: WSLiquidationFilters
-  ): AggregatedLiquidation[] {
-    return liquidations.filter((liq) => {
-      // Filter by coins
-      if (filters.coins && filters.coins.length > 0) {
-        if (!filters.coins.some((c) => c.toUpperCase() === liq.coin.toUpperCase())) {
-          return false;
-        }
-      }
-
-      // Filter by minimum amount
-      if (filters.minAmountUsd && liq.notional_total < filters.minAmountUsd) {
+  ): boolean {
+    // Filter by coins
+    if (filters.coins && filters.coins.length > 0) {
+      if (!filters.coins.some((c) => c.toUpperCase() === liq.coin.toUpperCase())) {
         return false;
       }
+    }
 
-      // Filter by wallets
-      if (filters.wallets && filters.wallets.length > 0) {
-        if (!filters.wallets.some((w) => w.toLowerCase() === liq.liquidated_user.toLowerCase())) {
-          return false;
-        }
+    // Filter by minimum amount
+    if (filters.minAmountUsd && liq.notional_total < filters.minAmountUsd) {
+      return false;
+    }
+
+    // Filter by wallets
+    if (filters.wallets && filters.wallets.length > 0) {
+      if (!filters.wallets.some((w) => w.toLowerCase() === liq.liquidated_user.toLowerCase())) {
+        return false;
       }
+    }
 
-      return true;
-    });
+    return true;
   }
 
   /**
@@ -472,6 +492,21 @@ export class InternalWebSocketServer {
 
     try {
       ws.send(JSON.stringify(message));
+    } catch (error) {
+      logDeduplicator.error('InternalWebSocketServer: Send error', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Send a pre-serialized message string to client (avoids redundant JSON.stringify)
+   */
+  private sendRawMessage(ws: WebSocket, serialized: string): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    try {
+      ws.send(serialized);
     } catch (error) {
       logDeduplicator.error('InternalWebSocketServer: Send error', {
         error: error instanceof Error ? error.message : String(error),

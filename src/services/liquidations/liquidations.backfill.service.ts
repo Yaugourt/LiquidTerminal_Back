@@ -3,6 +3,7 @@ import { HLIndexerLiquidationsClient } from '../../clients/hlindexer/liquidation
 import { Liquidation } from '../../types/liquidations.types';
 import { RawLiquidationCreateInput } from '../../types/historical.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { chunkArray } from '../../utils/chunk';
 import type { Prisma } from '../../../prisma-historical/generated/client';
 
 /**
@@ -271,9 +272,14 @@ export class LiquidationsBackfillService {
   private async insertBatch(liquidations: Liquidation[]): Promise<{ inserted: number; duplicatesSkipped: number }> {
     const data = liquidations.map((liq) => this.toCreateInput(liq));
 
-    const result = await this.repository.createMany(data);
+    const chunks = chunkArray(data, 1000);
+    let totalInserted = 0;
+    for (const chunk of chunks) {
+      const result = await this.repository.createMany(chunk);
+      totalInserted += result.count;
+    }
 
-    const inserted = result.count;
+    const inserted = totalInserted;
     const duplicatesSkipped = liquidations.length - inserted;
 
     // Update ingestion state watermark

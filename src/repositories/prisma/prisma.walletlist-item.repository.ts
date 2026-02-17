@@ -7,6 +7,7 @@ import {
 } from '../../types/walletlist.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
+import { chunkArray } from '../../utils/chunk';
 
 export class PrismaWalletListItemRepository extends BasePrismaRepository implements WalletListItemRepository {
   // Helper pour les includes répétitifs
@@ -247,10 +248,13 @@ export class PrismaWalletListItemRepository extends BasePrismaRepository impleme
   async bulkCreate(data: Array<{ walletListId: number; userWalletId: number; order?: number }>): Promise<void> {
     return this.executeWithErrorHandling(
       async () => {
-        await this.prismaClient.walletListItem.createMany({
-          data,
-          skipDuplicates: true
-        });
+        const chunks = chunkArray(data, 500);
+        for (const chunk of chunks) {
+          await this.prismaClient.walletListItem.createMany({
+            data: chunk,
+            skipDuplicates: true
+          });
+        }
       },
       'bulk creating wallet list items',
       { count: data.length }

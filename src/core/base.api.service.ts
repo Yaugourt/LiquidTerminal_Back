@@ -1,5 +1,29 @@
 import { logDeduplicator } from '../utils/logDeduplicator';
 
+/**
+ * HTTP API error with status code for granular error handling.
+ */
+export class HttpApiError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+    public readonly responseBody?: string
+  ) {
+    super(message);
+    this.name = 'HttpApiError';
+  }
+
+  /** True for 429, 502, 503, 504 — transient errors worth retrying */
+  get isRetryable(): boolean {
+    return this.statusCode === 429 || (this.statusCode >= 502 && this.statusCode <= 504);
+  }
+
+  /** True for 429 — should use longer backoff */
+  get isRateLimited(): boolean {
+    return this.statusCode === 429;
+  }
+}
+
 export abstract class BaseApiService {
     private readonly API_TIMEOUT = 30000; // 30 secondes au lieu de 5
     private readonly MAX_RETRIES = 3;
@@ -36,8 +60,13 @@ export abstract class BaseApiService {
           },
         });
   
-                if (!response.ok) {
-          throw new Error(`API error: ${response.status} - ${await response.text()}`);
+        if (!response.ok) {
+          const body = await response.text();
+          throw new HttpApiError(
+            `API error: ${response.status} - ${body}`,
+            response.status,
+            body
+          );
         }
 
         logDeduplicator.info('API request successful', {
@@ -80,15 +109,26 @@ export abstract class BaseApiService {
           return await operation();
         } catch (error) {
           lastError = error as Error;
+
+          // Don't retry non-retryable HTTP errors (4xx except 429)
+          if (error instanceof HttpApiError && !error.isRetryable) {
+            throw error;
+          }
+
           if (i < maxRetries - 1) {
+            // Use longer backoff for rate limiting
+            const backoffMultiplier = (error instanceof HttpApiError && error.isRateLimited) ? 3 : 1;
+            const retryDelay = delay * (i + 1) * backoffMultiplier;
+
             logDeduplicator.warn('API request retry', {
               attempt: i + 1,
               maxRetries,
               service: this.constructor.name,
+              statusCode: error instanceof HttpApiError ? error.statusCode : undefined,
+              retryDelay,
               error: error instanceof Error ? error.message : String(error),
-              stack: error instanceof Error ? error.stack : undefined
             });
-            await this.delay(delay * (i + 1));
+            await this.delay(retryDelay);
           }
         }
       }
@@ -97,7 +137,7 @@ export abstract class BaseApiService {
     }
   
     // Méthodes HTTP principales
-    public async post<T>(endpoint: string, body: any): Promise<T> {
+    public async post<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
       return this.withRetry(() => 
         this.fetchWithTimeout<T>(endpoint, {
           method: 'POST',

@@ -12,6 +12,7 @@ import {
   ReadListError
 } from '../../errors/readlist.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { chunkArray } from '../../utils/chunk';
 import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
 import {
   readListCreateSchema,
@@ -310,10 +311,13 @@ export class ReadListService extends BaseService<
           order: item.order ?? index
         }));
 
-        await prisma.readListItem.createMany({
-          data: itemsData,
-          skipDuplicates: true
-        });
+        const chunks = chunkArray(itemsData, 500);
+        for (const chunk of chunks) {
+          await prisma.readListItem.createMany({
+            data: chunk,
+            skipDuplicates: true
+          });
+        }
 
         logDeduplicator.info('Read list items copied successfully (batch)', {
           originalReadListId: readListId,
