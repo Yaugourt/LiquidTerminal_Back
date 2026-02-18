@@ -4,6 +4,8 @@ import { SSEManagerService } from '../../services/liquidations/sse-manager.servi
 import { LiquidationsIngestionService } from '../../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../../services/liquidations/liquidations.backfill.service';
 import { HistoricalStatsService, HistoricalStatsPeriod } from '../../services/liquidations/liquidations.historical-stats.service';
+import { HistoricalChartService } from '../../services/liquidations/liquidations.historical-chart.service';
+import { HistoricalChartPeriod } from '../../types/historical.types';
 import { LiquidationQueryParams, LiquidationsError, ChartPeriod } from '../../types/liquidations.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
@@ -16,6 +18,7 @@ const router = Router();
 const liquidationsService = LiquidationsService.getInstance();
 const sseManager = SSEManagerService.getInstance();
 const historicalStatsService = HistoricalStatsService.getInstance();
+const historicalChartService = HistoricalChartService.getInstance();
 
 /**
  * Parse validated query parameters into LiquidationQueryParams
@@ -469,6 +472,46 @@ router.get('/historical/stats',
         });
       }
 
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Internal server error'
+      });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/historical/chart
+ * Get time-bucketed chart data for liquidations visualization.
+ * Bucket size is auto-selected based on the period to keep ~48-180 data points.
+ *
+ * Query params:
+ * - period: '24h' | '7d' | '14d' | '30d' | '90d' (default: '7d')
+ * - coin: Coin symbol filter, case sensitive (optional, e.g. "BTC", "flx:SILVER")
+ */
+router.get('/historical/chart',
+  marketRateLimiter,
+  (async (req: Request, res: Response) => {
+    try {
+      const validPeriods: HistoricalChartPeriod[] = ['24h', '7d', '14d', '30d', '90d'];
+      const periodParam = (req.query.period as string) || '7d';
+
+      if (!validPeriods.includes(periodParam as HistoricalChartPeriod)) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid period. Valid values: ${validPeriods.join(', ')}`
+        });
+      }
+
+      const period = periodParam as HistoricalChartPeriod;
+      const coin = typeof req.query.coin === 'string' ? req.query.coin : undefined;
+
+      logDeduplicator.info('GET /liquidations/historical/chart request', { period, coin });
+
+      const result = await historicalChartService.getChart(period, coin);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      logDeduplicator.error('Error fetching historical chart:', { error });
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Internal server error'

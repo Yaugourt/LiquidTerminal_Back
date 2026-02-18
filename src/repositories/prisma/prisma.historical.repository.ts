@@ -1,7 +1,7 @@
 import { prismaHistorical } from '../../core/prisma.historical.service';
 import { BasePrismaRepository } from './base-prisma.repository';
 import { HistoricalLiquidationRepository } from '../interfaces/historical.repository.interface';
-import { RawLiquidationCreateInput, IngestionStateResponse, HistoricalStats } from '../../types/historical.types';
+import { RawLiquidationCreateInput, IngestionStateResponse, HistoricalStats, RawChartBucket } from '../../types/historical.types';
 
 /**
  * Prisma implementation of the HistoricalLiquidationRepository.
@@ -155,6 +155,31 @@ export class PrismaHistoricalLiquidationRepository
       },
       'computing historical stats',
       { since: since.toISOString(), coin }
+    );
+  }
+
+  async getChart(since: Date, bucketTrunc: string, coin?: string): Promise<RawChartBucket[]> {
+    return this.executeWithErrorHandling(
+      async () => {
+        const coinParam = coin ?? null;
+        return this.prismaClient.$queryRaw<RawChartBucket[]>`
+          SELECT
+            date_trunc(${bucketTrunc}, time AT TIME ZONE 'UTC') AS bucket,
+            SUM(notional_total)::float AS total_volume,
+            COUNT(*)::int AS total_count,
+            SUM(CASE WHEN liq_dir = 'Long'  THEN notional_total ELSE 0 END)::float AS long_volume,
+            SUM(CASE WHEN liq_dir = 'Short' THEN notional_total ELSE 0 END)::float AS short_volume,
+            COUNT(CASE WHEN liq_dir = 'Long'  THEN 1 END)::int AS long_count,
+            COUNT(CASE WHEN liq_dir = 'Short' THEN 1 END)::int AS short_count
+          FROM raw_liquidations
+          WHERE time >= ${since}
+            AND (${coinParam}::text IS NULL OR coin = ${coinParam})
+          GROUP BY 1
+          ORDER BY 1 ASC
+        `;
+      },
+      'computing chart buckets',
+      { since: since.toISOString(), bucketTrunc, coin }
     );
   }
 }
