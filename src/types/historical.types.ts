@@ -50,3 +50,50 @@ export interface HistoricalStats {
   avgSize_USD: number;
   maxLiq_USD: number;
 }
+
+/**
+ * Raw row returned by $queryRaw for chart bucket queries.
+ */
+export interface RawChartBucket {
+  bucket: Date;
+  total_volume: number;
+  total_count: number;
+  long_volume: number;
+  short_volume: number;
+  long_count: number;
+  short_count: number;
+}
+
+/**
+ * Normalized chart bucket for API response.
+ */
+export interface ChartBucket {
+  timestamp: string;
+  totalVolume_USD: number;
+  count: number;
+  longVolume_USD: number;
+  shortVolume_USD: number;
+  longCount: number;
+  shortCount: number;
+}
+
+export type HistoricalChartPeriod = '24h' | '7d' | '14d' | '30d' | '90d';
+
+/**
+ * Full chart result returned by the service.
+ */
+export interface HistoricalChartResult {
+  buckets: ChartBucket[];
+  filters: {
+    period: HistoricalChartPeriod;
+    coin: string | null;
+    bucketSizeMinutes: number;
+  };
+  metadata: {
+    computedAt: string;
+    dataFrom: string;
+    dataTo: string;
+    totalBuckets: number;
+    cacheTTL: number;
+  };
+}

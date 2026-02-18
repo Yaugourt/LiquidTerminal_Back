@@ -62,5 +62,7 @@ export const CACHE_KEYS = {
   SSE_LAST_TIME_MS: `${CACHE_PREFIX.SSE}:liquidations:lastTimeMs`,
   SSE_BROADCAST_CHANNEL: `${CACHE_PREFIX.SSE}:liquidations:broadcast`,
   // Historical stats
-  HISTORICAL_STATS: (period: string, coin?: string) => `${CACHE_PREFIX.LIQUIDATIONS}:historical:stats:${period}${coin ? `:${coin}` : ''}`
+  HISTORICAL_STATS: (period: string, coin?: string) => `${CACHE_PREFIX.LIQUIDATIONS}:historical:stats:${period}${coin ? `:${coin}` : ''}`,
+  // Historical chart (time-series buckets)
+  HISTORICAL_CHART: (period: string, coin?: string) => `${CACHE_PREFIX.LIQUIDATIONS}:historical:chart:${period}${coin ? `:${coin}` : ''}`
 } as const;
