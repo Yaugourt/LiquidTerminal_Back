@@ -1,14 +1,24 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { TelegramService } from '../../services/telegram/telegram.service';
+import { TelegramWalletSubscriptionService } from '../../services/telegram/telegram.wallet-subscription.service';
 import { TelegramError } from '../../errors/telegram.errors';
 import { validateTelegramBotApiKey } from '../../middleware/telegramBotAuth.middleware';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
-import { telegramIdQuerySchema, telegramWalletListItemsSchema } from '../../schemas/telegram.schema';
+import {
+  telegramIdQuerySchema,
+  telegramWalletListItemsSchema,
+  createWalletSubscriptionSchema,
+  updateWalletSubscriptionSchema,
+  walletSubscriptionQuerySchema,
+  walletSubscriptionByIdSchema,
+} from '../../schemas/telegram.schema';
+import { WalletEventType } from '@prisma/client';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
 const telegramService = TelegramService.getInstance();
+const walletSubService = TelegramWalletSubscriptionService.getInstance();
 
 /**
  * GET /telegram/account?telegramId=XXX
@@ -254,6 +264,143 @@ router.post('/verify-link',
         message: 'Internal server error',
         code: 'INTERNAL_SERVER_ERROR',
       });
+    }
+  }) as RequestHandler
+);
+
+// ==================== WALLET SUBSCRIPTIONS ====================
+
+/**
+ * GET /telegram/wallet-subscriptions?telegramId=XXX
+ * List all wallet tracking subscriptions for a user.
+ */
+router.get('/wallet-subscriptions',
+  validateTelegramBotApiKey,
+  marketRateLimiter,
+  validateRequest(walletSubscriptionQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const telegramId = BigInt(req.query.telegramId as string);
+      logDeduplicator.info('GET /telegram/wallet-subscriptions', { telegramId: telegramId.toString() });
+      const data = await walletSubService.list(telegramId);
+      res.json({ success: true, data });
+    } catch (error) {
+      logDeduplicator.error('Error listing wallet subscriptions:', { error });
+      if (error instanceof TelegramError) {
+        return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
+      }
+      res.status(500).json({ success: false, message: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * POST /telegram/wallet-subscriptions
+ * Create a new wallet tracking subscription.
+ * Body: { telegramId, name, walletAddresses?, useLinkedWallets?, eventTypes?, minAmountUsd? }
+ */
+router.post('/wallet-subscriptions',
+  validateTelegramBotApiKey,
+  marketRateLimiter,
+  validateRequest(createWalletSubscriptionSchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const { telegramId, name, walletAddresses, useLinkedWallets, eventTypes, minAmountUsd } = req.body;
+      logDeduplicator.info('POST /telegram/wallet-subscriptions', { telegramId, name });
+      const data = await walletSubService.create({
+        telegramId: BigInt(telegramId),
+        name,
+        walletAddresses,
+        useLinkedWallets,
+        eventTypes: eventTypes as WalletEventType[] | undefined,
+        minAmountUsd,
+      });
+      res.status(201).json({ success: true, data });
+    } catch (error) {
+      logDeduplicator.error('Error creating wallet subscription:', { error });
+      if (error instanceof TelegramError) {
+        return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
+      }
+      res.status(500).json({ success: false, message: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * PUT /telegram/wallet-subscriptions/:id
+ * Update a wallet tracking subscription (name, filters, isActive toggle).
+ * Body: { telegramId, name?, walletAddresses?, useLinkedWallets?, eventTypes?, minAmountUsd?, isActive? }
+ */
+router.put('/wallet-subscriptions/:id',
+  validateTelegramBotApiKey,
+  marketRateLimiter,
+  validateRequest(updateWalletSubscriptionSchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const subscriptionId = String(req.params.id);
+      const { telegramId, name, walletAddresses, useLinkedWallets, eventTypes, minAmountUsd, isActive } = req.body;
+      logDeduplicator.info('PUT /telegram/wallet-subscriptions/:id', { telegramId, subscriptionId });
+      const data = await walletSubService.update({
+        telegramId: BigInt(telegramId),
+        subscriptionId,
+        name,
+        walletAddresses,
+        useLinkedWallets,
+        eventTypes: eventTypes as WalletEventType[] | undefined,
+        minAmountUsd,
+        isActive,
+      });
+      res.json({ success: true, data });
+    } catch (error) {
+      logDeduplicator.error('Error updating wallet subscription:', { error });
+      if (error instanceof TelegramError) {
+        return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
+      }
+      res.status(500).json({ success: false, message: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * DELETE /telegram/wallet-subscriptions/:id?telegramId=XXX
+ * Delete a wallet tracking subscription.
+ */
+router.delete('/wallet-subscriptions/:id',
+  validateTelegramBotApiKey,
+  marketRateLimiter,
+  validateRequest(walletSubscriptionByIdSchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const telegramId = BigInt(req.query.telegramId as string);
+      const subscriptionId = String(req.params.id);
+      logDeduplicator.info('DELETE /telegram/wallet-subscriptions/:id', { telegramId: telegramId.toString(), subscriptionId });
+      await walletSubService.delete(telegramId, subscriptionId);
+      res.json({ success: true, message: 'Subscription deleted' });
+    } catch (error) {
+      logDeduplicator.error('Error deleting wallet subscription:', { error });
+      if (error instanceof TelegramError) {
+        return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
+      }
+      res.status(500).json({ success: false, message: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * GET /telegram/wallet-subscriptions/active
+ * Internal route for the bot dispatcher: fetch all active subscriptions
+ * with resolved wallet addresses (including linked LT wallets).
+ */
+router.get('/wallet-subscriptions/active',
+  validateTelegramBotApiKey,
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    try {
+      const data = await walletSubService.getActiveSubscriptions();
+      res.json({ success: true, data });
+    } catch (error) {
+      logDeduplicator.error('Error fetching active wallet subscriptions:', { error });
+      res.status(500).json({ success: false, message: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
     }
   }) as RequestHandler
 );

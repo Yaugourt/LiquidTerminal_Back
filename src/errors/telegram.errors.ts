@@ -29,3 +29,17 @@ export class TelegramAlreadyLinkedError extends TelegramError {
     this.name = 'TelegramAlreadyLinkedError';
   }
 }
+
+export class WalletSubscriptionNotFoundError extends TelegramError {
+  constructor(message: string = 'Wallet subscription not found') {
+    super(message, 404, 'WALLET_SUBSCRIPTION_NOT_FOUND');
+    this.name = 'WalletSubscriptionNotFoundError';
+  }
+}
+
+export class WalletSubscriptionLimitError extends TelegramError {
+  constructor(message: string = 'Maximum number of wallet subscriptions reached (10)') {
+    super(message, 429, 'WALLET_SUBSCRIPTION_LIMIT_REACHED');
+    this.name = 'WalletSubscriptionLimitError';
+  }
+}
