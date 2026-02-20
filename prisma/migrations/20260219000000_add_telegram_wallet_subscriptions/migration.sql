@@ -1,8 +1,12 @@
--- CreateEnum
-CREATE TYPE "WalletEventType" AS ENUM ('TRADE', 'ORDER', 'TRANSFER', 'POSITION', 'STAKING');
+-- CreateEnum (safe: only create if not exists)
+DO $$ BEGIN
+    CREATE TYPE "WalletEventType" AS ENUM ('TRADE', 'ORDER', 'TRANSFER', 'POSITION', 'STAKING');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
 -- CreateTable
-CREATE TABLE "telegram_wallet_subscriptions" (
+CREATE TABLE IF NOT EXISTS "telegram_wallet_subscriptions" (
     "id" TEXT NOT NULL,
     "telegram_user_id" TEXT NOT NULL,
     "name" VARCHAR(100) NOT NULL,
@@ -18,7 +22,7 @@ CREATE TABLE "telegram_wallet_subscriptions" (
 );
 
 -- CreateTable
-CREATE TABLE "telegram_wallet_sent_alerts" (
+CREATE TABLE IF NOT EXISTS "telegram_wallet_sent_alerts" (
     "id" TEXT NOT NULL,
     "subscription_id" TEXT NOT NULL,
     "event_id" VARCHAR(255) NOT NULL,
@@ -28,25 +32,32 @@ CREATE TABLE "telegram_wallet_sent_alerts" (
 );
 
 -- CreateIndex
-CREATE INDEX "telegram_wallet_subscriptions_telegram_user_id_idx" ON "telegram_wallet_subscriptions"("telegram_user_id");
+CREATE INDEX IF NOT EXISTS "telegram_wallet_subscriptions_telegram_user_id_idx" ON "telegram_wallet_subscriptions"("telegram_user_id");
 
 -- CreateIndex
-CREATE INDEX "telegram_wallet_subscriptions_is_active_idx" ON "telegram_wallet_subscriptions"("is_active");
+CREATE INDEX IF NOT EXISTS "telegram_wallet_subscriptions_is_active_idx" ON "telegram_wallet_subscriptions"("is_active");
 
 -- CreateIndex
-CREATE INDEX "telegram_wallet_sent_alerts_event_id_idx" ON "telegram_wallet_sent_alerts"("event_id");
+CREATE INDEX IF NOT EXISTS "telegram_wallet_sent_alerts_event_id_idx" ON "telegram_wallet_sent_alerts"("event_id");
 
 -- CreateIndex
-CREATE INDEX "telegram_wallet_sent_alerts_sent_at_idx" ON "telegram_wallet_sent_alerts"("sent_at");
+CREATE INDEX IF NOT EXISTS "telegram_wallet_sent_alerts_sent_at_idx" ON "telegram_wallet_sent_alerts"("sent_at");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "telegram_wallet_sent_alerts_subscription_id_event_id_key" ON "telegram_wallet_sent_alerts"("subscription_id", "event_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "telegram_wallet_sent_alerts_subscription_id_event_id_key" ON "telegram_wallet_sent_alerts"("subscription_id", "event_id");
 
--- AddForeignKey
-ALTER TABLE "telegram_wallet_subscriptions" ADD CONSTRAINT "telegram_wallet_subscriptions_telegram_user_id_fkey" FOREIGN KEY ("telegram_user_id") REFERENCES "telegram_users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+-- AddForeignKey (safe: only add if constraint doesn't exist)
+DO $$ BEGIN
+    ALTER TABLE "telegram_wallet_subscriptions" ADD CONSTRAINT "telegram_wallet_subscriptions_telegram_user_id_fkey" FOREIGN KEY ("telegram_user_id") REFERENCES "telegram_users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
--- AddForeignKey
-ALTER TABLE "telegram_wallet_sent_alerts" ADD CONSTRAINT "telegram_wallet_sent_alerts_subscription_id_fkey" FOREIGN KEY ("subscription_id") REFERENCES "telegram_wallet_subscriptions"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+-- AddForeignKey (safe: only add if constraint doesn't exist)
+DO $$ BEGIN
+    ALTER TABLE "telegram_wallet_sent_alerts" ADD CONSTRAINT "telegram_wallet_sent_alerts_subscription_id_fkey" FOREIGN KEY ("subscription_id") REFERENCES "telegram_wallet_subscriptions"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
 
--- RenameIndex
-ALTER INDEX "telegram_sent_alerts_telegramUserId_sentAt_idx" RENAME TO "telegram_sent_alerts_telegram_user_id_sent_at_idx";
+-- RenameIndex: skipped (index does not exist in production, was never created with that name)
