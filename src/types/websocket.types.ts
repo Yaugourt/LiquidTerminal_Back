@@ -125,7 +125,7 @@ export interface WSClient {
  * Client subscription to our internal WebSocket
  */
 export interface WSClientSubscription {
-  type: 'liquidation';
+  type: 'liquidation' | 'wallet_event';
   filters: WSLiquidationFilters;
   subscribedAt: number;
 }
@@ -150,7 +150,7 @@ export type WSMethod = 'subscribe' | 'unsubscribe' | 'ping';
 export interface WSClientMessage {
   method: WSMethod;
   subscription?: {
-    type: 'liquidation';
+    type: 'liquidation' | 'wallet_event';
     filters?: WSLiquidationFilters;
   };
   token?: string;           // Privy JWT for authentication
@@ -159,12 +159,13 @@ export interface WSClientMessage {
 /**
  * Internal WebSocket event types (server → client)
  */
-export type WSEventType = 
+export type WSEventType =
   | 'connected'
   | 'authenticated'
   | 'subscribed'
   | 'unsubscribed'
   | 'liquidation'
+  | 'wallet_event'
   | 'heartbeat'
   | 'error';
 

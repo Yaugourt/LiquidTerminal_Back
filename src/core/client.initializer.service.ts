@@ -21,6 +21,7 @@ import { TopTradersService } from '../services/toptraders/toptraders.service';
 import { ActiveUsersService } from '../services/activeusers/activeusers.service';
 import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../services/liquidations/liquidations.backfill.service';
+import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export class ClientInitializerService {
@@ -174,6 +175,11 @@ export class ClientInitializerService {
       this.clients.set('liquidationsBackfill', backfillService);
       logDeduplicator.info('Liquidations Backfill service initialized successfully');
 
+      // Initialiser le dispatcher wallet events pour le bot Telegram
+      const walletDispatcher = TelegramWalletDispatcherService.getInstance();
+      this.clients.set('walletDispatcher', walletDispatcher);
+      logDeduplicator.info('Telegram Wallet Dispatcher service initialized successfully');
+
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
@@ -234,10 +240,32 @@ export class ClientInitializerService {
       }
     }
 
+    // 5. Start Telegram Wallet Dispatcher (connects to HypeDexer completed_trades)
+    const walletDispatcher = this.clients.get('walletDispatcher');
+    if (walletDispatcher) {
+      try {
+        walletDispatcher.start();
+        logDeduplicator.info('Started Telegram Wallet Dispatcher Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Telegram Wallet Dispatcher Service:', { error });
+      }
+    }
+
     logDeduplicator.info('All client polling started successfully');
   }
 
   public async stopAllPolling(): Promise<void> {
+    // Stop wallet dispatcher first
+    const walletDispatcher = this.clients.get('walletDispatcher');
+    if (walletDispatcher) {
+      try {
+        walletDispatcher.stop();
+        logDeduplicator.info('Telegram Wallet Dispatcher Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Telegram Wallet Dispatcher Service:', { error });
+      }
+    }
+
     // Stop ingestion FIRST — flush remaining batch before disconnecting DB
     const ingestionClient = this.clients.get('liquidationsIngestion');
     if (ingestionClient) {
