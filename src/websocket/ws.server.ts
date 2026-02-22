@@ -12,6 +12,7 @@ import {
   WSLiquidationFilters,
   WSConnectionStats,
 } from '../types/websocket.types';
+import { CompletedTrade } from '../types/wallet-events.types';
 
 /**
  * Internal WebSocket Server
@@ -273,26 +274,30 @@ export class InternalWebSocketServer {
    * Handle subscribe request
    */
   private handleSubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
-    if (!message.subscription || message.subscription.type !== 'liquidation') {
+    const subType = message.subscription?.type;
+
+    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event')) {
       this.sendMessage(ws, {
         type: 'error',
-        error: 'Invalid subscription type',
+        error: 'Invalid subscription type. Supported: liquidation, wallet_event',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
       return;
     }
 
-    // Check if already subscribed
-    const existingIndex = client.subscriptions.findIndex((s) => s.type === 'liquidation');
+    // Check if already subscribed to this type
+    const existingIndex = client.subscriptions.findIndex((s) => s.type === subType);
     if (existingIndex >= 0) {
-      // Update existing subscription
-      client.subscriptions[existingIndex].filters = message.subscription.filters || {};
+      // Update existing subscription filters (wallet_event has no filters)
+      if (subType === 'liquidation') {
+        client.subscriptions[existingIndex].filters = message.subscription?.filters || {};
+      }
     } else {
       // Add new subscription
       client.subscriptions.push({
-        type: 'liquidation',
-        filters: message.subscription.filters || {},
+        type: subType,
+        filters: message.subscription?.filters || {},
         subscribedAt: Date.now(),
       });
     }
@@ -300,16 +305,15 @@ export class InternalWebSocketServer {
     this.sendMessage(ws, {
       type: 'subscribed',
       data: {
-        type: 'liquidation',
-        filters: message.subscription.filters || {},
+        type: subType,
+        filters: subType === 'liquidation' ? (message.subscription?.filters || {}) : {},
       },
       timestamp: new Date().toISOString(),
     });
 
     logDeduplicator.info('InternalWebSocketServer: Client subscribed', {
       clientId: client.id,
-      type: 'liquidation',
-      filters: message.subscription.filters,
+      type: subType,
     });
   }
 
@@ -317,30 +321,32 @@ export class InternalWebSocketServer {
    * Handle unsubscribe request
    */
   private handleUnsubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
-    if (!message.subscription || message.subscription.type !== 'liquidation') {
+    const subType = message.subscription?.type;
+
+    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event')) {
       this.sendMessage(ws, {
         type: 'error',
-        error: 'Invalid subscription type',
+        error: 'Invalid subscription type. Supported: liquidation, wallet_event',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
       return;
     }
 
-    const index = client.subscriptions.findIndex((s) => s.type === 'liquidation');
+    const index = client.subscriptions.findIndex((s) => s.type === subType);
     if (index >= 0) {
       client.subscriptions.splice(index, 1);
     }
 
     this.sendMessage(ws, {
       type: 'unsubscribed',
-      data: { type: 'liquidation' },
+      data: { type: subType },
       timestamp: new Date().toISOString(),
     });
 
     logDeduplicator.info('InternalWebSocketServer: Client unsubscribed', {
       clientId: client.id,
-      type: 'liquidation',
+      type: subType,
     });
   }
 
@@ -450,6 +456,47 @@ export class InternalWebSocketServer {
     if (sentCount > 0) {
       logDeduplicator.info('InternalWebSocketServer: Broadcast liquidations', {
         liquidationCount: liquidations.length,
+        clientCount: sentCount,
+      });
+    }
+  }
+
+  /**
+   * Broadcast a wallet event to all clients subscribed to 'wallet_event'.
+   * The Telegram bot (1 connected client) receives the event and routes it
+   * to the correct Telegram user via telegramId in the payload.
+   */
+  public broadcastWalletEvent(
+    telegramId: string,
+    trade: CompletedTrade,
+    subscriptionName: string
+  ): void {
+    if (!this.wss) return;
+
+    const serialized = JSON.stringify({
+      type: 'wallet_event',
+      data: { telegramId, trade, subscriptionName },
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    let sentCount = 0;
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      const client = this.clients.get(clientId);
+      if (!client) continue;
+
+      const hasSub = client.subscriptions.some((s) => s.type === 'wallet_event');
+      if (!hasSub) continue;
+
+      this.sendRawMessage(ws, serialized);
+      sentCount++;
+    }
+
+    if (sentCount > 0) {
+      logDeduplicator.info('InternalWebSocketServer: Broadcast wallet event', {
+        telegramId,
+        tradeId: trade.tradeId,
+        coin: trade.coin,
         clientCount: sentCount,
       });
     }
