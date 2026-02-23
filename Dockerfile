@@ -1,36 +1,41 @@
-# Dockerfile pour Railway - Force Node 20.19.0 (compatible Prisma 7)
-FROM node:20.19.0-alpine
+# ─── Stage 1: Build ───────────────────────────────────────────────────────────
+FROM node:20.19.0-alpine AS builder
 
 WORKDIR /app
 
-# Build arg pour DATABASE_URL (nécessaire pour prisma generate)
 ARG DATABASE_URL
 ENV DATABASE_URL=$DATABASE_URL
 
-# Copie des fichiers de dépendances
+# Dépendances — layer en cache tant que package.json ne change pas
 COPY package*.json ./
+RUN npm ci
+
+# Schémas Prisma — layer séparé pour ne régénérer que si les schémas changent
 COPY prisma ./prisma/
 COPY prisma-historical ./prisma-historical/
 COPY prisma.config.ts ./
+RUN npx prisma generate && npx prisma generate --schema ./prisma-historical/schema.prisma
 
-# Installation de TOUTES les dépendances (y compris devDeps pour prisma CLI + tsc)
-RUN npm ci
-
-# Génération des deux clients Prisma
-RUN npx prisma generate
-RUN npx prisma generate --schema ./prisma-historical/schema.prisma
-
-# Copie du reste du code
+# Code source + build TypeScript
 COPY . .
-
-# Build TypeScript
 RUN npm run build
 
-# Suppression des devDependencies pour alléger l'image finale
+# Élagage des devDeps dans le même node_modules (évite une 2e install complète)
 RUN npm prune --omit=dev
 
-# Expose le port (Railway injecte PORT automatiquement)
+# ─── Stage 2: Production ──────────────────────────────────────────────────────
+FROM node:20.19.0-alpine AS production
+
+WORKDIR /app
+
+# node_modules déjà élagués + clients Prisma générés — aucune install supplémentaire
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/prisma ./prisma/
+COPY --from=builder /app/prisma-historical ./prisma-historical/
+COPY --from=builder /app/prisma.config.ts ./
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package.json ./
+
 EXPOSE 3002
 
-# Commande de démarrage (applique les migrations des deux bases puis lance le serveur)
-CMD ["sh", "-c", "npx prisma migrate deploy && npx prisma migrate deploy --schema ./prisma-historical/schema.prisma --config ./prisma-historical/prisma.config.ts && node dist/app.js"]
+CMD ["sh", "-c", "node node_modules/.bin/prisma migrate deploy && node node_modules/.bin/prisma migrate deploy --schema ./prisma-historical/schema.prisma --config ./prisma-historical/prisma.config.ts && node dist/app.js"]
