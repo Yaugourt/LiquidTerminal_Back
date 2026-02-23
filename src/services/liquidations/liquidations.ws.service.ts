@@ -324,7 +324,7 @@ export class LiquidationsWebSocketService {
     for (const liq of sorted) {
       const weight = liq.size_total / totalSize;
       weightedMarkPx += liq.mark_px * weight;
-      weightedFillPx += liq.fill_px_vwap * weight;
+      weightedFillPx += (liq.fill_px_vwap ?? liq.mark_px) * weight;
     }
 
     const aggregated: AggregatedLiquidation = {

@@ -121,7 +121,7 @@ export class LiquidationsBackfillService {
       liquidatedUser: liq.liquidated_user,
       sizeTotal: liq.size_total,
       notionalTotal: liq.notional_total,
-      fillPxVwap: liq.fill_px_vwap,
+      fillPxVwap: liq.fill_px_vwap ?? liq.mark_px,
       markPx: liq.mark_px,
       method: liq.method,
       feeTotalLiquidated: liq.fee_total_liquidated,

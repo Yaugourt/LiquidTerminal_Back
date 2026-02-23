@@ -155,6 +155,7 @@ export class LiquidationsIngestionService {
       typeof liq.hash === 'string' && liq.hash.length > 0 &&
       typeof liq.liquidated_user === 'string' && liq.liquidated_user.length > 0 &&
       typeof liq.notional_total === 'number' && Number.isFinite(liq.notional_total) &&
+      typeof liq.mark_px === 'number' && Number.isFinite(liq.mark_px) && liq.mark_px > 0 &&
       (liq.liq_dir === 'Long' || liq.liq_dir === 'Short')
     );
   }
@@ -170,9 +171,9 @@ export class LiquidationsIngestionService {
       coin: liq.coin,
       hash: liq.hash,
       liquidatedUser: liq.liquidated_user,
-      sizeTotal: liq.size_total,
+      sizeTotal: liq.size_total ?? 0,
       notionalTotal: liq.notional_total,
-      fillPxVwap: liq.fill_px_vwap,
+      fillPxVwap: liq.fill_px_vwap ?? liq.mark_px,
       markPx: liq.mark_px,
       method: liq.method,
       feeTotalLiquidated: liq.fee_total_liquidated,
