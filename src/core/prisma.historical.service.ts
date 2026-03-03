@@ -16,6 +16,10 @@ class PrismaHistoricalService {
 
       const pool = new Pool({
         connectionString: process.env.HISTORICAL_DATABASE_URL,
+        // Prevent stale connections after DB restarts
+        idleTimeoutMillis: 10000,       // recycle idle connections after 10s
+        connectionTimeoutMillis: 5000,  // fail fast if DB unreachable
+        keepAlive: true,                // detect dead TCP connections early
       });
       const adapter = new PrismaPg(pool);
 

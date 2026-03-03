@@ -69,16 +69,12 @@ export class HyperliquidSpotStatsClient {
       // Calculer la capitalisation totale du marché
       const totalMarketCap = marketsData.reduce((total: number, market: MarketData) => total + market.marketCap, 0);
       
-      // Récupérer les données USDC spot les plus récentes
-      const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0 
-        ? spotUSDCData[spotUSDCData.length - 1] 
+      const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
+        ? spotUSDCData[spotUSDCData.length - 1]
         : null;
-      
+
       const totalSpotUSDC = latestSpotUSDCData?.totalSpotUSDC || 0;
       const totalHIP2 = latestSpotUSDCData?.["HIP-2"] || latestSpotUSDCData?.USDC_HIP2 || 0;
-      const totalSpotUSDT0 = latestSpotUSDCData?.totalSpotUSDT0 || 0;
-      const totalSpotUSDE = latestSpotUSDCData?.totalSpotUSDE || 0;
-      const totalSpotUSDH = latestSpotUSDCData?.totalSpotUSDH || 0;
 
       const stats: SpotGlobalStats = {
         totalVolume24h,
@@ -86,33 +82,6 @@ export class HyperliquidSpotStatsClient {
         totalMarketCap,
         totalSpotUSDC,
         totalHIP2,
-        totalSpotUSDT0,
-        totalSpotUSDE,
-        totalSpotUSDH,
-        totalStablecoins: totalSpotUSDC + totalSpotUSDT0 + totalSpotUSDE + totalSpotUSDH,
-        USDC_holdersCount: latestSpotUSDCData?.USDC_holdersCount || 0,
-        USDT0_holdersCount: latestSpotUSDCData?.USDT0_holdersCount || 0,
-        USDE_holdersCount: latestSpotUSDCData?.USDE_holdersCount || 0,
-        USDH_holdersCount: latestSpotUSDCData?.USDH_holdersCount || 0,
-        USDC_HIP2: latestSpotUSDCData?.USDC_HIP2 || 0,
-        USDT0_HIP2: latestSpotUSDCData?.USDT0_HIP2 || 0,
-        USDE_HIP2: latestSpotUSDCData?.USDE_HIP2 || 0,
-        USDH_HIP2: latestSpotUSDCData?.USDH_HIP2 || 0,
-        // Variations calculées dans SpotGlobalStatsService (accès au tableau complet des snapshots)
-        totalSpotUSDC_change24h: null,
-        totalSpotUSDT0_change24h: null,
-        totalSpotUSDE_change24h: null,
-        totalSpotUSDH_change24h: null,
-        totalStablecoins_change24h: null,
-        totalSpotUSDC_changePct24h: null,
-        totalSpotUSDT0_changePct24h: null,
-        totalSpotUSDE_changePct24h: null,
-        totalSpotUSDH_changePct24h: null,
-        totalStablecoins_changePct24h: null,
-        USDC_holdersCount_change24h: null,
-        USDT0_holdersCount_change24h: null,
-        USDE_holdersCount_change24h: null,
-        USDH_holdersCount_change24h: null,
       };
 
       // Mettre en cache les statistiques

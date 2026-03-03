@@ -1,4 +1,4 @@
-import { SpotGlobalStats, MarketData } from '../../types/market.types';
+import { SpotGlobalStats, StablecoinsStats, MarketData } from '../../types/market.types';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
@@ -14,7 +14,6 @@ export class SpotGlobalStatsService {
   }
 
   private setupSubscriptions(): void {
-    // S'abonner aux mises à jour des données de marché
     redisService.subscribe(this.SPOT_MARKETS_UPDATE_CHANNEL, async (message) => {
       try {
         const { type, timestamp } = JSON.parse(message);
@@ -23,34 +22,31 @@ export class SpotGlobalStatsService {
           logDeduplicator.info('Spot markets data cache updated', { timestamp });
         }
       } catch (error) {
-        logDeduplicator.error('Error processing spot markets cache update:', { 
-          error: error instanceof Error ? error.message : String(error) 
+        logDeduplicator.error('Error processing spot markets cache update:', {
+          error: error instanceof Error ? error.message : String(error)
         });
       }
     });
 
-    // S'abonner aux mises à jour des données USDC
     redisService.subscribe(this.SPOT_USDC_UPDATE_CHANNEL, async (message) => {
       try {
         const { type, dataType, timestamp } = JSON.parse(message);
         if (type === 'DATA_UPDATED') {
           this.lastUpdate[dataType] = timestamp;
-          logDeduplicator.info('Spot USDC data cache updated', { 
-            dataType, 
-            timestamp 
-          });
+          logDeduplicator.info('Spot USDC data cache updated', { dataType, timestamp });
         }
       } catch (error) {
-        logDeduplicator.error('Error processing spot USDC cache update:', { 
-          error: error instanceof Error ? error.message : String(error) 
+        logDeduplicator.error('Error processing spot USDC cache update:', {
+          error: error instanceof Error ? error.message : String(error)
         });
       }
     });
   }
 
+  // ─── Spot Global Stats (volume, paires, market cap) ───────────────────────
+
   public async getSpotGlobalStats(): Promise<SpotGlobalStats> {
     try {
-      // Récupérer les données en parallèle
       const [marketsData, spotUSDCData] = await Promise.all([
         this.getMarketsDataFromCache(),
         this.getSpotUSDCDataFromCache()
@@ -60,45 +56,60 @@ export class SpotGlobalStatsService {
         throw new Error('No spot market data available');
       }
 
-      // Calculer le volume total sur 24h
       const totalVolume24h = marketsData.reduce((total: number, market: MarketData) => total + market.volume, 0);
-
-      // Calculer le nombre total de paires
       const totalPairs = marketsData.length;
-
-      // Calculer la capitalisation totale du marché
       const totalMarketCap = marketsData.reduce((total: number, market: MarketData) => total + market.marketCap, 0);
 
-      // Récupérer les données USDC spot les plus récentes
       const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
         ? spotUSDCData[spotUSDCData.length - 1]
         : null;
 
       const totalSpotUSDC = latestSpotUSDCData?.totalSpotUSDC || 0;
       const totalHIP2 = latestSpotUSDCData?.['HIP-2'] || latestSpotUSDCData?.USDC_HIP2 || 0;
-      const totalSpotUSDT0 = latestSpotUSDCData?.totalSpotUSDT0 || 0;
-      const totalSpotUSDE = latestSpotUSDCData?.totalSpotUSDE || 0;
-      const totalSpotUSDH = latestSpotUSDCData?.totalSpotUSDH || 0;
-      const totalStablecoins = totalSpotUSDC + totalSpotUSDT0 + totalSpotUSDE + totalSpotUSDH;
-
-      // Calculer les variations sur 24h
-      const variations = this.compute24hVariations(spotUSDCData, latestSpotUSDCData);
 
       logDeduplicator.info('Spot global stats retrieved successfully', {
         totalVolume24h,
         totalPairs,
         totalMarketCap,
         totalSpotUSDC,
+        lastUpdate: this.lastUpdate
+      });
+
+      return { totalVolume24h, totalPairs, totalMarketCap, totalSpotUSDC, totalHIP2 };
+    } catch (error) {
+      logDeduplicator.error('Error retrieving spot global stats:', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  // ─── Stablecoins Stats ────────────────────────────────────────────────────
+
+  public async getStablecoinsStats(): Promise<StablecoinsStats> {
+    try {
+      const spotUSDCData = await this.getSpotUSDCDataFromCache();
+
+      const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
+        ? spotUSDCData[spotUSDCData.length - 1]
+        : null;
+
+      const totalSpotUSDC = latestSpotUSDCData?.totalSpotUSDC || 0;
+      const totalSpotUSDT0 = latestSpotUSDCData?.totalSpotUSDT0 || 0;
+      const totalSpotUSDE = latestSpotUSDCData?.totalSpotUSDE || 0;
+      const totalSpotUSDH = latestSpotUSDCData?.totalSpotUSDH || 0;
+      const totalStablecoins = totalSpotUSDC + totalSpotUSDT0 + totalSpotUSDE + totalSpotUSDH;
+
+      const variations = this.compute24hVariations(spotUSDCData, latestSpotUSDCData);
+
+      logDeduplicator.info('Stablecoins stats retrieved successfully', {
+        totalSpotUSDC,
         totalStablecoins,
         lastUpdate: this.lastUpdate
       });
 
       return {
-        totalVolume24h,
-        totalPairs,
-        totalMarketCap,
         totalSpotUSDC,
-        totalHIP2,
         totalSpotUSDT0,
         totalSpotUSDE,
         totalSpotUSDH,
@@ -114,18 +125,25 @@ export class SpotGlobalStatsService {
         ...variations,
       };
     } catch (error) {
-      logDeduplicator.error('Error retrieving spot global stats:', {
+      logDeduplicator.error('Error retrieving stablecoins stats:', {
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
     }
   }
 
-  /**
-   * Find the snapshot closest to 24h ago and compute absolute + percentage changes.
-   * The Hypurrscan array is sorted chronologically (oldest first, newest last).
-   * Each entry has a `lastUpdate` field (Unix timestamp in seconds).
-   */
+  // ─── Stablecoins History ─────────────────────────────────────────────────
+
+  public async getStablecoinsHistory(): Promise<Record<string, number>[]> {
+    const snapshots = await this.getSpotUSDCDataFromCache();
+    if (!snapshots || snapshots.length === 0) {
+      throw new Error('No stablecoins history available');
+    }
+    return snapshots;
+  }
+
+  // ─── 24h variations ───────────────────────────────────────────────────────
+
   private compute24hVariations(
     snapshots: Record<string, number>[] | null,
     latest: Record<string, number> | null
@@ -169,7 +187,7 @@ export class SpotGlobalStatsService {
 
     const target24hTs = latestTs - 86400;
 
-    // Find the snapshot closest to target (24h ago)
+    // Trouver le snapshot le plus proche de -24h
     let snapshot24h: Record<string, number> | null = null;
     let minDiff = Infinity;
     for (const snap of snapshots) {
@@ -186,28 +204,24 @@ export class SpotGlobalStatsService {
 
     const delta = (current: number, past: number): { change: number; pct: number } | null => {
       if (!past) return null;
-      const change = current - past;
-      const pct = (change / past) * 100;
-      return { change, pct };
+      return { change: current - past, pct: ((current - past) / past) * 100 };
     };
 
     const usdcNow = latest.totalSpotUSDC || 0;
     const usdt0Now = latest.totalSpotUSDT0 || 0;
     const usdeNow = latest.totalSpotUSDE || 0;
     const usdhNow = latest.totalSpotUSDH || 0;
-    const stablesNow = usdcNow + usdt0Now + usdeNow + usdhNow;
 
     const usdcThen = snapshot24h.totalSpotUSDC || 0;
     const usdt0Then = snapshot24h.totalSpotUSDT0 || 0;
     const usdeThen = snapshot24h.totalSpotUSDE || 0;
     const usdhThen = snapshot24h.totalSpotUSDH || 0;
-    const stablesThen = usdcThen + usdt0Then + usdeThen + usdhThen;
 
     const usdcDelta = delta(usdcNow, usdcThen);
     const usdt0Delta = delta(usdt0Now, usdt0Then);
     const usdeDelta = delta(usdeNow, usdeThen);
     const usdhDelta = delta(usdhNow, usdhThen);
-    const stablesDelta = delta(stablesNow, stablesThen);
+    const stablesDelta = delta(usdcNow + usdt0Now + usdeNow + usdhNow, usdcThen + usdt0Then + usdeThen + usdhThen);
 
     const usdcHoldersNow = latest.USDC_holdersCount || 0;
     const usdt0HoldersNow = latest.USDT0_holdersCount || 0;
@@ -237,6 +251,8 @@ export class SpotGlobalStatsService {
     };
   }
 
+  // ─── Cache helpers ────────────────────────────────────────────────────────
+
   private async getMarketsDataFromCache(): Promise<MarketData[] | null> {
     try {
       const raw = await redisService.get(this.SPOT_MARKETS_CACHE_KEY);
@@ -252,10 +268,10 @@ export class SpotGlobalStatsService {
       const cachedData = await redisService.get(this.SPOT_USDC_CACHE_KEY);
       return cachedData ? JSON.parse(cachedData) : null;
     } catch (error) {
-      logDeduplicator.error('Error retrieving SpotUSDC data from cache:', { 
-        error: error instanceof Error ? error.message : String(error) 
+      logDeduplicator.error('Error retrieving SpotUSDC data from cache:', {
+        error: error instanceof Error ? error.message : String(error)
       });
       return null;
     }
   }
-} 
+}

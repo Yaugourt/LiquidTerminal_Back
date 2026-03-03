@@ -108,41 +108,46 @@ export interface PerpMarketData {
     onlyIsolated: boolean;
 }
 
-// Types pour les statistiques globales
+// Types pour les statistiques globales spot (volume, paires, market cap)
 export interface SpotGlobalStats {
     totalVolume24h: number;
     totalPairs: number;
     totalMarketCap: number;
     totalSpotUSDC: number;
     totalHIP2: number;
-    // Stablecoins breakdown
+}
+
+// Types pour les statistiques stablecoins (USDC, USDT0, USDE, USDH)
+export interface StablecoinsStats {
+    // Montants on-chain
+    totalSpotUSDC: number;
     totalSpotUSDT0: number;
     totalSpotUSDE: number;
     totalSpotUSDH: number;
     totalStablecoins: number;
-    // Holders counts
+    // Holders
     USDC_holdersCount: number;
     USDT0_holdersCount: number;
     USDE_holdersCount: number;
     USDH_holdersCount: number;
-    // HIP-2 per stablecoin
+    // HIP-2
     USDC_HIP2: number;
     USDT0_HIP2: number;
     USDE_HIP2: number;
     USDH_HIP2: number;
-    // 24h variations (absolute change)
+    // Variations 24h (montants absolus)
     totalSpotUSDC_change24h: number | null;
     totalSpotUSDT0_change24h: number | null;
     totalSpotUSDE_change24h: number | null;
     totalSpotUSDH_change24h: number | null;
     totalStablecoins_change24h: number | null;
-    // 24h variations (percentage change)
+    // Variations 24h (pourcentage)
     totalSpotUSDC_changePct24h: number | null;
     totalSpotUSDT0_changePct24h: number | null;
     totalSpotUSDE_changePct24h: number | null;
     totalSpotUSDH_changePct24h: number | null;
     totalStablecoins_changePct24h: number | null;
-    // 24h holders count variations (absolute change)
+    // Variations 24h holders
     USDC_holdersCount_change24h: number | null;
     USDT0_holdersCount_change24h: number | null;
     USDE_holdersCount_change24h: number | null;
