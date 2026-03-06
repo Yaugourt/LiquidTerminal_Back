@@ -6,8 +6,10 @@ import 'dotenv/config';
 import { createServer } from 'http';
 import { sanitizeInput } from './middleware/validation';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
+import { requestLoggingMiddleware } from './middleware/requestLogging.middleware';
 import { SECURITY_CONSTANTS } from './constants/security.constants';
 import { securityHeaders } from './middleware/security.middleware';
+import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
 import { ClientInitializerService } from './core/client.initializer.service';
 import { prisma } from './core/prisma.service';
@@ -15,6 +17,7 @@ import { PrismaHistoricalService } from './core/prisma.historical.service';
 import { FileCleanupService } from './utils/fileCleanup';
 import { InternalWebSocketServer } from './websocket';
 import { redisService } from './core/redis.service';
+import { flushLogs } from './utils/logger';
 
 import authRoutes from './routes/auth/auth.routes';
 import userAuthRoutes from './routes/auth/user.auth.routes';
@@ -56,15 +59,19 @@ import activeUsersRoutes from './routes/activeusers/activeusers.routes';
 
 const app = express();
 const server = createServer(app);
+let isShuttingDown = false;
+let forceExitTimer: NodeJS.Timeout | null = null;
 
 // Désactiver l'en-tête X-Powered-By pour des raisons de sécurité
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 
 // Compression gzip des réponses (réduit la bande passante de 60-80%)
 app.use(compression());
 
 // Ajouter Request ID pour traçabilité (doit être en premier)
 app.use(requestIdMiddleware);
+app.use(requestLoggingMiddleware);
 
 // Configuration CORS basée sur les constantes de sécurité
 app.use(cors({
@@ -82,7 +89,7 @@ app.use(cors({
     }
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
   credentials: true
 }));
 
@@ -132,77 +139,127 @@ app.use('/api/health', healthRoutes);
 app.use('/liquidations', liquidationsRoutes);
 app.use('/top-traders', topTradersRoutes);
 app.use('/active-users', activeUsersRoutes);
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 3002;
 
-// Initialiser les clients avant de démarrer le serveur
 const clientInitializer = ClientInitializerService.getInstance();
+const wsServer = InternalWebSocketServer.getInstance();
+wsServer.initialize(server);
+void logDeduplicator.info('WebSocket Server initialized on /ws');
 
-// ✅ Attendre l'initialisation avant de démarrer le serveur
-clientInitializer.initialize()
-  .then(() => {
-    logDeduplicator.info('All clients initialized, starting server...');
+async function bootstrapApplication(): Promise<void> {
+  try {
+    await logDeduplicator.info('Starting asynchronous application bootstrap...');
+    await clientInitializer.initialize();
 
-    // Démarrer le service de nettoyage automatique des fichiers
     const fileCleanupService = FileCleanupService.getInstance();
     fileCleanupService.startAutoCleanup();
 
-    // Initialiser le WebSocket Server interne (attache au HTTP server sur /ws)
-    const wsServer = InternalWebSocketServer.getInstance();
-    wsServer.initialize(server);
-    logDeduplicator.info('WebSocket Server initialized on /ws');
+    await logDeduplicator.info('Application bootstrap completed successfully');
+  } catch (error) {
+    await logDeduplicator.error('Failed to initialize clients:', { error });
+    await gracefulShutdown('BOOT_FAILURE', 1);
+  }
+}
 
-    server.listen(PORT, () => {
-      logDeduplicator.info(`Server is running on port ${PORT}`);
-      logDeduplicator.info(`WebSocket available at ws://localhost:${PORT}/ws`);
-    });
-  })
-  .catch((error) => {
-    logDeduplicator.error('Failed to initialize clients:', { error });
-    process.exit(1); // Arrêter l'app si l'initialisation échoue
-  });
+async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
+  if (isShuttingDown) {
+    return;
+  }
 
-async function gracefulShutdown(signal: string): Promise<void> {
-  logDeduplicator.info(`Received ${signal}. Performing graceful shutdown...`);
+  isShuttingDown = true;
+  await logDeduplicator.info(`Received ${signal}. Performing graceful shutdown...`);
 
   // 1. Stop accepting new connections
-  server.close(() => {
-    logDeduplicator.info('HTTP server closed');
+  server.close(async () => {
+    await logDeduplicator.info('HTTP server closed');
   });
 
-  // 2. Shutdown WebSocket Server
-  InternalWebSocketServer.getInstance().shutdown();
+  try {
+    // 2. Shutdown WebSocket Server
+    InternalWebSocketServer.getInstance().shutdown();
 
-  // 3. Stop all polling, flush ingestion buffer, shutdown SSE connections
-  await clientInitializer.stopAllPolling();
+    // 3. Stop all polling, flush ingestion buffer, shutdown SSE connections
+    await clientInitializer.stopAllPolling();
 
-  // 4. Disconnect databases
-  await prisma.$disconnect();
-  await PrismaHistoricalService.disconnect();
+    // 4. Disconnect databases
+    await prisma.$disconnect();
+    await PrismaHistoricalService.disconnect();
 
-  // 5. Disconnect Redis
-  await redisService.disconnect();
+    // 5. Disconnect Redis
+    await redisService.disconnect();
 
-  logDeduplicator.info('Graceful shutdown complete');
-  process.exit(0);
+    await logDeduplicator.info('Graceful shutdown complete');
+  } catch (error) {
+    await logDeduplicator.error('Graceful shutdown failed', {
+      signal,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
+    exitCode = 1;
+  } finally {
+    if (forceExitTimer) {
+      clearTimeout(forceExitTimer);
+      forceExitTimer = null;
+    }
+    await flushLogs();
+    process.exit(exitCode);
+  }
 }
 
 // Force exit after 30s if graceful shutdown hangs
 function forceExit(signal: string): void {
-  setTimeout(() => {
-    logDeduplicator.error(`Forced exit after ${signal} - shutdown took too long`);
+  if (forceExitTimer) {
+    return;
+  }
+
+  forceExitTimer = setTimeout(() => {
+    void logDeduplicator.error(`Forced exit after ${signal} - shutdown took too long`);
     process.exit(1);
   }, 30000).unref();
 }
 
+server.on('error', (error) => {
+  void logDeduplicator.error('HTTP server error', {
+    error: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined,
+  });
+});
+
+server.listen(PORT, () => {
+  void logDeduplicator.info(`Server is running on port ${PORT}`);
+  void logDeduplicator.info(`WebSocket available at ws://localhost:${PORT}/ws`);
+  void bootstrapApplication();
+});
+
 process.on('SIGINT', () => {
   forceExit('SIGINT');
-  gracefulShutdown('SIGINT');
+  void gracefulShutdown('SIGINT');
 });
 
 process.on('SIGTERM', () => {
   forceExit('SIGTERM');
-  gracefulShutdown('SIGTERM');
+  void gracefulShutdown('SIGTERM');
+});
+
+process.on('unhandledRejection', (reason) => {
+  void logDeduplicator.error('Unhandled promise rejection', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  forceExit('UNHANDLED_REJECTION');
+  void gracefulShutdown('UNHANDLED_REJECTION', 1);
+});
+
+process.on('uncaughtException', (error) => {
+  void logDeduplicator.error('Uncaught exception', {
+    error: error.message,
+    stack: error.stack,
+  });
+  forceExit('UNCAUGHT_EXCEPTION');
+  void gracefulShutdown('UNCAUGHT_EXCEPTION', 1);
 });
 
 export default app;

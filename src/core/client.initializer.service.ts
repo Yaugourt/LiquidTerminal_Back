@@ -24,9 +24,12 @@ import { LiquidationsBackfillService } from '../services/liquidations/liquidatio
 import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
+export type StartupStatus = 'booting' | 'ready' | 'degraded';
+
 export class ClientInitializerService {
   private static instance: ClientInitializerService;
   private clients: Map<string, any> = new Map();
+  private startupStatus: StartupStatus = 'booting';
 
   private constructor() {}
 
@@ -70,6 +73,7 @@ export class ClientInitializerService {
 
   public async initialize(): Promise<void> {
     try {
+      this.startupStatus = 'booting';
       logDeduplicator.info('Starting client initialization...');
 
       // ✅ Redis est déjà prêt, on peut initialiser les clients directement
@@ -183,12 +187,18 @@ export class ClientInitializerService {
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
+      this.startupStatus = 'ready';
 
       logDeduplicator.info('All clients initialized successfully');
     } catch (error) {
+      this.startupStatus = 'degraded';
       logDeduplicator.error('Error initializing clients:', { error });
       throw error;
     }
+  }
+
+  public getStartupStatus(): StartupStatus {
+    return this.startupStatus;
   }
 
   private async startAllPolling(): Promise<void> {
@@ -228,16 +238,18 @@ export class ClientInitializerService {
       }
     }
 
-    // 4. Run Backfill (REST → DB, awaits completion)
-    //    WS ingestion runs in parallel — skipDuplicates handles overlap
+    // 4. Run Backfill in background so Railway readiness is not blocked
     const backfillClient = this.clients.get('liquidationsBackfill');
     if (backfillClient) {
-      try {
-        await backfillClient.start();
-        logDeduplicator.info('Liquidations Backfill completed');
-      } catch (error) {
-        logDeduplicator.error('Error during Liquidations Backfill:', { error });
-      }
+      void backfillClient.start()
+        .then(() => {
+          logDeduplicator.info('Liquidations Backfill completed');
+        })
+        .catch((error: unknown) => {
+          logDeduplicator.error('Error during Liquidations Backfill:', { error });
+        });
+
+      logDeduplicator.info('Started Liquidations Backfill Service in background');
     }
 
     // 5. Start Telegram Wallet Dispatcher (connects to HypeDexer completed_trades)

@@ -1,14 +1,18 @@
 import { Router } from 'express';
 import { prisma } from '../core/prisma.service';
 import { redisService } from '../core/redis.service';
-import { logDeduplicator } from '../utils/logDeduplicator';
+import { ClientInitializerService } from '../core/client.initializer.service';
 
 const router = Router();
+const clientInitializer = ClientInitializerService.getInstance();
 
 interface HealthStatus {
   status: 'healthy' | 'degraded' | 'unhealthy';
   timestamp: string;
   uptime: number;
+  startup: {
+    status: 'booting' | 'ready' | 'degraded';
+  };
   checks: {
     database: { status: 'up' | 'down'; latencyMs?: number; error?: string };
     redis: { status: 'up' | 'down'; latencyMs?: number; error?: string };
@@ -21,52 +25,96 @@ interface HealthStatus {
   };
 }
 
-router.get('/', async (req, res) => {
-  const health: HealthStatus = {
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    checks: {
-      database: { status: 'down' },
-      redis: { status: 'down' },
-    },
-    memory: formatMemory(),
+interface DependencyChecks {
+  database: HealthStatus['checks']['database'];
+  redis: HealthStatus['checks']['redis'];
+}
+
+async function getDependencyChecks(): Promise<DependencyChecks> {
+  const checks: DependencyChecks = {
+    database: { status: 'down' },
+    redis: { status: 'down' },
   };
 
-  // Check database
   try {
     const dbStart = Date.now();
     await prisma.$queryRaw`SELECT 1`;
-    health.checks.database = { status: 'up', latencyMs: Date.now() - dbStart };
+    checks.database = { status: 'up', latencyMs: Date.now() - dbStart };
   } catch (error) {
-    health.checks.database = {
+    checks.database = {
       status: 'down',
       error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 
-  // Check Redis
   try {
     const redisStart = Date.now();
     const redis = redisService.getClient();
     await redis.ping();
-    health.checks.redis = { status: 'up', latencyMs: Date.now() - redisStart };
+    checks.redis = { status: 'up', latencyMs: Date.now() - redisStart };
   } catch (error) {
-    health.checks.redis = {
+    checks.redis = {
       status: 'down',
       error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 
-  // Determine overall status
-  const dbDown = health.checks.database.status === 'down';
-  const redisDown = health.checks.redis.status === 'down';
+  return checks;
+}
+
+function computeOverallStatus(checks: DependencyChecks): HealthStatus['status'] {
+  const dbDown = checks.database.status === 'down';
+  const redisDown = checks.redis.status === 'down';
 
   if (dbDown && redisDown) {
-    health.status = 'unhealthy';
-  } else if (dbDown || redisDown) {
-    health.status = 'degraded';
+    return 'unhealthy';
   }
+
+  if (dbDown || redisDown) {
+    return 'degraded';
+  }
+
+  return 'healthy';
+}
+
+router.get('/live', (_req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+
+router.get('/ready', async (_req, res) => {
+  const checks = await getDependencyChecks();
+  const startupStatus = clientInitializer.getStartupStatus();
+  const dependenciesHealthy = checks.database.status === 'up' && checks.redis.status === 'up';
+  const isReady = startupStatus === 'ready' && dependenciesHealthy;
+
+  res.status(isReady ? 200 : 503).json({
+    status: isReady ? 'healthy' : startupStatus === 'booting' ? 'degraded' : 'unhealthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    startup: {
+      status: startupStatus,
+    },
+    checks,
+  });
+});
+
+router.get('/', async (_req, res) => {
+  const checks = await getDependencyChecks();
+  const startupStatus = clientInitializer.getStartupStatus();
+  const health: HealthStatus = {
+    status: computeOverallStatus(checks),
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    startup: {
+      status: startupStatus,
+    },
+    checks,
+    memory: formatMemory(),
+  };
 
   const httpStatus = health.status === 'unhealthy' ? 503 : 200;
   res.status(httpStatus).json(health);
