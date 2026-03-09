@@ -90,13 +90,22 @@ export interface HypeDexerWSWelcomeEvent {
 }
 
 /**
+ * HypeDexer WebSocket heartbeat ping (sent every 60s, expects pong response)
+ */
+export interface HypeDexerWSPingEvent {
+  type: 'ping';
+  ts: number;
+}
+
+/**
  * All possible HypeDexer WebSocket events
  */
-export type HypeDexerWSEvent = 
-  | HypeDexerWSLiquidationEvent 
-  | HypeDexerWSErrorEvent 
+export type HypeDexerWSEvent =
+  | HypeDexerWSLiquidationEvent
+  | HypeDexerWSErrorEvent
   | HypeDexerWSSubscriptionConfirm
-  | HypeDexerWSWelcomeEvent;
+  | HypeDexerWSWelcomeEvent
+  | HypeDexerWSPingEvent;
 
 // ============================================================================
 // INTERNAL WEBSOCKET TYPES (Our API)

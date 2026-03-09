@@ -5,6 +5,7 @@ import {
   HypeDexerWSEvent,
   HypeDexerWSLiquidation,
   HypeDexerWSLiquidationEvent,
+  HypeDexerWSPingEvent,
   WSConnectionState,
 } from '../../../types/websocket.types';
 import { Liquidation } from '../../../types/liquidations.types';
@@ -209,7 +210,10 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
 
         case 'ping':
           // Heartbeat: HypeDexer expects pong within 60s or closes connection
-          this.send({ type: 'pong', ts: (event as { ts?: number }).ts ?? Date.now() });
+          this.send({
+            type: 'pong',
+            ts: (event as HypeDexerWSPingEvent).ts ?? Date.now(),
+          });
           break;
 
         default:
