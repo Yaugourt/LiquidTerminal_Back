@@ -207,6 +207,11 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
           logDeduplicator.info('HypeDexerLiquidationsWSClient: Welcome received');
           break;
 
+        case 'ping':
+          // Heartbeat: HypeDexer expects pong within 60s or closes connection
+          this.send({ type: 'pong', ts: (event as { ts?: number }).ts ?? Date.now() });
+          break;
+
         default:
           logDeduplicator.warn('HypeDexerLiquidationsWSClient: Unknown event type', {
             type: (event as { type?: string }).type,
