@@ -22,6 +22,7 @@ import { ActiveUsersService } from '../services/activeusers/activeusers.service'
 import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../services/liquidations/liquidations.backfill.service';
 import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
+import { TelegramLiquidationDispatcherService } from '../services/telegram/telegram.liquidation-dispatcher.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export type StartupStatus = 'booting' | 'ready' | 'degraded';
@@ -184,6 +185,11 @@ export class ClientInitializerService {
       this.clients.set('walletDispatcher', walletDispatcher);
       logDeduplicator.info('Telegram Wallet Dispatcher service initialized successfully');
 
+      // Initialiser le dispatcher liquidations pour le bot Telegram
+      const liquidationDispatcher = TelegramLiquidationDispatcherService.getInstance();
+      this.clients.set('liquidationDispatcher', liquidationDispatcher);
+      logDeduplicator.info('Telegram Liquidation Dispatcher service initialized successfully');
+
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
@@ -263,11 +269,33 @@ export class ClientInitializerService {
       }
     }
 
+    // 6. Start Telegram Liquidation Dispatcher (subscribes to LiquidationsWebSocketService)
+    const liquidationDispatcher = this.clients.get('liquidationDispatcher');
+    if (liquidationDispatcher) {
+      try {
+        liquidationDispatcher.start();
+        logDeduplicator.info('Started Telegram Liquidation Dispatcher Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Telegram Liquidation Dispatcher Service:', { error });
+      }
+    }
+
     logDeduplicator.info('All client polling started successfully');
   }
 
   public async stopAllPolling(): Promise<void> {
-    // Stop wallet dispatcher first
+    // Stop liquidation dispatcher
+    const liquidationDispatcher = this.clients.get('liquidationDispatcher');
+    if (liquidationDispatcher) {
+      try {
+        liquidationDispatcher.stop();
+        logDeduplicator.info('Telegram Liquidation Dispatcher Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Telegram Liquidation Dispatcher Service:', { error });
+      }
+    }
+
+    // Stop wallet dispatcher
     const walletDispatcher = this.clients.get('walletDispatcher');
     if (walletDispatcher) {
       try {

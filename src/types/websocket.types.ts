@@ -134,7 +134,7 @@ export interface WSClient {
  * Client subscription to our internal WebSocket
  */
 export interface WSClientSubscription {
-  type: 'liquidation' | 'wallet_event';
+  type: 'liquidation' | 'wallet_event' | 'liquidation_alert';
   filters: WSLiquidationFilters;
   subscribedAt: number;
 }
@@ -175,6 +175,7 @@ export type WSEventType =
   | 'unsubscribed'
   | 'liquidation'
   | 'wallet_event'
+  | 'liquidation_alert'
   | 'heartbeat'
   | 'error';
 
@@ -215,6 +216,18 @@ export interface WSLiquidationEvent extends WSServerMessage {
       totalNotional: number;
       avgMarkPrice: number;
     };
+  };
+}
+
+/**
+ * Internal WebSocket liquidation alert event (sent by TelegramLiquidationDispatcherService)
+ * The bot receives this and calls sendMessage(telegramId, message)
+ */
+export interface WSLiquidationAlertEvent extends WSServerMessage {
+  type: 'liquidation_alert';
+  data: {
+    telegramId: string;
+    message: string;
   };
 }
 
