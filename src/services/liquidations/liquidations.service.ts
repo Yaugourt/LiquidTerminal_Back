@@ -36,7 +36,7 @@ export class LiquidationsService implements LiquidationDataProvider {
   private static instance: LiquidationsService;
   private readonly client: HLIndexerLiquidationsClient;
   private static readonly DEFAULT_LIMIT = 100;
-
+  
   private static readonly DATA_CACHE_TTL = 15;
   private static readonly STATS_CACHE_TTL = 15;
   private static readonly RECENT_CACHE_TTL = 15;
@@ -98,7 +98,7 @@ export class LiquidationsService implements LiquidationDataProvider {
 
     try {
       await Promise.all(periods.map(async (period) => {
-        const config = LiquidationsService.PERIOD_CONFIG[period];
+      const config = LiquidationsService.PERIOD_CONFIG[period];
         const since = new Date(Date.now() - config.hours * 60 * 60 * 1000);
 
         const [historicalStats, rawBuckets] = await Promise.all([
@@ -109,16 +109,16 @@ export class LiquidationsService implements LiquidationDataProvider {
         const stats = this.convertHistoricalStats(historicalStats);
         const buckets = this.convertChartBuckets(rawBuckets, since, new Date(), config.bucketSizeMinutes);
 
-        periodsData[period] = {
-          stats,
+      periodsData[period] = {
+        stats,
           chart: { interval: config.interval, buckets },
-        };
+      };
       }));
 
-      const result: LiquidationsDataResponse = {
-        success: true,
-        periods: periodsData as LiquidationsDataResponse['periods'],
-        metadata: {
+    const result: LiquidationsDataResponse = {
+      success: true,
+      periods: periodsData as LiquidationsDataResponse['periods'],
+      metadata: {
           executionTimeMs: Date.now() - startTime,
           cachedAt: new Date().toISOString(),
         },
@@ -135,7 +135,7 @@ export class LiquidationsService implements LiquidationDataProvider {
       logDeduplicator.error('LiquidationsService.getAllData failed', {
         error: error instanceof Error ? error.message : String(error),
       });
-      throw new LiquidationsError(
+        throw new LiquidationsError(
         error instanceof Error ? error.message : 'Failed to fetch unified liquidation data',
         500,
         'ALL_DATA_ERROR'
@@ -149,7 +149,7 @@ export class LiquidationsService implements LiquidationDataProvider {
 
   public async getAllStats(): Promise<LiquidationStatsAllResponse> {
     const cacheKey = 'liquidations:stats:all';
-
+    
     try {
       const cached = await redisService.get(cacheKey);
       if (cached) {
@@ -255,7 +255,7 @@ export class LiquidationsService implements LiquidationDataProvider {
 
       return result;
     } catch (error) {
-      logDeduplicator.error('LiquidationsService.getChartData failed', {
+      logDeduplicator.error('LiquidationsService.getChartData failed', { 
         error: error instanceof Error ? error.message : String(error),
         period,
       });
