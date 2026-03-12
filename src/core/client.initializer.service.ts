@@ -31,6 +31,7 @@ export class ClientInitializerService {
   private static instance: ClientInitializerService;
   private clients: Map<string, any> = new Map();
   private startupStatus: StartupStatus = 'booting';
+  private dailyBackfillTimer: NodeJS.Timeout | null = null;
 
   private constructor() {}
 
@@ -244,18 +245,19 @@ export class ClientInitializerService {
       }
     }
 
-    // 4. Run Backfill in background so Railway readiness is not blocked
+    // 4. Run Backfill at startup + schedule daily at 03:00 UTC to fill gaps
     const backfillClient = this.clients.get('liquidationsBackfill');
     if (backfillClient) {
       void backfillClient.start()
         .then(() => {
-          logDeduplicator.info('Liquidations Backfill completed');
+          logDeduplicator.info('Liquidations Backfill completed (startup)');
         })
         .catch((error: unknown) => {
-          logDeduplicator.error('Error during Liquidations Backfill:', { error });
+          logDeduplicator.error('Error during Liquidations Backfill (startup):', { error });
         });
 
       logDeduplicator.info('Started Liquidations Backfill Service in background');
+      this.scheduleDailyBackfill(backfillClient);
     }
 
     // 5. Start Telegram Wallet Dispatcher (connects to HypeDexer completed_trades)
@@ -283,7 +285,40 @@ export class ClientInitializerService {
     logDeduplicator.info('All client polling started successfully');
   }
 
+  private scheduleDailyBackfill(backfillClient: { start: () => Promise<void> }): void {
+    const scheduleNext = (): void => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setUTCHours(3, 0, 0, 0);
+      if (next.getTime() <= now.getTime()) {
+        next.setUTCDate(next.getUTCDate() + 1);
+      }
+      const delay = next.getTime() - now.getTime();
+
+      logDeduplicator.info('Daily backfill scheduled', {
+        nextRun: next.toISOString(),
+        delayMs: delay,
+      });
+
+      this.dailyBackfillTimer = setTimeout(() => {
+        logDeduplicator.info('Starting daily backfill');
+        void backfillClient.start()
+          .then(() => { logDeduplicator.info('Daily backfill completed'); })
+          .catch((error: unknown) => { logDeduplicator.error('Daily backfill error:', { error }); })
+          .finally(() => { scheduleNext(); });
+      }, delay);
+    };
+
+    scheduleNext();
+  }
+
   public async stopAllPolling(): Promise<void> {
+    // Stop daily backfill timer
+    if (this.dailyBackfillTimer) {
+      clearTimeout(this.dailyBackfillTimer);
+      this.dailyBackfillTimer = null;
+    }
+
     // Stop liquidation dispatcher
     const liquidationDispatcher = this.clients.get('liquidationDispatcher');
     if (liquidationDispatcher) {
