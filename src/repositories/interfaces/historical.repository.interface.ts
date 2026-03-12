@@ -34,11 +34,11 @@ export interface HistoricalLiquidationRepository extends BaseRepository {
   getStats(since: Date, coin?: string): Promise<HistoricalStats>;
 
   /**
-   * Get time-bucketed chart data using date_trunc aggregation.
-   * Returns one row per bucket with volume and long/short breakdown.
+   * Get time-bucketed chart data using epoch-based bucketing.
+   * Works for arbitrary intervals (5min, 15min, 1h, etc.) on all PostgreSQL versions.
    * @param since Start of the time window
-   * @param bucketTrunc PostgreSQL date_trunc unit (e.g. 'hour', '30 minutes', '4 hours')
+   * @param bucketSizeMinutes Bucket size in minutes (e.g. 5, 15, 60)
    * @param coin Optional coin filter
    */
-  getChart(since: Date, bucketTrunc: string, coin?: string): Promise<RawChartBucket[]>;
+  getChart(since: Date, bucketSizeMinutes: number, coin?: string): Promise<RawChartBucket[]>;
 }

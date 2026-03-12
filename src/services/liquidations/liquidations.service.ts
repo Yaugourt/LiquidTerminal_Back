@@ -23,7 +23,6 @@ import { HistoricalStats, RawChartBucket } from '../../types/historical.types';
 interface PeriodConfig {
   hours: number;
   interval: ChartInterval;
-  bucketTrunc: string;
   bucketSizeMinutes: number;
 }
 
@@ -42,11 +41,11 @@ export class LiquidationsService implements LiquidationDataProvider {
   private static readonly RECENT_CACHE_TTL = 15;
 
   private static readonly PERIOD_CONFIG: Record<ChartPeriod, PeriodConfig> = {
-    '2h':  { hours: 2,  interval: '5m',  bucketTrunc: '5 minutes',  bucketSizeMinutes: 5 },
-    '4h':  { hours: 4,  interval: '5m',  bucketTrunc: '5 minutes',  bucketSizeMinutes: 5 },
-    '8h':  { hours: 8,  interval: '15m', bucketTrunc: '15 minutes', bucketSizeMinutes: 15 },
-    '12h': { hours: 12, interval: '15m', bucketTrunc: '15 minutes', bucketSizeMinutes: 15 },
-    '24h': { hours: 24, interval: '30m', bucketTrunc: '30 minutes', bucketSizeMinutes: 30 },
+    '2h':  { hours: 2,  interval: '5m',  bucketSizeMinutes: 5 },
+    '4h':  { hours: 4,  interval: '5m',  bucketSizeMinutes: 5 },
+    '8h':  { hours: 8,  interval: '15m', bucketSizeMinutes: 15 },
+    '12h': { hours: 12, interval: '15m', bucketSizeMinutes: 15 },
+    '24h': { hours: 24, interval: '30m', bucketSizeMinutes: 30 },
   };
 
   private readonly sseManager: SSEManagerService;
@@ -103,7 +102,7 @@ export class LiquidationsService implements LiquidationDataProvider {
 
         const [historicalStats, rawBuckets] = await Promise.all([
           historicalLiquidationRepository.getStats(since),
-          historicalLiquidationRepository.getChart(since, config.bucketTrunc),
+          historicalLiquidationRepository.getChart(since, config.bucketSizeMinutes),
         ]);
 
         const stats = this.convertHistoricalStats(historicalStats);
@@ -222,7 +221,7 @@ export class LiquidationsService implements LiquidationDataProvider {
       const now = new Date();
       const since = new Date(now.getTime() - config.hours * 60 * 60 * 1000);
 
-      const rawBuckets = await historicalLiquidationRepository.getChart(since, config.bucketTrunc);
+      const rawBuckets = await historicalLiquidationRepository.getChart(since, config.bucketSizeMinutes);
       const buckets = this.convertChartBuckets(rawBuckets, since, now, config.bucketSizeMinutes);
 
       let totalVolume = 0;

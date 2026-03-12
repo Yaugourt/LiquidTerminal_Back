@@ -14,11 +14,11 @@ import { HypurrscanFeesClient } from '../clients/hypurrscan/fees.client';
 import { HyperliquidGlobalStatsClient } from '../clients/hyperliquid/globalstats.client';
 import { HyperliquidLeaderboardClient } from '../clients/hyperliquid/leaderboard/leaderboard.client';
 import { HypurrscanStakedHoldersClient } from '../clients/hypurrscan/stakedHolders.client';
-import { LiquidationsService } from '../services/liquidations/liquidations.service';
+import { HLIndexerLiquidationsClient } from '../clients/hlindexer/liquidations/liquidations.client';
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
-import { TopTradersService } from '../services/toptraders/toptraders.service';
-import { ActiveUsersService } from '../services/activeusers/activeusers.service';
+import { HLIndexerTopTradersClient } from '../clients/hlindexer/toptraders/toptraders.client';
+import { HLIndexerActiveUsersClient } from '../clients/hlindexer/activeusers/activeusers.client';
 import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../services/liquidations/liquidations.backfill.service';
 import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
@@ -146,9 +146,9 @@ export class ClientInitializerService {
       const stakedHoldersClient = HypurrscanStakedHoldersClient.getInstance();
       this.clients.set('stakedHolders', stakedHoldersClient);
 
-      // Initialiser le service Liquidations (background polling)
-      const liquidationsService = LiquidationsService.getInstance();
-      this.clients.set('liquidations', liquidationsService);
+      // Initialiser le client Liquidations HLIndexer (polling disabled - data from historical DB)
+      const liquidationsClient = HLIndexerLiquidationsClient.getInstance();
+      this.clients.set('liquidations', liquidationsClient);
 
       // Initialiser le SSE Manager pour les liquidations temps réel (legacy, keep for backward compatibility)
       const sseManager = SSEManagerService.getInstance();
@@ -161,15 +161,15 @@ export class ClientInitializerService {
       this.clients.set('liquidationsWS', liquidationsWSService);
       logDeduplicator.info('Liquidations WebSocket Service initialized successfully');
 
-      // Initialiser le service Top Traders (background polling every 60s)
-      const topTradersService = TopTradersService.getInstance();
-      this.clients.set('topTraders', topTradersService);
-      logDeduplicator.info('Top Traders service initialized successfully');
+      // Initialiser le client Top Traders (background polling + cache handled by client)
+      const topTradersClient = HLIndexerTopTradersClient.getInstance();
+      this.clients.set('topTraders', topTradersClient);
+      logDeduplicator.info('Top Traders client initialized successfully');
 
-      // Initialiser le service Active Users (background polling every 60s)
-      const activeUsersService = ActiveUsersService.getInstance();
-      this.clients.set('activeUsers', activeUsersService);
-      logDeduplicator.info('Active Users service initialized successfully');
+      // Initialiser le client Active Users (background polling every 60s - client owns cache)
+      const activeUsersClient = HLIndexerActiveUsersClient.getInstance();
+      this.clients.set('activeUsers', activeUsersClient);
+      logDeduplicator.info('Active Users client initialized successfully');
 
       // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
       const ingestionService = LiquidationsIngestionService.getInstance();

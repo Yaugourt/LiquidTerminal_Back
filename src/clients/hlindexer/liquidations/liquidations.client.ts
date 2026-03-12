@@ -1,9 +1,16 @@
 import { BaseApiService } from '../../../core/base.api.service';
-import { LiquidationResponse, LiquidationQueryParams, LiquidationsError } from '../../../types/liquidations.types';
+import { redisService } from '../../../core/redis.service';
+import { LiquidationResponse, LiquidationQueryParams } from '../../../types/liquidations.types';
 import { AnalyticsLiquidationStatsResponse, AnalyticsLiquidationStatsParams } from '../../../types/analytics-liquidations.types';
 import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+
+/** Cache config for getRecentLiquidations (default params only) */
+const CACHE_KEY = 'liquidations:recent';
+const CACHE_TTL = 15;
+const UPDATE_INTERVAL = 15000; // 15s
+const UPDATE_CHANNEL = 'liquidations:recent:updated';
 
 /**
  * Client for HypeDexer Liquidations API
@@ -18,6 +25,7 @@ export class HLIndexerLiquidationsClient extends BaseApiService {
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
+  private pollingInterval: NodeJS.Timeout | null = null;
 
   private constructor() {
     super(HLIndexerLiquidationsClient.API_URL, {
@@ -95,29 +103,112 @@ export class HLIndexerLiquidationsClient extends BaseApiService {
   }
 
   /**
+   * Check if params match the cached default (no filters, limit <= 100)
+   */
+  private isDefaultParams(params: LiquidationQueryParams): boolean {
+    const limit = params.limit ?? 100;
+    return (
+      !params.user &&
+      !params.coin &&
+      limit <= 100 &&
+      params.hours === undefined &&
+      params.start_time === undefined &&
+      params.end_time === undefined &&
+      params.cursor === undefined &&
+      params.amount_dollars === undefined
+    );
+  }
+
+  /**
+   * Internal fetch: call API for recent liquidations (no cache). Used by polling.
+   */
+  private async fetchRecentLiquidationsFromApi(params: LiquidationQueryParams): Promise<LiquidationResponse> {
+    const queryString = this.buildQueryString(params);
+    const endpoint = `/liquidations/recent${queryString}`;
+    return this.get<LiquidationResponse>(endpoint);
+  }
+
+  /**
+   * Polling: fetch recent liquidations, cache in Redis, publish.
+   */
+  private async updateRecentLiquidations(): Promise<void> {
+    try {
+      const response = await this.circuitBreaker.execute(() =>
+        this.fetchRecentLiquidationsFromApi({ limit: 100 })
+      );
+      await redisService.set(CACHE_KEY, JSON.stringify(response), CACHE_TTL);
+      await redisService.publish(UPDATE_CHANNEL, JSON.stringify({ type: 'DATA_UPDATED', timestamp: Date.now() }));
+      logDeduplicator.info('Recent liquidations cache updated', {
+        count: response.data?.length || 0,
+        hasMore: response.has_more
+      });
+    } catch (error) {
+      logDeduplicator.error('Failed to update recent liquidations cache', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  public startPolling(): void {
+    if (this.pollingInterval) {
+      logDeduplicator.warn('HLIndexer liquidations polling already started');
+      return;
+    }
+    logDeduplicator.info('Starting HLIndexer liquidations polling');
+    void this.updateRecentLiquidations();
+    this.pollingInterval = setInterval(() => {
+      void this.updateRecentLiquidations();
+    }, UPDATE_INTERVAL);
+  }
+
+  public stopPolling(): void {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+      logDeduplicator.info('HLIndexer liquidations polling stopped');
+    }
+  }
+
+  /**
    * Get recent liquidations (2h window by default if no filter)
-   * Supports hours parameter to filter by time period
+   * Supports hours parameter to filter by time period.
+   * For default params (no user, no coin, limit<=100): reads from Redis cache.
    */
   public async getRecentLiquidations(params: LiquidationQueryParams = {}): Promise<LiquidationResponse> {
-    return this.circuitBreaker.execute(async () => {
-      const queryString = this.buildQueryString(params);
-      const endpoint = `/liquidations/recent${queryString}`;
-      
-      logDeduplicator.info('Fetching recent liquidations from HypeDexer', {
-        endpoint,
-        params
+    if (!this.isDefaultParams(params)) {
+      return this.circuitBreaker.execute(async () => {
+        const queryString = this.buildQueryString(params);
+        const endpoint = `/liquidations/recent${queryString}`;
+        logDeduplicator.info('Fetching recent liquidations from HypeDexer', { endpoint, params });
+        const response = await this.get<LiquidationResponse>(endpoint);
+        logDeduplicator.info('Successfully fetched recent liquidations', {
+          count: response.data?.length || 0,
+          hasMore: response.has_more,
+          executionTime: response.execution_time_ms
+        });
+        return response;
       });
+    }
 
-      const response = await this.get<LiquidationResponse>(endpoint);
-      
-      logDeduplicator.info('Successfully fetched recent liquidations', {
-        count: response.data?.length || 0,
-        hasMore: response.has_more,
-        executionTime: response.execution_time_ms
-      });
+    let cached = await redisService.get(CACHE_KEY);
+    if (!cached) {
+      await this.updateRecentLiquidations();
+      cached = await redisService.get(CACHE_KEY);
+    }
+    if (!cached) {
+      return this.circuitBreaker.execute(() => this.fetchRecentLiquidationsFromApi(params));
+    }
 
-      return response;
-    });
+    const response = JSON.parse(cached) as LiquidationResponse;
+    const limit = params.limit ?? 100;
+    if (limit < 100 && response.data && response.data.length > limit) {
+      return {
+        ...response,
+        data: response.data.slice(0, limit),
+        has_more: response.data.length > limit || response.has_more
+      };
+    }
+    return response;
   }
 
   /**

@@ -2,17 +2,24 @@ import { BaseApiService } from '../../../core/base.api.service';
 import {
   TopTradersApiResponse,
   TopTradersQueryParams,
-  TopTradersError,
   TopTradersSortType
 } from '../../../types/toptraders.types';
 import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
+import { redisService } from '../../../core/redis.service';
+import { withDistributedLock } from '../../../utils/distributedLock';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+
+const CACHE_KEY_PREFIX = 'toptraders';
+const UPDATE_CHANNEL = 'toptraders:updated';
+const UPDATE_INTERVAL = 60000;
+const CACHE_TTL = 55;
+const SORT_TYPES: TopTradersSortType[] = ['pnl_pos', 'pnl_neg', 'volume', 'trades'];
 
 /**
  * Client for HypeDexer Top Traders API
  * GET /overview/top-traders-24h
- * Follows the standard client architecture with CircuitBreaker and RateLimiter
+ * Follows Leaderboard/Hypurrscan standard with polling, Redis cache, and distributed lock
  */
 export class HLIndexerTopTradersClient extends BaseApiService {
   private static instance: HLIndexerTopTradersClient;
@@ -23,6 +30,7 @@ export class HLIndexerTopTradersClient extends BaseApiService {
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
+  private pollingInterval: NodeJS.Timeout | null = null;
 
   private constructor() {
     super(HLIndexerTopTradersClient.API_URL, {
@@ -45,55 +53,100 @@ export class HLIndexerTopTradersClient extends BaseApiService {
     return HLIndexerTopTradersClient.instance;
   }
 
-  /**
-   * Build query string from params object
-   */
+  public startPolling(): void {
+    if (this.pollingInterval) {
+      logDeduplicator.warn('Top Traders polling already started');
+      return;
+    }
+    logDeduplicator.info('Starting Top Traders polling');
+    this.updateTopTradersData().catch(err =>
+      logDeduplicator.error('Error in initial Top Traders update:', { error: err })
+    );
+    this.pollingInterval = setInterval(() => {
+      this.updateTopTradersData().catch(err =>
+        logDeduplicator.error('Error in Top Traders polling:', { error: err })
+      );
+    }, UPDATE_INTERVAL);
+  }
+
+  public stopPolling(): void {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+      logDeduplicator.info('Top Traders polling stopped');
+    }
+  }
+
+  private async updateTopTradersData(): Promise<void> {
+    const executed = await withDistributedLock('poll:toptraders', 90, async () => {
+      for (const sort of SORT_TYPES) {
+        try {
+          const response = await this.fetchTopTraders(sort, 50);
+          const key = `${CACHE_KEY_PREFIX}:${sort}`;
+          await redisService.set(key, JSON.stringify(response), CACHE_TTL);
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (error) {
+          logDeduplicator.error(`Failed to fetch top traders for sort=${sort}`, {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+      await redisService.publish(UPDATE_CHANNEL, JSON.stringify({ type: 'DATA_UPDATED', timestamp: Date.now() }));
+    });
+    if (!executed) {
+      logDeduplicator.info('Top Traders refresh skipped - another instance holds the lock');
+    }
+  }
+
+  private async fetchTopTraders(sort: TopTradersSortType, limit: number): Promise<TopTradersApiResponse> {
+    const queryString = `?sort=${sort}&limit=${limit}`;
+    return this.circuitBreaker.execute(() =>
+      this.get<TopTradersApiResponse>(`/overview/top-traders-24h${queryString}`)
+    );
+  }
+
   private buildQueryString(params: TopTradersQueryParams): string {
     const queryParams = new URLSearchParams();
-
-    if (params.sort) {
-      queryParams.append('sort', params.sort);
-    }
-
-    if (params.limit !== undefined) {
-      queryParams.append('limit', params.limit.toString());
-    }
-
-    const queryString = queryParams.toString();
-    return queryString ? `?${queryString}` : '';
+    if (params.sort) queryParams.append('sort', params.sort);
+    if (params.limit !== undefined) queryParams.append('limit', params.limit.toString());
+    const qs = queryParams.toString();
+    return qs ? `?${qs}` : '';
   }
 
   /**
-   * Get top traders for the last 24 hours
-   * Supports sorting by pnl_pos, pnl_neg, volume, trades
+   * Get top traders. Uses cache when limit<=50 and sort is cached; otherwise passthrough.
    */
   public async getTopTraders(params: TopTradersQueryParams = {}): Promise<TopTradersApiResponse> {
-    return this.circuitBreaker.execute(async () => {
-      const queryString = this.buildQueryString({
-        sort: params.sort || 'pnl_pos',
-        limit: params.limit || 50
-      });
-      const endpoint = `/overview/top-traders-24h${queryString}`;
+    const sort = params.sort || 'pnl_pos';
+    const limit = params.limit ?? 50;
 
-      logDeduplicator.info('Fetching top traders from HypeDexer', {
-        endpoint,
-        params
-      });
+    if (limit > 50 || !SORT_TYPES.includes(sort)) {
+      return this.fetchTopTraders(sort, limit);
+    }
 
-      const response = await this.get<TopTradersApiResponse>(endpoint);
-
-      logDeduplicator.info('Successfully fetched top traders', {
-        count: response.data?.length || 0,
-        executionTime: response.execution_time_ms
-      });
-
+    const key = `${CACHE_KEY_PREFIX}:${sort}`;
+    const cached = await redisService.get(key);
+    if (cached) {
+      const response: TopTradersApiResponse = JSON.parse(cached);
+      if (limit < 50 && response.data.length > limit) {
+        return { ...response, data: response.data.slice(0, limit) };
+      }
       return response;
-    });
+    }
+
+    await this.updateTopTradersData();
+    const reRead = await redisService.get(key);
+    if (reRead) {
+      const response: TopTradersApiResponse = JSON.parse(reRead);
+      if (limit < 50 && response.data.length > limit) {
+        return { ...response, data: response.data.slice(0, limit) };
+      }
+      return response;
+    }
+
+    return this.fetchTopTraders(sort, limit);
   }
 
-  /**
-   * Check rate limit for an IP
-   */
   public checkRateLimit(ip: string): boolean {
     return this.rateLimiter.checkRateLimit(ip);
   }

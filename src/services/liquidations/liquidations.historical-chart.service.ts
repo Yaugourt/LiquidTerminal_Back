@@ -12,17 +12,16 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 
 interface ChartConfig {
   hours: number;
-  bucketTrunc: string;
   bucketSizeMinutes: number;
   cacheTTL: number;
 }
 
 const CHART_CONFIG: Record<HistoricalChartPeriod, ChartConfig> = {
-  '24h': { hours: 24,   bucketTrunc: '30 minutes', bucketSizeMinutes: 30,  cacheTTL: 30 },
-  '7d':  { hours: 168,  bucketTrunc: 'hour',        bucketSizeMinutes: 60,  cacheTTL: 60 },
-  '14d': { hours: 336,  bucketTrunc: '2 hours',     bucketSizeMinutes: 120, cacheTTL: 300 },
-  '30d': { hours: 720,  bucketTrunc: '4 hours',     bucketSizeMinutes: 240, cacheTTL: 300 },
-  '90d': { hours: 2160, bucketTrunc: '12 hours',    bucketSizeMinutes: 720, cacheTTL: 600 },
+  '24h': { hours: 24,   bucketSizeMinutes: 30,  cacheTTL: 30 },
+  '7d':  { hours: 168,  bucketSizeMinutes: 60,  cacheTTL: 60 },
+  '14d': { hours: 336,  bucketSizeMinutes: 120, cacheTTL: 300 },
+  '30d': { hours: 720,  bucketSizeMinutes: 240, cacheTTL: 300 },
+  '90d': { hours: 2160, bucketSizeMinutes: 720, cacheTTL: 600 },
 };
 
 /**
@@ -63,7 +62,7 @@ export class HistoricalChartService {
     const now = new Date();
     const since = new Date(now.getTime() - config.hours * 60 * 60 * 1000);
 
-    const rawBuckets = await this.repository.getChart(since, config.bucketTrunc, coin);
+    const rawBuckets = await this.repository.getChart(since, config.bucketSizeMinutes, coin);
     const buckets = this.fillEmptyBuckets(rawBuckets, since, now, config.bucketSizeMinutes);
 
     const result: HistoricalChartResult = {
