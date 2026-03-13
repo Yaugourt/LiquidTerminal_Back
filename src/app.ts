@@ -6,7 +6,6 @@ import 'dotenv/config';
 import { createServer } from 'http';
 import { sanitizeInput } from './middleware/validation';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
-import { requestLoggingMiddleware } from './middleware/requestLogging.middleware';
 import { SECURITY_CONSTANTS } from './constants/security.constants';
 import { securityHeaders } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
@@ -71,7 +70,6 @@ app.use(compression());
 
 // Ajouter Request ID pour traçabilité (doit être en premier)
 app.use(requestIdMiddleware);
-app.use(requestLoggingMiddleware);
 
 // Configuration CORS basée sur les constantes de sécurité
 app.use(cors({
