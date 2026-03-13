@@ -12,7 +12,7 @@ import { logDeduplicator } from '../../../utils/logDeduplicator';
 
 const CACHE_KEY_PREFIX = 'activeusers';
 const UPDATE_CHANNEL = 'activeusers:updated';
-const UPDATE_INTERVAL = 60000;
+const UPDATE_INTERVAL = 120000;
 const CACHE_TTL = 55;
 const HOURS_TO_CACHE = [1, 4, 12, 24];
 

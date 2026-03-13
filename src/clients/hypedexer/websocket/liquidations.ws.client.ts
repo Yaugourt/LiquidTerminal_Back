@@ -59,6 +59,9 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
       }
     );
 
+    if (!HypeDexerLiquidationsWSClient.API_KEY) {
+      logDeduplicator.warn('HypeDexerLiquidationsWSClient: No HL_INDEXER_API_KEY set - Hypedexer may reject the connection');
+    }
     logDeduplicator.info('HypeDexerLiquidationsWSClient: Initialized', {
       url: HypeDexerLiquidationsWSClient.WS_URL,
       hasApiKey: !!HypeDexerLiquidationsWSClient.API_KEY,
@@ -192,8 +195,11 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
           break;
 
         case 'subscription_confirmed':
+        case 'subscription_added':
           this.isSubscribed = true;
-          logDeduplicator.info('HypeDexerLiquidationsWSClient: Subscription confirmed');
+          logDeduplicator.info('HypeDexerLiquidationsWSClient: Subscription confirmed', {
+            type: (event as { type?: string }).type,
+          });
           break;
 
         case 'error':

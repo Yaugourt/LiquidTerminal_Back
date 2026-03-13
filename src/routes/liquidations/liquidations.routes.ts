@@ -3,6 +3,8 @@ import { LiquidationsService } from '../../services/liquidations/liquidations.se
 import { SSEManagerService } from '../../services/liquidations/sse-manager.service';
 import { LiquidationsIngestionService } from '../../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../../services/liquidations/liquidations.backfill.service';
+import { LiquidationsWebSocketService } from '../../services/liquidations/liquidations.ws.service';
+import { InternalWebSocketServer } from '../../websocket';
 import { HistoricalStatsService, HistoricalStatsPeriod } from '../../services/liquidations/liquidations.historical-stats.service';
 import { HistoricalChartService } from '../../services/liquidations/liquidations.historical-chart.service';
 import { HistoricalChartPeriod } from '../../types/historical.types';
@@ -537,6 +539,26 @@ router.get('/ingestion/stats',
         backfill: backfillService.getStats(),
       },
     }));
+  }) as RequestHandler
+);
+
+/**
+ * GET /liquidations/ws/stats
+ * WebSocket and HypeDexer connection diagnostics (debug: why no liquidations on /ws)
+ */
+router.get('/ws/stats',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    const wsService = LiquidationsWebSocketService.getInstance();
+    const wsServer = InternalWebSocketServer.getInstance();
+
+    res.json({
+      success: true,
+      data: {
+        liquidationsWS: wsService.getStats(),
+        ourWsServer: wsServer.getStats(),
+      },
+    });
   }) as RequestHandler
 );
 

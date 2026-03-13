@@ -82,6 +82,14 @@ export interface HypeDexerWSSubscriptionConfirm {
 }
 
 /**
+ * HypeDexer WebSocket subscription added (alternative confirmation type)
+ */
+export interface HypeDexerWSSubscriptionAdded {
+  type: 'subscription_added';
+  subscription?: HypeDexerWSSubscription;
+}
+
+/**
  * HypeDexer WebSocket welcome message (sent on connection)
  */
 export interface HypeDexerWSWelcomeEvent {
@@ -104,6 +112,7 @@ export type HypeDexerWSEvent =
   | HypeDexerWSLiquidationEvent
   | HypeDexerWSErrorEvent
   | HypeDexerWSSubscriptionConfirm
+  | HypeDexerWSSubscriptionAdded
   | HypeDexerWSWelcomeEvent
   | HypeDexerWSPingEvent;
 

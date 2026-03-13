@@ -12,7 +12,7 @@ import { logDeduplicator } from '../../../utils/logDeduplicator';
 
 const CACHE_KEY_PREFIX = 'toptraders';
 const UPDATE_CHANNEL = 'toptraders:updated';
-const UPDATE_INTERVAL = 60000;
+const UPDATE_INTERVAL = 120000;
 const CACHE_TTL = 55;
 const SORT_TYPES: TopTradersSortType[] = ['pnl_pos', 'pnl_neg', 'volume', 'trades'];
 
