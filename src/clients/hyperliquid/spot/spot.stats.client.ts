@@ -29,12 +29,12 @@ export class HyperliquidSpotStatsClient {
 
     logDeduplicator.info('Starting spot stats polling');
     this.updateSpotStats().catch(err =>
-      logDeduplicator.error('Error in initial spot stats update:', { error: err })
+      logDeduplicator.error('Error in initial spot stats update:', { error: err instanceof Error ? err.message : String(err) })
     );
 
     this.pollingInterval = setInterval(() => {
       this.updateSpotStats().catch(err =>
-        logDeduplicator.error('Error in spot stats polling:', { error: err })
+        logDeduplicator.error('Error in spot stats polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, HyperliquidSpotStatsClient.UPDATE_INTERVAL);
   }
@@ -101,7 +101,7 @@ export class HyperliquidSpotStatsClient {
         totalHIP2
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update spot stats:', { error });
+      logDeduplicator.error('Failed to update spot stats:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -110,7 +110,7 @@ export class HyperliquidSpotStatsClient {
       const raw = await redisService.get(HyperliquidSpotStatsClient.SPOT_MARKETS_CACHE_KEY);
       return raw ? JSON.parse(raw) as MarketData[] : null;
     } catch (error) {
-      logDeduplicator.error('Error retrieving market data from cache:', { error });
+      logDeduplicator.error('Error retrieving market data from cache:', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }
@@ -120,7 +120,7 @@ export class HyperliquidSpotStatsClient {
       const cachedData = await redisService.get(HyperliquidSpotStatsClient.SPOT_USDC_CACHE_KEY);
       return cachedData ? JSON.parse(cachedData) : null;
     } catch (error) {
-      logDeduplicator.error('Error retrieving SpotUSDC data from cache:', { error });
+      logDeduplicator.error('Error retrieving SpotUSDC data from cache:', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }

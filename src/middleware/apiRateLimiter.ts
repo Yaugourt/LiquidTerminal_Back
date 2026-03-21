@@ -138,7 +138,10 @@ async function incrementAndGetCount(key: string, now: number, window: number): P
     
     return 0;
   } catch (error) {
-    logDeduplicator.error('Rate limiter Redis error', { error });
+    logDeduplicator.error('Rate limiter Redis error', {
+      error: error instanceof Error ? error.message : String(error),
+      key
+    });
     return 0;
   }
 }

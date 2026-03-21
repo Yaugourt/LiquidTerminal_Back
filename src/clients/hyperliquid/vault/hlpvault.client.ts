@@ -45,13 +45,13 @@ export class HyperliquidVaultClient extends BaseApiService {
     logDeduplicator.info('Starting vault polling');
     // Faire une première mise à jour immédiate
     this.updateHlpTvl().catch(error => {
-      logDeduplicator.error('Error in initial vault update:', { error });
+      logDeduplicator.error('Error in initial vault update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateHlpTvl().catch(error => {
-        logDeduplicator.error('Error in vault polling:', { error });
+        logDeduplicator.error('Error in vault polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, HyperliquidVaultClient.UPDATE_INTERVAL);
   }
@@ -144,7 +144,7 @@ export class HyperliquidVaultClient extends BaseApiService {
       
       logDeduplicator.info('HLP vault TVL updated', { tvl });
     } catch (error) {
-      logDeduplicator.error('Failed to update HLP vault TVL:', { error });
+      logDeduplicator.error('Failed to update HLP vault TVL:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 

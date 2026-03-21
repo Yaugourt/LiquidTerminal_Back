@@ -76,7 +76,7 @@ router.post('/upload',
         cleanupCsvProjectFile(filePath);
       }
 
-      logDeduplicator.error('Error processing CSV project upload:', { error });
+      logDeduplicator.error('Error processing CSV project upload:', { error: error instanceof Error ? error.message : String(error) });
       
       if (error instanceof ProjectError) {
         return res.status(error.statusCode).json({

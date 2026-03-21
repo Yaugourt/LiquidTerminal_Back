@@ -62,7 +62,7 @@ export class FileCleanupService {
       await cleanupOldFiles(maxAgeMs);
       logDeduplicator.info('File cleanup completed successfully');
     } catch (error) {
-      logDeduplicator.error('Error during file cleanup', { error });
+      logDeduplicator.error('Error during file cleanup', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -106,7 +106,7 @@ export class FileCleanupService {
         newestFile
       };
     } catch (error) {
-      logDeduplicator.error('Error getting upload stats', { error });
+      logDeduplicator.error('Error getting upload stats', { error: error instanceof Error ? error.message : String(error) });
       return { totalFiles: 0, totalSize: 0 };
     }
   }

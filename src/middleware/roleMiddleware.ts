@@ -70,7 +70,7 @@ export const requireRole = (allowedRoles: UserRole[]) => {
       
       next();
     } catch (error) {
-      logDeduplicator.error('Role middleware error', { error });
+      logDeduplicator.error('Role middleware error', { error: error instanceof Error ? error.message : String(error) });
       res.status(500).json({ 
         success: false, 
         error: 'Authorization error', 

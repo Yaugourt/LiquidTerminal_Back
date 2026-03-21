@@ -51,7 +51,7 @@ router.post('/', validatePrivyToken, (async (req: Request, res: Response) => {
       xpGranted: XP_REWARDS.CREATE_READLIST
     });
   } catch (error) {
-    logDeduplicator.error('Error creating read list:', { error, body: req.body });
+    logDeduplicator.error('Error creating read list:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -65,7 +65,7 @@ router.get('/', validateReadListQuery, (async (req: Request, res: Response) => {
     const readLists = await readListService.getAll(req.query);
     res.json({ success: true, data: readLists.data, pagination: readLists.pagination });
   } catch (error) {
-    logDeduplicator.error('Error fetching read lists:', { error });
+    logDeduplicator.error('Error fetching read lists:', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -79,7 +79,7 @@ router.get('/public', (async (req: Request, res: Response) => {
     const publicLists = await readListService.getPublicLists(req.query);
     res.json({ success: true, data: publicLists.data, pagination: publicLists.pagination });
   } catch (error) {
-    logDeduplicator.error('Error fetching public read lists:', { error });
+    logDeduplicator.error('Error fetching public read lists:', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -104,7 +104,7 @@ router.get('/my-lists', validatePrivyToken, (async (req: Request, res: Response)
     const readLists = await readListService.getByUser(user.id);
     res.json({ success: true, data: readLists });
   } catch (error) {
-    logDeduplicator.error('Error fetching user read lists:', { error, privyUserId: req.user?.sub });
+    logDeduplicator.error('Error fetching user read lists:', { error: error instanceof Error ? error.message : String(error), privyUserId: req.user?.sub });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -143,7 +143,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
 
     res.json({ success: true, data: readList });
   } catch (error) {
-    logDeduplicator.error('Error fetching read list:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching read list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -174,7 +174,7 @@ router.put('/:id', validatePrivyToken, validateUpdateReadList, (async (req: Requ
     const readList = await readListService.update(id, req.body);
     res.json({ success: true, message: 'Read list updated successfully', data: readList });
   } catch (error) {
-    logDeduplicator.error('Error updating read list:', { error, id: req.params.id, body: req.body });
+    logDeduplicator.error('Error updating read list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, body: req.body });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -205,7 +205,7 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
     await readListService.delete(id);
     res.json({ success: true, message: 'Read list deleted successfully' });
   } catch (error) {
-    logDeduplicator.error('Error deleting read list:', { error, id: req.params.id });
+    logDeduplicator.error('Error deleting read list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -238,7 +238,7 @@ router.post('/:id/items', validatePrivyToken, validateCreateReadListItem, (async
     const item = await readListItemService.addResourceToReadList(itemData, user.id);
     res.status(201).json({ success: true, message: 'Resource added to read list successfully', data: item });
   } catch (error) {
-    logDeduplicator.error('Error adding resource to read list:', { error, body: req.body });
+    logDeduplicator.error('Error adding resource to read list:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -268,7 +268,7 @@ router.get('/:id/items', validatePrivyToken, validateReadListItemQuery, (async (
     const items = await readListItemService.getByReadListWithPermission(readListId, user.id, req.query);
     res.json({ success: true, data: items.data, pagination: items.pagination });
   } catch (error) {
-    logDeduplicator.error('Error fetching items by read list:', { error, readListId: req.params.id });
+    logDeduplicator.error('Error fetching items by read list:', { error: error instanceof Error ? error.message : String(error), readListId: req.params.id });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -287,7 +287,7 @@ router.put('/items/:itemId', validatePrivyToken, validateUpdateReadListItem, (as
     const item = await readListItemService.update(itemId, req.body);
     res.json({ success: true, message: 'Read list item updated successfully', data: item });
   } catch (error) {
-    logDeduplicator.error('Error updating read list item:', { error, id: req.params.itemId, body: req.body });
+    logDeduplicator.error('Error updating read list item:', { error: error instanceof Error ? error.message : String(error), id: req.params.itemId, body: req.body });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -317,7 +317,7 @@ router.delete('/items/:itemId', validatePrivyToken, (async (req: Request, res: R
     await readListItemService.deleteWithPermission(itemId, user.id);
     res.json({ success: true, message: 'Read list item deleted successfully' });
   } catch (error) {
-    logDeduplicator.error('Error deleting read list item:', { error, id: req.params.itemId });
+    logDeduplicator.error('Error deleting read list item:', { error: error instanceof Error ? error.message : String(error), id: req.params.itemId });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -357,7 +357,7 @@ router.patch('/items/:itemId/read-status', validatePrivyToken, (async (req: Requ
       xpGranted
     });
   } catch (error) {
-    logDeduplicator.error('Error toggling read status:', { error, id: req.params.itemId, body: req.body });
+    logDeduplicator.error('Error toggling read status:', { error: error instanceof Error ? error.message : String(error), id: req.params.itemId, body: req.body });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -394,7 +394,7 @@ router.post('/copy/:id', validatePrivyToken, (async (req: Request, res: Response
       xpGranted: XP_REWARDS.COPY_PUBLIC_READLIST + XP_REWARDS.CREATE_READLIST // Copie + création
     });
   } catch (error) {
-    logDeduplicator.error('Error copying read list:', { error, id: req.params.id, privyUserId: req.user?.sub });
+    logDeduplicator.error('Error copying read list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, privyUserId: req.user?.sub });
     if (error instanceof ReadListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }

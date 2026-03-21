@@ -70,7 +70,7 @@ export class ProjectImportService {
 
       return results;
     } catch (error) {
-      logDeduplicator.error('Error during CSV import:', { error });
+      logDeduplicator.error('Error during CSV import:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -131,7 +131,7 @@ export class ProjectImportService {
       });
     } catch (error) {
       logDeduplicator.error('Error ensuring category exists:', {
-        error,
+        error: error instanceof Error ? error.message : String(error),
         categoryName,
       });
       throw error;

@@ -43,12 +43,12 @@ export class SpotUSDCClient extends BaseApiService {
 
     logDeduplicator.info('Starting SpotUSDC polling');
     this.updateSpotUSDCData().catch(err =>
-      logDeduplicator.error('Error in initial SpotUSDC update:', { error: err })
+      logDeduplicator.error('Error in initial SpotUSDC update:', { error: err instanceof Error ? err.message : String(err) })
     );
 
     this.pollingInterval = setInterval(() => {
       this.updateSpotUSDCData().catch(err =>
-        logDeduplicator.error('Error in SpotUSDC polling:', { error: err })
+        logDeduplicator.error('Error in SpotUSDC polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, this.UPDATE_INTERVAL);
   }
@@ -80,7 +80,7 @@ export class SpotUSDCClient extends BaseApiService {
         });
       }
     } catch (error) {
-      logDeduplicator.error('Failed to update SpotUSDC data:', { error });
+      logDeduplicator.error('Failed to update SpotUSDC data:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -96,7 +96,7 @@ export class SpotUSDCClient extends BaseApiService {
         this.get<SpotUSDCData>('/spotUSDC')
       );
     } catch (error) {
-      logDeduplicator.error('Error retrieving SpotUSDC data:', { error });
+      logDeduplicator.error('Error retrieving SpotUSDC data:', { error: error instanceof Error ? error.message : String(error) });
       throw new USDCDataError(error instanceof Error ? error.message : 'Failed to fetch USDC data');
     }
   }

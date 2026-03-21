@@ -50,7 +50,7 @@ router.post('/', validatePrivyToken, requireUser, contributionRateLimiter, valid
       data: resource
     });
   } catch (error) {
-    logDeduplicator.error('Error submitting educational resource:', { error, body: req.body });
+    logDeduplicator.error('Error submitting educational resource:', { error: error instanceof Error ? error.message : String(error), body: req.body });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -91,7 +91,7 @@ router.get('/my-submissions', validatePrivyToken, requireUser, (async (req: Requ
       pagination: result.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching user submissions:', { error });
+    logDeduplicator.error('Error fetching user submissions:', { error: error instanceof Error ? error.message : String(error) });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -119,7 +119,7 @@ router.get('/', validateGetRequest(educationalResourcesGetSchema), (async (req: 
       pagination: resources.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching educational resources:', { error });
+    logDeduplicator.error('Error fetching educational resources:', { error: error instanceof Error ? error.message : String(error) });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -155,7 +155,7 @@ router.get('/:id', validateGetRequest(educationalResourceByIdGetSchema), (async 
       data: resource
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching educational resource:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching educational resource:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -192,7 +192,7 @@ router.put('/:id', validatePrivyToken, requireModerator, validateUpdateEducation
       data: resource
     });
   } catch (error) {
-    logDeduplicator.error('Error updating educational resource:', { error, id: req.params.id, body: req.body });
+    logDeduplicator.error('Error updating educational resource:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, body: req.body });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -228,7 +228,7 @@ router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, re
       message: 'Educational resource deleted successfully'
     });
   } catch (error) {
-    logDeduplicator.error('Error deleting educational resource:', { error, id: req.params.id });
+    logDeduplicator.error('Error deleting educational resource:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -280,7 +280,7 @@ router.post('/:id/categories', validatePrivyToken, requireModerator, validateAss
     });
   } catch (error) {
     logDeduplicator.error('Error assigning resource to category:', {
-      error,
+      error: error instanceof Error ? error.message : String(error),
       resourceId: req.params.id,
       categoryId: req.body.categoryId
     });
@@ -323,7 +323,7 @@ router.delete('/:id/categories/:categoryId', validatePrivyToken, requireModerato
     });
   } catch (error) {
     logDeduplicator.error('Error removing resource from category:', {
-      error,
+      error: error instanceof Error ? error.message : String(error),
       resourceId: req.params.id,
       categoryId: req.params.categoryId
     });
@@ -362,7 +362,7 @@ router.get('/category/:categoryId', validateGetRequest(educationalResourcesByCat
       data: resources
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching resources by category:', { error, categoryId: req.params.categoryId });
+    logDeduplicator.error('Error fetching resources by category:', { error: error instanceof Error ? error.message : String(error), categoryId: req.params.categoryId });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -396,7 +396,7 @@ router.get('/moderation/pending', validatePrivyToken, requireModerator, (async (
       pagination: result.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching pending resources:', { error });
+    logDeduplicator.error('Error fetching pending resources:', { error: error instanceof Error ? error.message : String(error) });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -424,7 +424,7 @@ router.get('/moderation/pending/count', validatePrivyToken, requireModerator, (a
       data: { count }
     });
   } catch (error) {
-    logDeduplicator.error('Error counting pending resources:', { error });
+    logDeduplicator.error('Error counting pending resources:', { error: error instanceof Error ? error.message : String(error) });
 
     res.status(500).json({
       success: false,
@@ -464,7 +464,7 @@ router.patch('/:id/approve', validatePrivyToken, requireModerator, (async (req: 
       data: resource
     });
   } catch (error) {
-    logDeduplicator.error('Error approving resource:', { error, id: req.params.id });
+    logDeduplicator.error('Error approving resource:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -520,7 +520,7 @@ router.patch('/:id/reject', validatePrivyToken, requireModerator, (async (req: R
       data: resource
     });
   } catch (error) {
-    logDeduplicator.error('Error rejecting resource:', { error, id: req.params.id });
+    logDeduplicator.error('Error rejecting resource:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -590,7 +590,7 @@ router.post('/:id/report', validatePrivyToken, requireUser, (async (req: Request
       data: report
     });
   } catch (error) {
-    logDeduplicator.error('Error creating report:', { error, resourceId: req.params.id });
+    logDeduplicator.error('Error creating report:', { error: error instanceof Error ? error.message : String(error), resourceId: req.params.id });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -623,7 +623,7 @@ router.get('/moderation/reports', validatePrivyToken, requireModerator, (async (
       pagination: result.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching reports:', { error });
+    logDeduplicator.error('Error fetching reports:', { error: error instanceof Error ? error.message : String(error) });
 
     res.status(500).json({
       success: false,
@@ -652,7 +652,7 @@ router.get('/:id/reports', validatePrivyToken, requireModerator, (async (req: Re
       data: reports
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching reports for resource:', { error, resourceId: req.params.id });
+    logDeduplicator.error('Error fetching reports for resource:', { error: error instanceof Error ? error.message : String(error), resourceId: req.params.id });
 
     res.status(500).json({
       success: false,

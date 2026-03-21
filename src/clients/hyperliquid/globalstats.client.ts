@@ -84,13 +84,13 @@ export class HyperliquidGlobalStatsClient extends BaseApiService {
     logDeduplicator.info('Starting global stats polling');
     // Make an initial update
     this.updateGlobalStats().catch(err =>
-      logDeduplicator.error('Error in initial global stats update:', { error: err })
+      logDeduplicator.error('Error in initial global stats update:', { error: err instanceof Error ? err.message : String(err) })
     );
 
     // Start regular polling
     this.pollingInterval = setInterval(() => {
       this.updateGlobalStats().catch(err =>
-        logDeduplicator.error('Error in global stats polling:', { error: err })
+        logDeduplicator.error('Error in global stats polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, this.UPDATE_INTERVAL);
   }

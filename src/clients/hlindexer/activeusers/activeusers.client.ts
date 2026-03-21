@@ -60,11 +60,11 @@ export class HLIndexerActiveUsersClient extends BaseApiService {
     }
     logDeduplicator.info('Starting active users polling');
     this.updateActiveUsersData().catch(err =>
-      logDeduplicator.error('Error in initial active users update:', { error: err })
+      logDeduplicator.error('Error in initial active users update:', { error: err instanceof Error ? err.message : String(err) })
     );
     this.pollingInterval = setInterval(() => {
       this.updateActiveUsersData().catch(err =>
-        logDeduplicator.error('Error in active users polling:', { error: err })
+        logDeduplicator.error('Error in active users polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, UPDATE_INTERVAL);
   }

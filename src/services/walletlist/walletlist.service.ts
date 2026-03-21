@@ -109,7 +109,7 @@ export class WalletListService extends BaseService<
         CACHE_TTL.SHORT // Cache court pour les permissions
       );
     } catch (error) {
-      logDeduplicator.error('Error checking wallet list access:', { error, walletListId, userId });
+      logDeduplicator.error('Error checking wallet list access:', { error: error instanceof Error ? error.message : String(error), walletListId, userId });
       return false;
     }
   }
@@ -134,7 +134,7 @@ export class WalletListService extends BaseService<
       if (error instanceof WalletListNotFoundError || error instanceof WalletListPermissionError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching wallet list with permission:', { error, id, userId });
+      logDeduplicator.error('Error fetching wallet list with permission:', { error: error instanceof Error ? error.message : String(error), id, userId });
       throw error;
     }
   }
@@ -159,7 +159,7 @@ export class WalletListService extends BaseService<
         CACHE_TTL.MEDIUM
       );
     } catch (error) {
-      logDeduplicator.error('Error fetching wallet lists by user:', { error, userId });
+      logDeduplicator.error('Error fetching wallet lists by user:', { error: error instanceof Error ? error.message : String(error), userId });
       throw error;
     }
   }
@@ -188,7 +188,7 @@ export class WalletListService extends BaseService<
         CACHE_TTL.MEDIUM
       );
     } catch (error) {
-      logDeduplicator.error('Error fetching public wallet lists:', { error, query });
+      logDeduplicator.error('Error fetching public wallet lists:', { error: error instanceof Error ? error.message : String(error), query });
       throw error;
     }
   }
@@ -360,7 +360,7 @@ export class WalletListService extends BaseService<
 
       return completeWalletList;
     } catch (error) {
-      logDeduplicator.error('Error copying wallet list:', { error, walletListId, userId });
+      logDeduplicator.error('Error copying wallet list:', { error: error instanceof Error ? error.message : String(error), walletListId, userId });
       throw error;
     }
   }

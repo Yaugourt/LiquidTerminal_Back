@@ -31,7 +31,7 @@ router.get('/', validateGetRequest(auctionGetSchema),
         data: auctionData
       });
     } catch (error) {
-      logDeduplicator.error('Error retrieving auction data:', { error });
+      logDeduplicator.error('Error retrieving auction data:', { error: error instanceof Error ? error.message : String(error) });
       
       if (error instanceof AuctionError || error instanceof InvalidAuctionDataError) {
         return res.status(error.statusCode).json({
@@ -66,7 +66,7 @@ router.get('/timing', validateGetRequest(auctionGetSchema), (async (_req: Reques
       data: timingData
     });
   } catch (error) {
-    logDeduplicator.error('Error retrieving auction timing:', { error });
+    logDeduplicator.error('Error retrieving auction timing:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof AuctionError || error instanceof InvalidAuctionDataError) {
       return res.status(error.statusCode).json({

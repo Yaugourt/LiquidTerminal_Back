@@ -122,9 +122,9 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           error instanceof WalletValidationError) {
         throw error;
       }
-      logDeduplicator.error('Error adding wallet:', { 
-        error, 
-        privyUserId, 
+      logDeduplicator.error('Error adding wallet:', {
+        error: error instanceof Error ? error.message : String(error),
+        privyUserId,
         address,
         name
       });
@@ -188,9 +188,9 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
         }
       };
     } catch (error) {
-      logDeduplicator.error('Error retrieving wallets:', { 
-        error, 
-        userId 
+      logDeduplicator.error('Error retrieving wallets:', {
+        error: error instanceof Error ? error.message : String(error),
+        userId
       });
       throw error;
     }
@@ -232,7 +232,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       if (error instanceof WalletNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error removing wallet from user:', { error, walletId, userId });
+      logDeduplicator.error('Error removing wallet from user:', { error: error instanceof Error ? error.message : String(error), walletId, userId });
       throw error;
     }
   }
@@ -287,11 +287,11 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           error instanceof WalletValidationError) {
         throw error;
       }
-      logDeduplicator.error('Error updating wallet name:', { 
-        error, 
-        userId, 
-        walletId, 
-        name 
+      logDeduplicator.error('Error updating wallet name:', {
+        error: error instanceof Error ? error.message : String(error),
+        userId,
+        walletId,
+        name
       });
       throw error;
     }
@@ -486,8 +486,8 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           error instanceof WalletValidationError) {
         throw error;
       }
-      logDeduplicator.error('Error in bulk wallet import:', { 
-        error, 
+      logDeduplicator.error('Error in bulk wallet import:', {
+        error: error instanceof Error ? error.message : String(error),
         privyUserId,
         walletsCount: wallets.length,
         walletListId
@@ -582,8 +582,8 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       if (error instanceof UserNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error in bulk wallet delete:', { 
-        error, 
+      logDeduplicator.error('Error in bulk wallet delete:', {
+        error: error instanceof Error ? error.message : String(error),
         privyUserId,
         walletsCount: walletIds.length
       });

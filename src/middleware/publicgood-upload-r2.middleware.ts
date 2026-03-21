@@ -118,7 +118,7 @@ const scanUploadedFile = async (buffer: Buffer, originalName: string): Promise<b
 
     return true;
   } catch (error) {
-    logDeduplicator.error('Error scanning uploaded file', { error, originalName });
+    logDeduplicator.error('Error scanning uploaded file', { error: error instanceof Error ? error.message : String(error), originalName });
     return false;
   }
 };
@@ -202,7 +202,7 @@ export const validateAndUploadPublicGoodToR2 = async (
 
     next();
   } catch (error) {
-    logDeduplicator.error('Error during Public Good R2 upload', { error });
+    logDeduplicator.error('Error during Public Good R2 upload', { error: error instanceof Error ? error.message : String(error) });
     
     res.status(500).json({
       success: false,

@@ -113,10 +113,10 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
           error instanceof ProjectValidationError) {
         throw error;
       }
-      logDeduplicator.error('Error assigning project categories:', { 
-        error, 
-        projectId, 
-        categoryIds 
+      logDeduplicator.error('Error assigning project categories:', {
+        error: error instanceof Error ? error.message : String(error),
+        projectId,
+        categoryIds
       });
       throw error;
     }
@@ -164,10 +164,10 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
           error instanceof ProjectValidationError) {
         throw error;
       }
-      logDeduplicator.error('Error removing project categories:', { 
-        error, 
-        projectId, 
-        categoryIds 
+      logDeduplicator.error('Error removing project categories:', {
+        error: error instanceof Error ? error.message : String(error),
+        projectId,
+        categoryIds
       });
       throw error;
     }
@@ -199,7 +199,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
       if (error instanceof ProjectNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching project categories:', { error, projectId });
+      logDeduplicator.error('Error fetching project categories:', { error: error instanceof Error ? error.message : String(error), projectId });
       throw error;
     }
   }
@@ -251,7 +251,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
 
       return project;
     } catch (error) {
-      logDeduplicator.error('Error creating project with upload:', { error, data });
+      logDeduplicator.error('Error creating project with upload:', { error: error instanceof Error ? error.message : String(error), data });
       throw error;
     }
   }
@@ -282,7 +282,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
       if (error instanceof CategoryNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching projects by category:', { error, categoryId });
+      logDeduplicator.error('Error fetching projects by category:', { error: error instanceof Error ? error.message : String(error), categoryId });
       throw error;
     }
   }
@@ -296,7 +296,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
       
       logDeduplicator.info('Project deleted successfully', { id });
     } catch (error) {
-      logDeduplicator.error('Error deleting project:', { error, id });
+      logDeduplicator.error('Error deleting project:', { error: error instanceof Error ? error.message : String(error), id });
       throw error;
     }
   }

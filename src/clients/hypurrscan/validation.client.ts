@@ -45,13 +45,13 @@ export class HypurrscanValidationClient extends BaseApiService {
     logDeduplicator.info('Starting Hypurrscan validation polling');
     // Faire une première mise à jour immédiate
     this.updateValidations().catch(error => {
-      logDeduplicator.error('Error in initial Hypurrscan validation update:', { error });
+      logDeduplicator.error('Error in initial Hypurrscan validation update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateValidations().catch(error => {
-        logDeduplicator.error('Error in Hypurrscan validation polling:', { error });
+        logDeduplicator.error('Error in Hypurrscan validation polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, HypurrscanValidationClient.UPDATE_INTERVAL);
   }
@@ -83,7 +83,7 @@ export class HypurrscanValidationClient extends BaseApiService {
         lastUpdate: this.lastUpdate
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update validations data:', { error });
+      logDeduplicator.error('Failed to update validations data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
     });
@@ -111,7 +111,7 @@ export class HypurrscanValidationClient extends BaseApiService {
       }
       return JSON.parse(freshData);
     } catch (error) {
-      logDeduplicator.error('Error fetching validations:', { error });
+      logDeduplicator.error('Error fetching validations:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

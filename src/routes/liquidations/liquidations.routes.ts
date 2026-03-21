@@ -103,7 +103,7 @@ router.get('/',
 
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching liquidations:', { error });
+      logDeduplicator.error('Error fetching liquidations:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof LiquidationsError) {
         return res.status(error.statusCode).json({
@@ -158,7 +158,7 @@ router.get('/chart-data',
       const response = await liquidationsService.getChartData(period);
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching chart data:', { error });
+      logDeduplicator.error('Error fetching chart data:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof LiquidationsError) {
         return res.status(error.statusCode).json({
@@ -189,7 +189,7 @@ router.get('/data',
       const response = await liquidationsService.getAllData();
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching unified liquidation data:', { error });
+      logDeduplicator.error('Error fetching unified liquidation data:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof LiquidationsError) {
         return res.status(error.statusCode).json({
@@ -241,7 +241,7 @@ router.get('/analytics/stats',
       const response = await liquidationsService.getAnalyticsStats(days, coin);
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching analytics liquidation stats:', { error });
+      logDeduplicator.error('Error fetching analytics liquidation stats:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof LiquidationsError) {
         return res.status(error.statusCode).json({
@@ -274,7 +274,7 @@ router.get('/stats/all',
 
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching all liquidation stats:', { error });
+      logDeduplicator.error('Error fetching all liquidation stats:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof LiquidationsError) {
         return res.status(error.statusCode).json({
@@ -331,7 +331,7 @@ router.get('/recent',
 
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching recent liquidations:', { error });
+      logDeduplicator.error('Error fetching recent liquidations:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof LiquidationsError) {
         return res.status(error.statusCode).json({
@@ -465,7 +465,7 @@ router.get('/historical/stats',
       const result = await historicalStatsService.getStats(period, coin);
       res.json({ success: true, data: result });
     } catch (error) {
-      logDeduplicator.error('Error fetching historical stats:', { error });
+      logDeduplicator.error('Error fetching historical stats:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof LiquidationsError) {
         return res.status(error.statusCode).json({
@@ -513,7 +513,7 @@ router.get('/historical/chart',
       const result = await historicalChartService.getChart(period, coin);
       res.json({ success: true, data: result });
     } catch (error) {
-      logDeduplicator.error('Error fetching historical chart:', { error });
+      logDeduplicator.error('Error fetching historical chart:', { error: error instanceof Error ? error.message : String(error) });
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : 'Internal server error'

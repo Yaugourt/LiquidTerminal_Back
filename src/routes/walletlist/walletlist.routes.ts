@@ -49,7 +49,7 @@ router.post('/', validatePrivyToken, (async (req: Request, res: Response) => {
       xpGranted: XP_REWARDS.CREATE_WALLETLIST
     });
   } catch (error) {
-    logDeduplicator.error('Error creating wallet list:', { error });
+    logDeduplicator.error('Error creating wallet list:', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -63,7 +63,7 @@ router.get('/', validateWalletListQuery, (async (req: Request, res: Response) =>
     const walletLists = await walletListService.getAll(req.query);
     res.json({ success: true, data: walletLists.data, pagination: walletLists.pagination });
   } catch (error) {
-    logDeduplicator.error('Error fetching wallet lists:', { error });
+    logDeduplicator.error('Error fetching wallet lists:', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -77,7 +77,7 @@ router.get('/public', validateWalletListQuery, (async (req: Request, res: Respon
     const walletLists = await walletListService.getPublicLists(req.query);
     res.json({ success: true, data: walletLists.data, pagination: walletLists.pagination });
   } catch (error) {
-    logDeduplicator.error('Error fetching public wallet lists:', { error });
+    logDeduplicator.error('Error fetching public wallet lists:', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -102,7 +102,7 @@ router.get('/userlists', validatePrivyToken, validateWalletListQuery, (async (re
     const walletLists = await walletListService.getByUser(user.id);
     res.json({ success: true, data: walletLists });
   } catch (error) {
-    logDeduplicator.error('Error fetching user wallet lists:', { error });
+    logDeduplicator.error('Error fetching user wallet lists:', { error: error instanceof Error ? error.message : String(error) });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -141,7 +141,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
 
     res.json({ success: true, data: walletList });
   } catch (error) {
-    logDeduplicator.error('Error fetching wallet list:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching wallet list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -177,7 +177,7 @@ router.put('/:id', validatePrivyToken, validateUpdateWalletList, (async (req: Re
     const walletList = await walletListService.update(id, req.body);
     res.json({ success: true, data: walletList });
   } catch (error) {
-    logDeduplicator.error('Error updating wallet list:', { error, id: req.params.id });
+    logDeduplicator.error('Error updating wallet list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -213,7 +213,7 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
     await walletListService.delete(id);
     res.json({ success: true, message: 'Wallet list deleted successfully' });
   } catch (error) {
-    logDeduplicator.error('Error deleting wallet list:', { error, id: req.params.id });
+    logDeduplicator.error('Error deleting wallet list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -243,7 +243,7 @@ router.post('/:id/copy', validatePrivyToken, (async (req: Request, res: Response
     const copiedWalletList = await walletListService.copyWalletList(id, user.id);
     res.status(201).json({ success: true, data: copiedWalletList });
   } catch (error) {
-    logDeduplicator.error('Error copying wallet list:', { error, id: req.params.id });
+    logDeduplicator.error('Error copying wallet list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -275,7 +275,7 @@ router.get('/:id/items', validatePrivyToken, validateWalletListItemQuery, (async
     const items = await walletListItemService.getByWalletListWithPermission(walletListId, user.id, req.query);
     res.json({ success: true, data: items.data, pagination: items.pagination });
   } catch (error) {
-    logDeduplicator.error('Error fetching items by wallet list:', { error, walletListId: req.params.id });
+    logDeduplicator.error('Error fetching items by wallet list:', { error: error instanceof Error ? error.message : String(error), walletListId: req.params.id });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -319,7 +319,7 @@ router.post('/:id/items', validatePrivyToken, validateCreateWalletListItem, (asy
       xpGranted: XP_REWARDS.ADD_WALLET_TO_LIST
     });
   } catch (error) {
-    logDeduplicator.error('Error adding wallet to list:', { error, walletListId: req.params.id });
+    logDeduplicator.error('Error adding wallet to list:', { error: error instanceof Error ? error.message : String(error), walletListId: req.params.id });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -356,7 +356,7 @@ router.put('/items/:itemId', validatePrivyToken, validateUpdateWalletListItem, (
     const item = await walletListItemService.update(itemId, req.body);
     res.json({ success: true, data: item });
   } catch (error) {
-    logDeduplicator.error('Error updating wallet list item:', { error, itemId: req.params.itemId });
+    logDeduplicator.error('Error updating wallet list item:', { error: error instanceof Error ? error.message : String(error), itemId: req.params.itemId });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
@@ -393,7 +393,7 @@ router.delete('/items/:itemId', validatePrivyToken, (async (req: Request, res: R
     await walletListItemService.delete(itemId);
     res.json({ success: true, message: 'Wallet removed from list successfully' });
   } catch (error) {
-    logDeduplicator.error('Error removing wallet from list:', { error, itemId: req.params.itemId });
+    logDeduplicator.error('Error removing wallet from list:', { error: error instanceof Error ? error.message : String(error), itemId: req.params.itemId });
     if (error instanceof WalletListError) {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }

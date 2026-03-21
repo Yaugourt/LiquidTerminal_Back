@@ -86,7 +86,7 @@ export class SpotDeployStateApiService {
         }
       };
     } catch (error) {
-      logDeduplicator.error('Error fetching auction timing:', { error });
+      logDeduplicator.error('Error fetching auction timing:', { error: error instanceof Error ? error.message : String(error) });
       if (error instanceof InvalidAuctionDataError) {
         throw error;
       }

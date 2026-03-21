@@ -90,7 +90,7 @@ export class UserService {
         pages
       };
     } catch (error) {
-      logDeduplicator.error('Error retrieving users list', { error });
+      logDeduplicator.error('Error retrieving users list', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -115,7 +115,7 @@ export class UserService {
 
       return maskedUser;
     } catch (error) {
-      logDeduplicator.error('Error retrieving user by ID', { error, userId });
+      logDeduplicator.error('Error retrieving user by ID', { error: error instanceof Error ? error.message : String(error), userId });
       throw error;
     }
   }
@@ -142,7 +142,7 @@ export class UserService {
 
       return maskedUser;
     } catch (error) {
-      logDeduplicator.error('Error updating user', { error, userId });
+      logDeduplicator.error('Error updating user', { error: error instanceof Error ? error.message : String(error), userId });
       throw error;
     }
   }
@@ -164,7 +164,7 @@ export class UserService {
 
       return maskedUser;
     } catch (error) {
-      logDeduplicator.error('Error deleting user', { error, userId });
+      logDeduplicator.error('Error deleting user', { error: error instanceof Error ? error.message : String(error), userId });
       throw error;
     }
   }

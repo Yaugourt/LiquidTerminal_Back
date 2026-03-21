@@ -79,7 +79,7 @@ router.get('/',
 
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching top traders:', { error });
+      logDeduplicator.error('Error fetching top traders:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof TopTradersError) {
         return res.status(error.statusCode).json({

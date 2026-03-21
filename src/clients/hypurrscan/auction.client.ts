@@ -44,13 +44,13 @@ export class HypurrscanClient extends BaseApiService {
     logDeduplicator.info('Starting Hypurrscan polling');
     // Faire une première mise à jour immédiate
     this.updateAuctions().catch(error => {
-      logDeduplicator.error('Error in initial Hypurrscan update:', { error });
+      logDeduplicator.error('Error in initial Hypurrscan update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateAuctions().catch(error => {
-        logDeduplicator.error('Error in Hypurrscan polling:', { error });
+        logDeduplicator.error('Error in Hypurrscan polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, HypurrscanClient.UPDATE_INTERVAL);
   }
@@ -81,7 +81,7 @@ export class HypurrscanClient extends BaseApiService {
         lastUpdate: this.lastUpdate
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update auctions data:', { error });
+      logDeduplicator.error('Failed to update auctions data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -104,7 +104,7 @@ export class HypurrscanClient extends BaseApiService {
       }
       return JSON.parse(freshData);
     } catch (error) {
-      logDeduplicator.error('Error fetching auctions:', { error });
+      logDeduplicator.error('Error fetching auctions:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

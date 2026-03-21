@@ -258,7 +258,7 @@ export class SpotGlobalStatsService {
       const raw = await redisService.get(this.SPOT_MARKETS_CACHE_KEY);
       return raw ? JSON.parse(raw) as MarketData[] : null;
     } catch (error) {
-      logDeduplicator.error('Error retrieving market data from cache:', { error });
+      logDeduplicator.error('Error retrieving market data from cache:', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }

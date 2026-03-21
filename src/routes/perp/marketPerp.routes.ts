@@ -44,7 +44,7 @@ router.get('/', validateGetRequest(marketPerpGetSchema), async (req: Request, re
       metadata: result.metadata
     });
   } catch (error) {
-    logDeduplicator.error('Error retrieving perp market data:', { error });
+    logDeduplicator.error('Error retrieving perp market data:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof PerpMarketDataError) {
       res.status(error.statusCode).json({

@@ -22,7 +22,7 @@ export class VaultsService {
           logDeduplicator.info('Vaults cache updated', { timestamp, totalTvl });
         }
       } catch (error) {
-        logDeduplicator.error('Error processing cache update:', { error });
+        logDeduplicator.error('Error processing cache update:', { error: error instanceof Error ? error.message : String(error) });
       }
     });
   }
@@ -129,7 +129,7 @@ export class VaultsService {
         }
       };
     } catch (error) {
-      logDeduplicator.error('Error retrieving vaults list:', { error });
+      logDeduplicator.error('Error retrieving vaults list:', { error: error instanceof Error ? error.message : String(error) });
       throw error instanceof VaultsError ? error : new VaultsError('Failed to retrieve vaults list', 500);
     }
   }

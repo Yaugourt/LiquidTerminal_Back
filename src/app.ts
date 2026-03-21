@@ -55,6 +55,7 @@ import healthRoutes from './routes/health.routes';
 import liquidationsRoutes from './routes/liquidations/liquidations.routes';
 import topTradersRoutes from './routes/toptraders/toptraders.routes';
 import activeUsersRoutes from './routes/activeusers/activeusers.routes';
+import buildersRoutes from './routes/builders/builders.routes';
 
 const app = express();
 const server = createServer(app);
@@ -137,6 +138,7 @@ app.use('/api/health', healthRoutes);
 app.use('/liquidations', liquidationsRoutes);
 app.use('/top-traders', topTradersRoutes);
 app.use('/active-users', activeUsersRoutes);
+app.use('/builders', buildersRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
@@ -157,7 +159,7 @@ async function bootstrapApplication(): Promise<void> {
 
     await logDeduplicator.info('Application bootstrap completed successfully');
   } catch (error) {
-    await logDeduplicator.error('Failed to initialize clients:', { error });
+    await logDeduplicator.error('Failed to initialize clients:', { error: error instanceof Error ? error.message : String(error) });
     await gracefulShutdown('BOOT_FAILURE', 1);
   }
 }

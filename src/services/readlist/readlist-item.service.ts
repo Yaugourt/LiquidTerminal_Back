@@ -175,7 +175,7 @@ export class ReadListItemService extends BaseService<
       if (error instanceof ReadListPermissionError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching read list items with permission:', { error, readListId, userId });
+      logDeduplicator.error('Error fetching read list items with permission:', { error: error instanceof Error ? error.message : String(error), readListId, userId });
       throw error;
     }
   }

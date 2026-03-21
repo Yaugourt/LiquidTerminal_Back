@@ -45,13 +45,13 @@ export class ValidatorClient extends BaseApiService {
     logDeduplicator.info('Starting validator polling');
     // Faire une première mise à jour immédiate
     this.updateValidators().catch(error => {
-      logDeduplicator.error('Error in initial validator update:', { error });
+      logDeduplicator.error('Error in initial validator update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateValidators().catch(error => {
-        logDeduplicator.error('Error in validator polling:', { error });
+        logDeduplicator.error('Error in validator polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, this.UPDATE_INTERVAL);
   }
@@ -84,7 +84,7 @@ export class ValidatorClient extends BaseApiService {
         lastUpdate: this.lastUpdate
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update validators data:', { error });
+      logDeduplicator.error('Failed to update validators data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -108,7 +108,7 @@ export class ValidatorClient extends BaseApiService {
       }
       return JSON.parse(freshData) as ValidatorSummary[];
     } catch (error) {
-      logDeduplicator.error('Error fetching validator summaries:', { error });
+      logDeduplicator.error('Error fetching validator summaries:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

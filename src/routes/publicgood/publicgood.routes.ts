@@ -31,7 +31,7 @@ router.get('/', (async (req: Request, res: Response) => {
       pagination: publicGoods.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching public goods:', { error, query: req.query });
+    logDeduplicator.error('Error fetching public goods:', { error: error instanceof Error ? error.message : String(error), query: req.query });
     if (error instanceof PublicGoodError) {
       return res.status(error.statusCode).json({
         success: false,
@@ -57,7 +57,7 @@ router.get('/pending', validatePrivyToken, requireModerator, (async (req: Reques
       pagination: publicGoods.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching pending public goods:', { error, query: req.query });
+    logDeduplicator.error('Error fetching pending public goods:', { error: error instanceof Error ? error.message : String(error), query: req.query });
     if (error instanceof PublicGoodError) {
       return res.status(error.statusCode).json({
         success: false,
@@ -102,7 +102,7 @@ router.get('/my-submissions', validatePrivyToken, (async (req: Request, res: Res
       pagination: publicGoods.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching user public goods:', { error, privyUserId: req.user?.sub });
+    logDeduplicator.error('Error fetching user public goods:', { error: error instanceof Error ? error.message : String(error), privyUserId: req.user?.sub });
     if (error instanceof PublicGoodError) {
       return res.status(error.statusCode).json({
         success: false,
@@ -136,7 +136,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
       data: publicGood
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching public good:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching public good:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     if (error instanceof PublicGoodError) {
       return res.status(error.statusCode).json({
         success: false,
@@ -238,7 +238,7 @@ router.post('/',
         data: publicGood
       });
     } catch (error) {
-      logDeduplicator.error('Error creating public good:', { error, body: req.body });
+      logDeduplicator.error('Error creating public good:', { error: error instanceof Error ? error.message : String(error), body: req.body });
       
       if (error instanceof PublicGoodError) {
         return res.status(error.statusCode).json({
@@ -352,7 +352,7 @@ router.put('/:id',
         data: publicGood
       });
     } catch (error) {
-      logDeduplicator.error('Error updating public good:', { error, id: req.params.id, body: req.body });
+      logDeduplicator.error('Error updating public good:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, body: req.body });
       
       if (error instanceof PublicGoodError) {
         return res.status(error.statusCode).json({
@@ -411,7 +411,7 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
       message: 'Project deleted successfully' 
     });
   } catch (error) {
-    logDeduplicator.error('Error deleting public good:', { error, id: req.params.id });
+    logDeduplicator.error('Error deleting public good:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     
     if (error instanceof PublicGoodError) {
       return res.status(error.statusCode).json({
@@ -477,7 +477,7 @@ router.patch('/:id/review',
         data: publicGood
       });
     } catch (error) {
-      logDeduplicator.error('Error reviewing public good:', { error, id: req.params.id, body: req.body });
+      logDeduplicator.error('Error reviewing public good:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, body: req.body });
       
       if (error instanceof PublicGoodError) {
         return res.status(error.statusCode).json({

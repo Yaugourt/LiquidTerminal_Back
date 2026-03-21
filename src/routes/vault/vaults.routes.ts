@@ -39,7 +39,7 @@ router.get('/', validateGetRequest(vaultsGetSchema), async (req: Request, res: R
 
     res.status(200).json(result);
   } catch (error) {
-    logDeduplicator.error('Error retrieving vaults list:', { error });
+    logDeduplicator.error('Error retrieving vaults list:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof VaultsError) {
       res.status(error.statusCode).json({

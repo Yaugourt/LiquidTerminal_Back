@@ -46,13 +46,13 @@ export class HyperliquidPerpClient extends BaseApiService {
     logDeduplicator.info('Starting perp polling');
     // Faire une première mise à jour immédiate
     this.updatePerpData().catch(error => {
-      logDeduplicator.error('Error in initial perp update:', { error });
+      logDeduplicator.error('Error in initial perp update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updatePerpData().catch(error => {
-        logDeduplicator.error('Error in perp polling:', { error });
+        logDeduplicator.error('Error in perp polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, this.UPDATE_INTERVAL);
   }
@@ -112,7 +112,7 @@ export class HyperliquidPerpClient extends BaseApiService {
         filteredOut: meta.universe.length - marketsData.length
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update perp data:', { error });
+      logDeduplicator.error('Failed to update perp data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -138,7 +138,7 @@ export class HyperliquidPerpClient extends BaseApiService {
       }
       return JSON.parse(freshData) as [{ universe: PerpMarket[] }, PerpAssetContext[]];
     } catch (error) {
-      logDeduplicator.error('Error fetching perp data:', { error });
+      logDeduplicator.error('Error fetching perp data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

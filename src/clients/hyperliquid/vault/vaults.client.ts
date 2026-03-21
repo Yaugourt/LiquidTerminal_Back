@@ -100,13 +100,13 @@ export class HyperliquidVaultsClient extends BaseApiService {
     logDeduplicator.info('Starting vaults polling');
     // Faire une première mise à jour immédiate
     this.updateVaultsList().catch(error => {
-      logDeduplicator.error('Error in initial vaults update:', { error });
+      logDeduplicator.error('Error in initial vaults update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateVaultsList().catch(error => {
-        logDeduplicator.error('Error in vaults polling:', { error });
+        logDeduplicator.error('Error in vaults polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, HyperliquidVaultsClient.UPDATE_INTERVAL);
   }
@@ -149,7 +149,7 @@ export class HyperliquidVaultsClient extends BaseApiService {
       }
       return JSON.parse(freshData);
     } catch (error) {
-      logDeduplicator.error('Error fetching vaults list:', { error });
+      logDeduplicator.error('Error fetching vaults list:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -185,7 +185,7 @@ export class HyperliquidVaultsClient extends BaseApiService {
 
       return vaults;
     } catch (error) {
-      logDeduplicator.error('Failed to update vaults list:', { error });
+      logDeduplicator.error('Failed to update vaults list:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

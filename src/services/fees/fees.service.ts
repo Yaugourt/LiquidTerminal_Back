@@ -112,7 +112,7 @@ export class FeesService {
       });
       return stats;
     } catch (error) {
-      logDeduplicator.error('Failed to update fees stats:', { error });
+      logDeduplicator.error('Failed to update fees stats:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

@@ -113,10 +113,10 @@ export class StorageService {
 
       return { key, url };
     } catch (error) {
-      logDeduplicator.error('Error uploading file to R2', { 
-        error,
+      logDeduplicator.error('Error uploading file to R2', {
+        error: error instanceof Error ? error.message : String(error),
         folder,
-        originalName 
+        originalName
       });
       throw new Error('Failed to upload file to storage');
     }
@@ -147,7 +147,7 @@ export class StorageService {
 
       return uploads;
     } catch (error) {
-      logDeduplicator.error('Error uploading multiple files to R2', { error });
+      logDeduplicator.error('Error uploading multiple files to R2', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -170,7 +170,7 @@ export class StorageService {
 
       logDeduplicator.info('File deleted from R2', { key });
     } catch (error) {
-      logDeduplicator.error('Error deleting file from R2', { error, key });
+      logDeduplicator.error('Error deleting file from R2', { error: error instanceof Error ? error.message : String(error), key });
       throw new Error('Failed to delete file from storage');
     }
   }
@@ -216,7 +216,7 @@ export class StorageService {
       const signedUrl = await getSignedUrl(this.s3Client, command, { expiresIn });
       return signedUrl;
     } catch (error) {
-      logDeduplicator.error('Error generating signed URL', { error, key });
+      logDeduplicator.error('Error generating signed URL', { error: error instanceof Error ? error.message : String(error), key });
       throw new Error('Failed to generate signed URL');
     }
   }

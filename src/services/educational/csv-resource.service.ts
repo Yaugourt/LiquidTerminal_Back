@@ -138,7 +138,7 @@ export class CsvResourceService {
       return result;
 
     } catch (error) {
-      logDeduplicator.error('Error processing CSV file', { error, filePath });
+      logDeduplicator.error('Error processing CSV file', { error: error instanceof Error ? error.message : String(error), filePath });
       throw new EducationalError(
         'Erreur lors du traitement du fichier CSV',
         500,

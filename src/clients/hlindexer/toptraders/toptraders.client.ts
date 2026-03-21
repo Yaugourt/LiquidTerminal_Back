@@ -60,11 +60,11 @@ export class HLIndexerTopTradersClient extends BaseApiService {
     }
     logDeduplicator.info('Starting Top Traders polling');
     this.updateTopTradersData().catch(err =>
-      logDeduplicator.error('Error in initial Top Traders update:', { error: err })
+      logDeduplicator.error('Error in initial Top Traders update:', { error: err instanceof Error ? err.message : String(err) })
     );
     this.pollingInterval = setInterval(() => {
       this.updateTopTradersData().catch(err =>
-        logDeduplicator.error('Error in Top Traders polling:', { error: err })
+        logDeduplicator.error('Error in Top Traders polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, UPDATE_INTERVAL);
   }

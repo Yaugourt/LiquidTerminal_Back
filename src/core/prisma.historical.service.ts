@@ -33,7 +33,7 @@ class PrismaHistoricalService {
           logDeduplicator.info('Successfully connected to historical database');
         })
         .catch((error: unknown) => {
-          logDeduplicator.error('Failed to connect to historical database', { error });
+          logDeduplicator.error('Failed to connect to historical database', { error: error instanceof Error ? error.message : String(error) });
         });
     }
 
