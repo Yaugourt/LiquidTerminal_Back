@@ -5,8 +5,6 @@ node_modules/
 dist/
 build/
 .cursor/rules
-tests/
-scripts/
 
 # Uploads (now on Cloudflare R2, local files not needed)
 /uploads/

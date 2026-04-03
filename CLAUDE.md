@@ -18,6 +18,7 @@ npm run lint             # ESLint check
 npm run lint:fix         # Auto-fix linting issues
 npm run type-check       # TypeScript check without build
 npm run test             # Run Jest tests
+npm run hypedexer:inventory  # Regenerate docs/hypedexer_endpoints.inventory.md (OpenAPI coverage)
 
 # Database
 npm run prisma:generate  # Generate Prisma client
@@ -33,7 +34,7 @@ npm run prisma:studio    # Open Prisma Studio GUI
 src/
 ├── app.ts                    # Express app + route registration
 ├── core/                     # Singleton services (Prisma, Redis, Cache, CircuitBreaker)
-├── clients/                  # External API clients (HyperLiquid, Hypurrscan, HLIndexer)
+├── clients/                  # External API clients (HyperLiquid, Hypurrscan, HypeDexer)
 ├── services/                 # Business logic layer (domain-organized)
 ├── routes/                   # HTTP handlers (domain-organized)
 ├── repositories/             # Data access layer (Prisma implementations)
@@ -261,8 +262,8 @@ try {
 - Validation metrics
 - Unstaking queue
 
-### HL Indexer (`clients/hlindexer/`)
-- Liquidation data with background polling
+### HL Indexer / HypeDexer REST (`clients/hypedexer/rest/`)
+- Pass-through `/indexer/*` and polling clients (liquidations, top traders, active users, builders list) sharing `HL_INDEXER_*` env. Architecture détaillée : `docs/CLIENT_ARCHITECTURE.md` §11 ; IDs circuit breaker / rate limiter des clients polling : `docs/agents/hypedexer/hypedexer-polling-client-ids.md`.
 
 ---
 
@@ -352,3 +353,23 @@ npm run test:coverage     # With coverage report
 3. Implement rate limiting if API has limits
 4. Add Redis caching for responses
 5. Consider background polling for real-time data
+
+---
+
+## gstack
+
+This repo vendors [gstack](https://github.com/garrytan/gstack) under `.agents/skills/gstack` for **Cursor** (and other agents that load [Agent Skills](https://cursor.com/docs/context/skills) from `.agents/skills/`). After clone, `setup` emits sibling skill folders `gstack-*` (symlinks) at `.agents/skills/`.
+
+**Prerequisite to run `setup`:** [Bun](https://bun.sh/) 1.x (`npm install -g bun` works if the curl installer is unavailable).
+
+**Invoking skills (Cursor Agent):** type `/` in chat and pick the skill (e.g. `gstack-review`, `gstack-qa`). Names use the `gstack-` prefix from this install.
+
+**Web browsing:** gstack’s `/gstack-browse` flow targets its Playwright/Chromium stack. For everyday work in **Cursor**, you may still use the **cursor-ide-browser** MCP when it fits; use gstack browse when following a gstack QA/review workflow end-to-end.
+
+**Useful commands:** `gstack-office-hours`, `gstack-plan-ceo-review`, `gstack-plan-eng-review`, `gstack-plan-design-review`, `gstack-design-consultation`, `gstack-design-shotgun`, `gstack-design-html`, `gstack-review`, `gstack-ship`, `gstack-land-and-deploy`, `gstack-canary`, `gstack-benchmark`, `gstack-browse`, `gstack-connect-chrome`, `gstack-qa`, `gstack-qa-only`, `gstack-design-review`, `gstack-setup-browser-cookies`, `gstack-setup-deploy`, `gstack-retro`, `gstack-investigate`, `gstack-document-release`, `gstack-cso`, `gstack-autoplan`, `gstack-careful`, `gstack-freeze`, `gstack-guard`, `gstack-unfreeze`, `gstack-upgrade`, `gstack-learn`.
+
+**After clone or pull:** run `cd .agents/skills/gstack && ./setup --host codex` so `browse/dist` and the generated skill folders under `gstack/.agents/skills/` exist (they are gitignored inside the vendored tree; symlinks at `.agents/skills/gstack-*` point there).
+
+**Troubleshooting:** same `setup` command (or `--host auto`). If `/gstack-browse` fails: `cd .agents/skills/gstack && bun install && bun run build`. Confirm skills under **Cursor Settings → Rules**. Telemetry is off by default; see gstack README.
+
+**Claude Code (optional):** If skills are missing there, use the upstream path `~/.claude/skills/gstack` + `./setup`, or re-run `./setup --host auto` from `.agents/skills/gstack` so multiple hosts are registered.
