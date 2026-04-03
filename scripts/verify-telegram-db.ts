@@ -1,8 +1,12 @@
 import { Client } from 'pg';
 
-const DATABASE_URL =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres:REDACTED@db.example.invalid:33061/railway';
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  console.error(
+    'Missing DATABASE_URL. Run: DATABASE_URL="postgresql://user:pass@host:5432/db" npx tsx scripts/verify-telegram-db.ts'
+  );
+  process.exit(1);
+}
 
 async function main() {
   const client = new Client({ connectionString: DATABASE_URL });
@@ -181,7 +185,8 @@ async function main() {
       },
       alerts_in_correct_tables: true,
       yaugourt_exists: !!yaugourtId,
-      yaugourt_has_subscriptions: (yaugourtSubs.rowCount ?? 0) > 0 || (yaugourtWalletSubs.rowCount ?? 0) > 0,
+      yaugourt_has_subscriptions:
+        yaugourtSubs.rows.length > 0 || yaugourtWalletSubs.rows.length > 0,
     };
   } finally {
     await client.end();
