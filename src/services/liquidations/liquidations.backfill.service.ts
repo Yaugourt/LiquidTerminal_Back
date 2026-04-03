@@ -1,5 +1,5 @@
 import { historicalLiquidationRepository } from '../../repositories';
-import { HLIndexerLiquidationsClient } from '../../clients/hlindexer/liquidations/liquidations.client';
+import { HLIndexerLiquidationsClient } from '../../clients/hypedexer/rest/liquidations/liquidations.client';
 import { Liquidation } from '../../types/liquidations.types';
 import { RawLiquidationCreateInput } from '../../types/historical.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';

@@ -56,6 +56,7 @@ import liquidationsRoutes from './routes/liquidations/liquidations.routes';
 import topTradersRoutes from './routes/toptraders/toptraders.routes';
 import activeUsersRoutes from './routes/activeusers/activeusers.routes';
 import buildersRoutes from './routes/builders/builders.routes';
+import indexerRoutes from './routes/indexer';
 
 const app = express();
 const server = createServer(app);
@@ -139,6 +140,7 @@ app.use('/liquidations', liquidationsRoutes);
 app.use('/top-traders', topTradersRoutes);
 app.use('/active-users', activeUsersRoutes);
 app.use('/builders', buildersRoutes);
+app.use('/indexer', indexerRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 

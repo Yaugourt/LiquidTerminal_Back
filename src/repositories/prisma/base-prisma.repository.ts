@@ -5,6 +5,36 @@ import { BasePagination } from '../../types/common.types';
 
 export type PrismaTransactionClient = Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
 
+const REPOSITORY_LOG_ERROR_MESSAGE_MAX = 1000;
+
+/** Avoid logging raw Error/Prisma objects (validation errors embed full query payloads). */
+function serializeRepositoryError(error: unknown): Record<string, string> {
+  if (error instanceof Error) {
+    const meta: Record<string, string> = {
+      errorName: error.name,
+      errorMessage:
+        error.message.length > REPOSITORY_LOG_ERROR_MESSAGE_MAX
+          ? `${error.message.slice(0, REPOSITORY_LOG_ERROR_MESSAGE_MAX)}…`
+          : error.message,
+    };
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      typeof (error as { code: unknown }).code === 'string'
+    ) {
+      meta.errorCode = (error as { code: string }).code;
+    }
+    return meta;
+  }
+  return { errorMessage: String(error) };
+}
+
+export type ExecuteWithErrorHandlingOptions = {
+  /** When false, skip per-operation "Starting" / "completed successfully" info logs (context still attached on errors). */
+  verboseSuccess?: boolean;
+};
+
 export abstract class BasePrismaRepository {
   protected prismaClient: PrismaClient | PrismaTransactionClient = prisma;
 
@@ -33,19 +63,25 @@ export abstract class BasePrismaRepository {
   protected async executeWithErrorHandling<T>(
     operation: () => Promise<T>,
     operationName: string,
-    context?: Record<string, unknown>
+    context?: Record<string, unknown>,
+    options?: ExecuteWithErrorHandlingOptions
   ): Promise<T> {
+    const verboseSuccess = options?.verboseSuccess !== false;
     try {
-      if (context) {
+      if (context && verboseSuccess) {
         logDeduplicator.info(`Starting ${operationName}`, context);
       }
       const result = await operation();
-      if (context) {
+      if (context && verboseSuccess) {
         logDeduplicator.info(`${operationName} completed successfully`, context);
       }
       return result;
     } catch (error) {
-      logDeduplicator.error(`Error in ${operationName}`, { error, context });
+      const payload: Record<string, unknown> = {
+        ...serializeRepositoryError(error),
+        ...(context ?? {}),
+      };
+      logDeduplicator.error(`Error in ${operationName}`, payload);
       throw error;
     }
   }

@@ -153,7 +153,7 @@ export class LiquidationsWebSocketService {
       return;
     }
 
-    logDeduplicator.info('LiquidationsWebSocketService: Processing liquidations', {
+    logDeduplicator.debug('LiquidationsWebSocketService: Processing liquidations', {
       received: liquidations.length,
       valid: validLiquidations.length,
     });
@@ -270,7 +270,7 @@ export class LiquidationsWebSocketService {
     // Sort by time_ms
     result.sort((a, b) => a.time_ms - b.time_ms);
 
-    logDeduplicator.info('LiquidationsWebSocketService: Broadcasting aggregated liquidations', {
+    logDeduplicator.debug('LiquidationsWebSocketService: Broadcasting aggregated liquidations', {
       count: result.length,
     });
 

@@ -112,6 +112,14 @@ External clients extend `BaseApiService` providing:
 - **Avoid** `any` - use `unknown` if type is truly unknown
 - Strict mode is enabled
 
+### Indexer / HypeDexer GET routes (`src/routes/indexer/`)
+
+Indexer routes are **GET-only** proxies to HypeDexer. Use **`validateGetRequest`** from `src/middleware/validation` and Zod schemas in `src/schemas/indexer/` with **`query` + `params` only** (never require `body`, since `req.body` is undefined on GET). Reserve **`validateRequest`** for routes that actually send a JSON body (POST/PUT/PATCH). Smoke coverage: `tests/integration/routes/indexer.validation.smoke.test.ts`.
+
+**Required query params** must match HypeDexer’s OpenAPI (`docs/hypedexer_endpoints.json`). Regenerate the machine-readable list with `npm run hypedexer:required-query` → `docs/hypedexer-required-query.json`. Missing required params should fail with **400** validation on LiquidTerminal, not **502** from upstream `422`.
+
+Other GET routes (e.g. liquidations, builders) may still use `validateRequest` with Zod shapes that **omit** `body`; that works because unknown keys are stripped, but prefer `validateGetRequest` for new GET-only endpoints for clarity.
+
 ---
 
 ## Adding New Features

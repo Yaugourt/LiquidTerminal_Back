@@ -5,7 +5,10 @@ module.exports = {
   transform: {
     '^.+\\.(ts|tsx)$': 'ts-jest',
   },
-  testMatch: ['**/*.test.ts'],
+  testPathIgnorePatterns: ['/node_modules/', '/dist/', '/\\.agents/'],
+  testMatch: ['<rootDir>/tests/**/*.test.ts', '<rootDir>/src/**/*.test.ts'],
+  /** Integration tests pull Express + middleware with timers; avoid hanging CI */
+  forceExit: true,
   globals: {
     'ts-jest': {
       tsconfig: 'tsconfig.json',

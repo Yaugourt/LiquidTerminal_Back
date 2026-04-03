@@ -1,4 +1,4 @@
-import { HLIndexerActiveUsersClient } from '../../clients/hlindexer/activeusers/activeusers.client';
+import { HLIndexerActiveUsersClient } from '../../clients/hypedexer/rest/activeusers/activeusers.client';
 import {
   ActiveUsersResponse,
   ActiveUsersQueryParams,

@@ -30,7 +30,8 @@ export class PrismaHistoricalLiquidationRepository
         });
       },
       'batch insert raw liquidations',
-      { count: data.length }
+      { count: data.length },
+      { verboseSuccess: false }
     );
   }
 
@@ -63,7 +64,8 @@ export class PrismaHistoricalLiquidationRepository
         });
       },
       'upserting ingestion state',
-      { lastTid: Number(lastTid), newCount }
+      { lastTid: Number(lastTid), newCount },
+      { verboseSuccess: false }
     );
   }
 

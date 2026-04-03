@@ -509,4 +509,34 @@ this.clients.set('new', newClient);
 - External service checks
 - Client and connection status
 
-This architecture allows for easy extensibility and simplified maintenance. Each layer has its responsibility and patterns are consistent across the application. 
+This architecture allows for easy extensibility and simplified maintenance. Each layer has its responsibility and patterns are consistent across the application.
+
+## 11. HypeDexer (HL Indexer) REST expansion
+
+**OpenAPI source:** `docs/hypedexer_endpoints.json` (refresh from `https://api-eu.hypedexer.com/openapi.json` if needed). **Inventory:** `npm run hypedexer:inventory` → `docs/hypedexer_endpoints.inventory.md`.
+
+### Folder layout (new code)
+
+- `src/clients/hypedexer/rest/<domain>/` — **all** HL Indexer HTTP clients: pass-through (`/indexer/*`) and **polling** clients used by legacy app routes (`liquidations/`, `toptraders/`, `activeusers/`, `builders/builders-list-poller.client.ts` alongside `builders-indexer.client.ts`). One domain per folder; keep files under ~300 lines; split if needed.
+- `src/clients/hypedexer/websocket/` — WebSocket clients (unchanged).
+
+### Public HTTP surface
+
+New passthrough routes are mounted under **`/indexer/...`** (e.g. `/indexer/fills`, `/indexer/users/leaderboard`, `/indexer/overview/...`) to avoid colliding with `/user` (auth) and existing `/liquidations`, `/top-traders`, etc.
+
+**Coverage:** All OpenAPI REST paths are listed in `HYPEDEXER_REST_INDEXER_MOUNT` in `scripts/hypedexer-openapi-inventory.ts` and should show as **Implemented** in `docs/hypedexer_endpoints.inventory.md` except **`GET /ws`** (use `src/clients/hypedexer/websocket/`). **`/indexer/vaults/*`** is the HypeDexer vault indexer; do not confuse with Hyperliquid **`/market/vaults`**. **`/indexer/builders/*`** mirrors OpenAPI builders; the **`/builders`** app route uses the Redis-backed poller **`HLIndexerBuildersClient`** in `rest/builders/builders-list-poller.client.ts` (GET **`/builders/list`** upstream).
+
+### Redis and polling
+
+- Conventions: `src/constants/hypedexer.cache.ts` (channels, lock names, suggested TTLs).
+- **Do not** add polling for heavy history endpoints (`/fills/`, etc.); use **on-demand** + optional short TTL for small hot keys (e.g. counts).
+- When adding pollers: **one** `publish` per batch refresh, **`withDistributedLock`** across instances (same pattern as builders).
+
+### Checklist per new endpoint
+
+1. Types (`src/types/` or `types/hypedexer/…`)
+2. Zod query/path schema (`src/schemas/…`)
+3. Client method (`BaseApiService` + circuit breaker + rate limiter)
+4. Thin service (cache only if justified)
+5. Route + `marketRateLimiter` + `validateRequest`
+6. `ClientInitializerService` **only** if `startPolling` or global lifecycle is required

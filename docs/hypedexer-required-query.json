@@ -1,0 +1,137 @@
+{
+  "generatedFrom": "docs/hypedexer_endpoints.json",
+  "generatedAt": "2026-04-01T19:37:53.675Z",
+  "count": 10,
+  "operations": [
+    {
+      "path": "/funding/fundingHistory",
+      "method": "get",
+      "requiredQuery": [
+        "coin"
+      ],
+      "allQuery": [
+        "coin*",
+        "startTime",
+        "endTime",
+        "limit"
+      ]
+    },
+    {
+      "path": "/funding/userFunding",
+      "method": "get",
+      "requiredQuery": [
+        "user"
+      ],
+      "allQuery": [
+        "user*",
+        "startTime",
+        "endTime",
+        "limit"
+      ]
+    },
+    {
+      "path": "/hip3/ohlcv",
+      "method": "get",
+      "requiredQuery": [
+        "coin"
+      ],
+      "allQuery": [
+        "coin*",
+        "dex_id",
+        "start",
+        "end",
+        "limit"
+      ]
+    },
+    {
+      "path": "/hip3/oracle/stats",
+      "method": "get",
+      "requiredQuery": [
+        "dex_id"
+      ],
+      "allQuery": [
+        "dex_id*",
+        "asset_id",
+        "start",
+        "end",
+        "limit"
+      ]
+    },
+    {
+      "path": "/overview/coin-distribution",
+      "method": "get",
+      "requiredQuery": [
+        "user"
+      ],
+      "allQuery": [
+        "user*"
+      ]
+    },
+    {
+      "path": "/vaults/dailySnapshots",
+      "method": "get",
+      "requiredQuery": [
+        "vaultAddress"
+      ],
+      "allQuery": [
+        "vaultAddress*",
+        "startTime",
+        "endTime",
+        "limit"
+      ]
+    },
+    {
+      "path": "/vaults/equitySnapshots",
+      "method": "get",
+      "requiredQuery": [
+        "vaultAddress"
+      ],
+      "allQuery": [
+        "vaultAddress*",
+        "startTime",
+        "endTime",
+        "limit"
+      ]
+    },
+    {
+      "path": "/vaults/userVaultEquities",
+      "method": "get",
+      "requiredQuery": [
+        "user"
+      ],
+      "allQuery": [
+        "user*",
+        "startTime",
+        "endTime",
+        "limit"
+      ]
+    },
+    {
+      "path": "/vaults/vaultDetails",
+      "method": "get",
+      "requiredQuery": [
+        "vaultAddress"
+      ],
+      "allQuery": [
+        "vaultAddress*",
+        "startTime",
+        "endTime",
+        "limit"
+      ]
+    },
+    {
+      "path": "/vaults/vaultLedger",
+      "method": "get",
+      "requiredQuery": [
+        "vaultAddress"
+      ],
+      "allQuery": [
+        "vaultAddress*",
+        "user",
+        "startTime",
+        "endTime",
+        "limit"
+      ]
+    }
+  ]
+}

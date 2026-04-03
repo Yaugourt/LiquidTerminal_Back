@@ -248,7 +248,7 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
       return;
     }
 
-    logDeduplicator.info('HypeDexerLiquidationsWSClient: Received liquidations', {
+    logDeduplicator.debug('HypeDexerLiquidationsWSClient: Received liquidations', {
       count,
       actualCount: data.length,
     });

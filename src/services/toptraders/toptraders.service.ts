@@ -1,4 +1,4 @@
-import { HLIndexerTopTradersClient } from '../../clients/hlindexer/toptraders/toptraders.client';
+import { HLIndexerTopTradersClient } from '../../clients/hypedexer/rest/toptraders/toptraders.client';
 import {
   TopTradersResponse,
   TopTradersQueryParams,

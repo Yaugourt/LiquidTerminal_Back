@@ -1,4 +1,4 @@
-import { HLIndexerBuildersClient } from '../../clients/hlindexer/builders/builders.client';
+import { HLIndexerBuildersClient } from '../../clients/hypedexer/rest/builders/builders-list-poller.client';
 import {
   Builder,
   BuildersQueryParams,

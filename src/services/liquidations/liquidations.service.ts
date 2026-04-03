@@ -1,4 +1,4 @@
-import { HLIndexerLiquidationsClient } from '../../clients/hlindexer/liquidations/liquidations.client';
+import { HLIndexerLiquidationsClient } from '../../clients/hypedexer/rest/liquidations/liquidations.client';
 import {
   LiquidationResponse,
   LiquidationQueryParams,

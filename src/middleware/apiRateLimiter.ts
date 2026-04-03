@@ -119,8 +119,7 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
 async function incrementAndGetCount(key: string, now: number, window: number): Promise<number> {
   try {
     // ✅ Utiliser un pipeline Redis pour grouper les 4 commandes en 1 seul round-trip
-    const redis = (redisService as any).redisNormal || (redisService as any).redis;
-    
+    const redis = redisService.getClient();
     const pipeline = redis.pipeline();
     pipeline.zadd(key, now, `${now}`);           // Ajouter le timestamp actuel
     pipeline.zremrangebyscore(key, 0, now - window); // Nettoyer les anciennes entrées

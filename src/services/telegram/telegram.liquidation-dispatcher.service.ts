@@ -116,7 +116,7 @@ export class TelegramLiquidationDispatcherService {
 
       this.cacheLoadedAt = Date.now();
 
-      logDeduplicator.info('TelegramLiquidationDispatcherService: Subscription cache refreshed', {
+      logDeduplicator.debug('TelegramLiquidationDispatcherService: Subscription cache refreshed', {
         count: this.subscriptionCache.length,
       });
     } catch (error) {
