@@ -39,7 +39,7 @@ export class LeaderboardService {
           });
         }
       } catch (error) {
-        logDeduplicator.error('Error processing leaderboard update notification:', { error });
+        logDeduplicator.error('Error processing leaderboard update notification:', { error: error instanceof Error ? error.message : String(error) });
       }
     });
   }
@@ -75,7 +75,7 @@ export class LeaderboardService {
       if (error instanceof LeaderboardError) {
         throw error;
       }
-      logDeduplicator.error('Error retrieving leaderboard:', { error, params });
+      logDeduplicator.error('Error retrieving leaderboard:', { error: error instanceof Error ? error.message : String(error), params });
       throw new LeaderboardError('Failed to retrieve leaderboard data');
     }
   }
@@ -185,7 +185,7 @@ export class LeaderboardService {
 
       return entry || null;
     } catch (error) {
-      logDeduplicator.error('Error retrieving leaderboard entry:', { error, ethAddress });
+      logDeduplicator.error('Error retrieving leaderboard entry:', { error: error instanceof Error ? error.message : String(error), ethAddress });
       return null;
     }
   }

@@ -45,13 +45,13 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
     logDeduplicator.info('Starting spot deploy polling');
     // Faire une première mise à jour immédiate
     this.updateDeployState().catch(error => {
-      logDeduplicator.error('Error in initial spot deploy update:', { error });
+      logDeduplicator.error('Error in initial spot deploy update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateDeployState().catch(error => {
-        logDeduplicator.error('Error in spot deploy polling:', { error });
+        logDeduplicator.error('Error in spot deploy polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, this.UPDATE_INTERVAL);
   }
@@ -84,7 +84,7 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
         lastUpdate: this.lastUpdate
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update spot deploy state:', { error });
+      logDeduplicator.error('Failed to update spot deploy state:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -110,7 +110,7 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
       }
       return JSON.parse(freshData) as GasAuctionResponse;
     } catch (error) {
-      logDeduplicator.error('Error fetching spot deploy state:', { error });
+      logDeduplicator.error('Error fetching spot deploy state:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

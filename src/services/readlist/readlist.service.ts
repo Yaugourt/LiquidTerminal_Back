@@ -110,7 +110,7 @@ export class ReadListService extends BaseService<
         CACHE_TTL.SHORT // Cache court pour les permissions
       );
     } catch (error) {
-      logDeduplicator.error('Error checking read list access:', { error, readListId, userId });
+      logDeduplicator.error('Error checking read list access:', { error: error instanceof Error ? error.message : String(error), readListId, userId });
       return false;
     }
   }
@@ -135,7 +135,7 @@ export class ReadListService extends BaseService<
       if (error instanceof ReadListNotFoundError || error instanceof ReadListPermissionError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching read list with permission:', { error, id, userId });
+      logDeduplicator.error('Error fetching read list with permission:', { error: error instanceof Error ? error.message : String(error), id, userId });
       throw error;
     }
   }
@@ -160,7 +160,7 @@ export class ReadListService extends BaseService<
         CACHE_TTL.MEDIUM
       );
     } catch (error) {
-      logDeduplicator.error('Error fetching read lists by user:', { error, userId });
+      logDeduplicator.error('Error fetching read lists by user:', { error: error instanceof Error ? error.message : String(error), userId });
       throw error;
     }
   }
@@ -189,7 +189,7 @@ export class ReadListService extends BaseService<
         CACHE_TTL.MEDIUM
       );
     } catch (error) {
-      logDeduplicator.error('Error fetching public read lists:', { error, query });
+      logDeduplicator.error('Error fetching public read lists:', { error: error instanceof Error ? error.message : String(error), query });
       throw error;
     }
   }
@@ -357,7 +357,7 @@ export class ReadListService extends BaseService<
 
       return completeReadList;
     } catch (error) {
-      logDeduplicator.error('Error copying read list:', { error, readListId, userId });
+      logDeduplicator.error('Error copying read list:', { error: error instanceof Error ? error.message : String(error), readListId, userId });
       throw error;
     }
   }

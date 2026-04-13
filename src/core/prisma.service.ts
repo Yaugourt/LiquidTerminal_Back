@@ -48,7 +48,7 @@ class PrismaService {
           logDeduplicator.info('Successfully connected to database');
         })
         .catch((error: unknown) => {
-          logDeduplicator.error('Failed to connect to database', { error });
+          logDeduplicator.error('Failed to connect to database', { error: error instanceof Error ? error.message : String(error) });
         });
     }
     

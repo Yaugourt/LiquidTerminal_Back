@@ -44,13 +44,13 @@ export class HypurrscanStakedHoldersClient extends BaseApiService {
     logDeduplicator.info('Starting Hypurrscan staked holders polling');
     // Faire une première mise à jour immédiate
     this.updateStakedHolders().catch(error => {
-      logDeduplicator.error('Error in initial staked holders update:', { error });
+      logDeduplicator.error('Error in initial staked holders update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateStakedHolders().catch(error => {
-        logDeduplicator.error('Error in staked holders polling:', { error });
+        logDeduplicator.error('Error in staked holders polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, HypurrscanStakedHoldersClient.UPDATE_INTERVAL);
   }
@@ -91,7 +91,7 @@ export class HypurrscanStakedHoldersClient extends BaseApiService {
         });
       }
     } catch (error) {
-      logDeduplicator.error('Failed to update staked holders data:', { error });
+      logDeduplicator.error('Failed to update staked holders data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -114,7 +114,7 @@ export class HypurrscanStakedHoldersClient extends BaseApiService {
       }
       return JSON.parse(freshData);
     } catch (error) {
-      logDeduplicator.error('Error fetching staked holders:', { error });
+      logDeduplicator.error('Error fetching staked holders:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

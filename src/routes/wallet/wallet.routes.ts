@@ -62,9 +62,9 @@ router.post("/bulk-add", validatePrivyToken, validateBulkAddWallet, (async (req:
       data: result
     });
   } catch (error) {
-    logDeduplicator.error('Error in bulk wallet import:', { 
-      error, 
-      body: req.body 
+    logDeduplicator.error('Error in bulk wallet import:', {
+      error: error instanceof Error ? error.message : String(error),
+      body: req.body
     });
 
     if (error instanceof WalletAlreadyExistsError ||
@@ -116,9 +116,9 @@ router.post("/bulk-delete", validatePrivyToken, validateBulkDeleteWallet, (async
       data: result
     });
   } catch (error) {
-    logDeduplicator.error('Error in bulk wallet delete:', { 
-      error, 
-      body: req.body 
+    logDeduplicator.error('Error in bulk wallet delete:', {
+      error: error instanceof Error ? error.message : String(error),
+      body: req.body
     });
 
     if (error instanceof UserNotFoundError ||
@@ -196,10 +196,10 @@ router.post("/", validatePrivyToken, validateCreateWallet, (async (req: Request,
           itemId: walletListItem.id
         });
       } catch (error) {
-        logDeduplicator.error('Error adding wallet to list:', { 
-          error, 
-          userWalletId: userWallet.id, 
-          walletListId 
+        logDeduplicator.error('Error adding wallet to list:', {
+          error: error instanceof Error ? error.message : String(error),
+          userWalletId: userWallet.id,
+          walletListId
         });
         
         // Si l'erreur vient de la wallet list, on retourne une erreur spécifique
@@ -215,7 +215,7 @@ router.post("/", validatePrivyToken, validateCreateWallet, (async (req: Request,
         logDeduplicator.warn('Wallet created but failed to add to list', {
           userWalletId: userWallet.id,
           walletListId,
-          error: error
+          error: error instanceof Error ? error.message : String(error)
         });
       }
     }
@@ -239,7 +239,7 @@ router.post("/", validatePrivyToken, validateCreateWallet, (async (req: Request,
       }
     });
   } catch (error) {
-    logDeduplicator.error('Error adding wallet:', { error, body: req.body });
+    logDeduplicator.error('Error adding wallet:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     
     if (error instanceof WalletAlreadyExistsError ||
         error instanceof UserNotFoundError) {
@@ -287,7 +287,7 @@ router.get("/my-wallets", validatePrivyToken, (async (req: Request, res: Respons
       pagination: wallets.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error retrieving wallets:', { error, privyUserId: req.user?.sub });
+    logDeduplicator.error('Error retrieving wallets:', { error: error instanceof Error ? error.message : String(error), privyUserId: req.user?.sub });
 
     if (error instanceof WalletError) {
       return res.status(error.statusCode).json({
@@ -315,7 +315,7 @@ router.get("/", validateWalletQuery, (async (req: Request, res: Response) => {
       pagination: wallets.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching all wallets:', { error });
+    logDeduplicator.error('Error fetching all wallets:', { error: error instanceof Error ? error.message : String(error) });
 
     if (error instanceof WalletError) {
       return res.status(error.statusCode).json({
@@ -347,7 +347,7 @@ router.get("/:id", (async (req: Request, res: Response) => {
       data: wallet
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching wallet:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching wallet:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
 
     if (error instanceof WalletError) {
       return res.status(error.statusCode).json({
@@ -400,7 +400,7 @@ router.put("/:id", validatePrivyToken, validateUpdateWallet, (async (req: Reques
       data: updatedWallet
     });
   } catch (error) {
-    logDeduplicator.error('Error updating wallet:', { error, id: req.params.id, body: req.body });
+    logDeduplicator.error('Error updating wallet:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, body: req.body });
 
     if (error instanceof WalletError) {
       return res.status(error.statusCode).json({
@@ -448,7 +448,7 @@ router.delete("/:id", validatePrivyToken, (async (req: Request, res: Response) =
       message: "Wallet supprimé avec succès."
     });
   } catch (error) {
-    logDeduplicator.error('Error removing wallet:', { error, id: req.params.id });
+    logDeduplicator.error('Error removing wallet:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     
     if (error instanceof WalletError) {
       return res.status(error.statusCode).json({

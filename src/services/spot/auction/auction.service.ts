@@ -34,7 +34,7 @@ export class AuctionPageService {
           logDeduplicator.info('Hypurrscan cache updated', { timestamp });
         }
       } catch (error) {
-        logDeduplicator.error('Error processing cache update:', { error });
+        logDeduplicator.error('Error processing cache update:', { error: error instanceof Error ? error.message : String(error) });
       }
     });
   }
@@ -151,7 +151,7 @@ export class AuctionPageService {
       if (error instanceof AuctionError) {
         throw error;
       }
-      logDeduplicator.error('Error retrieving auctions:', { error });
+      logDeduplicator.error('Error retrieving auctions:', { error: error instanceof Error ? error.message : String(error) });
       throw new AuctionError('Failed to retrieve auctions data');
     }
   }
@@ -166,7 +166,7 @@ export class AuctionPageService {
       });
       return timing;
     } catch (error) {
-      logDeduplicator.error('Error fetching auction timing:', { error });
+      logDeduplicator.error('Error fetching auction timing:', { error: error instanceof Error ? error.message : String(error) });
       throw new AuctionError(error instanceof Error ? error.message : 'Failed to fetch auction timing');
     }
   }

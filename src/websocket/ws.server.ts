@@ -276,10 +276,10 @@ export class InternalWebSocketServer {
   private handleSubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
     const subType = message.subscription?.type;
 
-    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event')) {
+    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event' && subType !== 'liquidation_alert')) {
       this.sendMessage(ws, {
         type: 'error',
-        error: 'Invalid subscription type. Supported: liquidation, wallet_event',
+        error: 'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -289,7 +289,7 @@ export class InternalWebSocketServer {
     // Check if already subscribed to this type
     const existingIndex = client.subscriptions.findIndex((s) => s.type === subType);
     if (existingIndex >= 0) {
-      // Update existing subscription filters (wallet_event has no filters)
+      // Update existing subscription filters (wallet_event and liquidation_alert have no filters)
       if (subType === 'liquidation') {
         client.subscriptions[existingIndex].filters = message.subscription?.filters || {};
       }
@@ -323,10 +323,10 @@ export class InternalWebSocketServer {
   private handleUnsubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
     const subType = message.subscription?.type;
 
-    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event')) {
+    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event' && subType !== 'liquidation_alert')) {
       this.sendMessage(ws, {
         type: 'error',
-        error: 'Invalid subscription type. Supported: liquidation, wallet_event',
+        error: 'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -497,6 +497,41 @@ export class InternalWebSocketServer {
         telegramId,
         tradeId: trade.tradeId,
         coin: trade.coin,
+        clientCount: sentCount,
+      });
+    }
+  }
+
+  /**
+   * Broadcast a liquidation alert to all clients subscribed to 'liquidation_alert'.
+   * The Telegram bot (1 connected client) receives the event and routes it
+   * to the correct Telegram user via telegramId in the payload.
+   */
+  public broadcastLiquidationAlert(telegramId: string, message: string): void {
+    if (!this.wss) return;
+
+    const serialized = JSON.stringify({
+      type: 'liquidation_alert',
+      data: { telegramId, message },
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    let sentCount = 0;
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      const client = this.clients.get(clientId);
+      if (!client) continue;
+
+      const hasSub = client.subscriptions.some((s) => s.type === 'liquidation_alert');
+      if (!hasSub) continue;
+
+      this.sendRawMessage(ws, serialized);
+      sentCount++;
+    }
+
+    if (sentCount > 0) {
+      logDeduplicator.info('InternalWebSocketServer: Broadcast liquidation alert', {
+        telegramId,
         clientCount: sentCount,
       });
     }

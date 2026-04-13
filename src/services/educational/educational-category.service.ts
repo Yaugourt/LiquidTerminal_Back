@@ -118,7 +118,7 @@ export class EducationalCategoryService extends BaseService<
       if (error instanceof EducationalCategoryNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching resources by educational category:', { error, categoryId });
+      logDeduplicator.error('Error fetching resources by educational category:', { error: error instanceof Error ? error.message : String(error), categoryId });
       throw error;
     }
   }
@@ -169,7 +169,7 @@ export class EducationalCategoryService extends BaseService<
     try {
       return await this.repository.findByName(name);
     } catch (error) {
-      logDeduplicator.error('Error finding category by name:', { error, name });
+      logDeduplicator.error('Error finding category by name:', { error: error instanceof Error ? error.message : String(error), name });
       throw error;
     }
   }

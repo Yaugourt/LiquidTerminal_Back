@@ -43,7 +43,7 @@ router.post('/', validatePrivyToken, requireModerator, validateCreateEducational
       data: category
     });
   } catch (error) {
-    logDeduplicator.error('Error creating educational category:', { error, body: req.body });
+    logDeduplicator.error('Error creating educational category:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -71,7 +71,7 @@ router.get('/', validateGetRequest(educationalCategoriesGetSchema), (async (req:
       pagination: categories.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching educational categories:', { error });
+    logDeduplicator.error('Error fetching educational categories:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -107,7 +107,7 @@ router.get('/:id', validateGetRequest(educationalCategoryByIdGetSchema), (async 
       data: category
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching educational category:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching educational category:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -143,7 +143,7 @@ router.get('/:id/resources', validateGetRequest(educationalCategoryResourcesGetS
       data: resources
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching resources by category:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching resources by category:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -180,7 +180,7 @@ router.put('/:id', validatePrivyToken, requireModerator, validateUpdateEducation
       data: category
     });
   } catch (error) {
-    logDeduplicator.error('Error updating educational category:', { error, id: req.params.id, body: req.body });
+    logDeduplicator.error('Error updating educational category:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, body: req.body });
     
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({
@@ -216,7 +216,7 @@ router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, re
       message: 'Educational category deleted successfully'
     });
   } catch (error) {
-    logDeduplicator.error('Error deleting educational category:', { error, id: req.params.id });
+    logDeduplicator.error('Error deleting educational category:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({

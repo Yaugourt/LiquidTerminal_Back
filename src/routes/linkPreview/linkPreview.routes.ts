@@ -45,7 +45,7 @@ router.post('/batch', validateRequest(linkPreviewBatchPostSchema), (async (req: 
     });
 
   } catch (error) {
-    logDeduplicator.error('Batch link preview error:', { error, body: req.body });
+    logDeduplicator.error('Batch link preview error:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     
     if (error instanceof LinkPreviewError) {
       return res.status(error.statusCode).json({ 
@@ -92,7 +92,7 @@ router.get('/:id', validateRequest(linkPreviewByIdGetSchema), (async (req: Reque
     });
 
   } catch (error) {
-    logDeduplicator.error('Link preview by ID route error:', { error, params: req.params });
+    logDeduplicator.error('Link preview by ID route error:', { error: error instanceof Error ? error.message : String(error), params: req.params });
     
     if (error instanceof LinkPreviewError) {
       return res.status(error.statusCode).json({ 
@@ -122,7 +122,7 @@ router.get('/', validateRequest(linkPreviewListSchema), (async (req: Request, re
     });
 
   } catch (error) {
-    logDeduplicator.error('Link preview list route error:', { error, query: req.query });
+    logDeduplicator.error('Link preview list route error:', { error: error instanceof Error ? error.message : String(error), query: req.query });
     
     if (error instanceof LinkPreviewError) {
       return res.status(error.statusCode).json({ 

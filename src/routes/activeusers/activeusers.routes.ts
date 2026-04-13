@@ -78,7 +78,7 @@ router.get('/',
 
       res.json(response);
     } catch (error) {
-      logDeduplicator.error('Error fetching active users:', { error });
+      logDeduplicator.error('Error fetching active users:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof ActiveUsersError) {
         return res.status(error.statusCode).json({

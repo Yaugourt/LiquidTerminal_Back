@@ -14,19 +14,25 @@ import { HypurrscanFeesClient } from '../clients/hypurrscan/fees.client';
 import { HyperliquidGlobalStatsClient } from '../clients/hyperliquid/globalstats.client';
 import { HyperliquidLeaderboardClient } from '../clients/hyperliquid/leaderboard/leaderboard.client';
 import { HypurrscanStakedHoldersClient } from '../clients/hypurrscan/stakedHolders.client';
-import { LiquidationsService } from '../services/liquidations/liquidations.service';
+import { HLIndexerLiquidationsClient } from '../clients/hypedexer/rest/liquidations/liquidations.client';
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
-import { TopTradersService } from '../services/toptraders/toptraders.service';
-import { ActiveUsersService } from '../services/activeusers/activeusers.service';
+import { HLIndexerTopTradersClient } from '../clients/hypedexer/rest/toptraders/toptraders.client';
+import { HLIndexerActiveUsersClient } from '../clients/hypedexer/rest/activeusers/activeusers.client';
+import { HLIndexerBuildersClient } from '../clients/hypedexer/rest/builders/builders-list-poller.client';
 import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
 import { LiquidationsBackfillService } from '../services/liquidations/liquidations.backfill.service';
 import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
+import { TelegramLiquidationDispatcherService } from '../services/telegram/telegram.liquidation-dispatcher.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
+
+export type StartupStatus = 'booting' | 'ready' | 'degraded';
 
 export class ClientInitializerService {
   private static instance: ClientInitializerService;
   private clients: Map<string, any> = new Map();
+  private startupStatus: StartupStatus = 'booting';
+  private dailyBackfillTimer: NodeJS.Timeout | null = null;
 
   private constructor() {}
 
@@ -47,7 +53,7 @@ export class ClientInitializerService {
       ]);
       logDeduplicator.info('All clients initialized successfully');
     } catch (error) {
-      logDeduplicator.error('Error initializing clients:', { error });
+      logDeduplicator.error('Error initializing clients:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -70,6 +76,7 @@ export class ClientInitializerService {
 
   public async initialize(): Promise<void> {
     try {
+      this.startupStatus = 'booting';
       logDeduplicator.info('Starting client initialization...');
 
       // ✅ Redis est déjà prêt, on peut initialiser les clients directement
@@ -140,9 +147,9 @@ export class ClientInitializerService {
       const stakedHoldersClient = HypurrscanStakedHoldersClient.getInstance();
       this.clients.set('stakedHolders', stakedHoldersClient);
 
-      // Initialiser le service Liquidations (background polling)
-      const liquidationsService = LiquidationsService.getInstance();
-      this.clients.set('liquidations', liquidationsService);
+      // Initialiser le client Liquidations HLIndexer (polling disabled - data from historical DB)
+      const liquidationsClient = HLIndexerLiquidationsClient.getInstance();
+      this.clients.set('liquidations', liquidationsClient);
 
       // Initialiser le SSE Manager pour les liquidations temps réel (legacy, keep for backward compatibility)
       const sseManager = SSEManagerService.getInstance();
@@ -155,15 +162,20 @@ export class ClientInitializerService {
       this.clients.set('liquidationsWS', liquidationsWSService);
       logDeduplicator.info('Liquidations WebSocket Service initialized successfully');
 
-      // Initialiser le service Top Traders (background polling every 60s)
-      const topTradersService = TopTradersService.getInstance();
-      this.clients.set('topTraders', topTradersService);
-      logDeduplicator.info('Top Traders service initialized successfully');
+      // Initialiser le client Top Traders (background polling + cache handled by client)
+      const topTradersClient = HLIndexerTopTradersClient.getInstance();
+      this.clients.set('topTraders', topTradersClient);
+      logDeduplicator.info('Top Traders client initialized successfully');
 
-      // Initialiser le service Active Users (background polling every 60s)
-      const activeUsersService = ActiveUsersService.getInstance();
-      this.clients.set('activeUsers', activeUsersService);
-      logDeduplicator.info('Active Users service initialized successfully');
+      // Initialiser le client Active Users (background polling every 60s - client owns cache)
+      const activeUsersClient = HLIndexerActiveUsersClient.getInstance();
+      this.clients.set('activeUsers', activeUsersClient);
+      logDeduplicator.info('Active Users client initialized successfully');
+
+      // Initialiser le client Builders (background polling every 5min - client owns cache)
+      const buildersClient = HLIndexerBuildersClient.getInstance();
+      this.clients.set('builders', buildersClient);
+      logDeduplicator.info('Builders client initialized successfully');
 
       // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
       const ingestionService = LiquidationsIngestionService.getInstance();
@@ -180,28 +192,57 @@ export class ClientInitializerService {
       this.clients.set('walletDispatcher', walletDispatcher);
       logDeduplicator.info('Telegram Wallet Dispatcher service initialized successfully');
 
+      // Initialiser le dispatcher liquidations pour le bot Telegram
+      const liquidationDispatcher = TelegramLiquidationDispatcherService.getInstance();
+      this.clients.set('liquidationDispatcher', liquidationDispatcher);
+      logDeduplicator.info('Telegram Liquidation Dispatcher service initialized successfully');
+
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
+      this.startupStatus = 'ready';
 
       logDeduplicator.info('All clients initialized successfully');
     } catch (error) {
-      logDeduplicator.error('Error initializing clients:', { error });
+      this.startupStatus = 'degraded';
+      logDeduplicator.error('Error initializing clients:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
+  }
+
+  public getStartupStatus(): StartupStatus {
+    return this.startupStatus;
+  }
+
+  /**
+   * Delays execution for the given number of milliseconds.
+   * Used to stagger polling starts and avoid thundering herd.
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   private async startAllPolling(): Promise<void> {
     logDeduplicator.info('Starting polling for all clients...');
 
-    // 1. Start all standard polling clients
+    // 1. Start all standard polling clients with staggered delays
+    //    to avoid thundering herd (all clients firing at the same instant)
+    let staggerIndex = 0;
+    const STAGGER_DELAY_MS = 2000; // 2s between each client start
+
     for (const [name, client] of this.clients.entries()) {
       if ('startPolling' in client) {
         try {
+          if (staggerIndex > 0) {
+            await this.delay(STAGGER_DELAY_MS);
+          }
           client.startPolling();
-          logDeduplicator.info(`Started polling for ${name} client`);
+          logDeduplicator.info(`Started polling for ${name} client (stagger: ${staggerIndex * STAGGER_DELAY_MS}ms)`);
+          staggerIndex++;
         } catch (error) {
-          logDeduplicator.error(`Error starting polling for ${name} client:`, { error });
+          logDeduplicator.error(`Error starting polling for ${name} client:`, {
+            error: error instanceof Error ? error.message : String(error)
+          });
         }
       }
     }
@@ -213,7 +254,7 @@ export class ClientInitializerService {
         wsClient.start();
         logDeduplicator.info('Started Liquidations WebSocket Service');
       } catch (error) {
-        logDeduplicator.error('Error starting Liquidations WebSocket Service:', { error });
+        logDeduplicator.error('Error starting Liquidations WebSocket Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -224,20 +265,23 @@ export class ClientInitializerService {
         ingestionClient.start();
         logDeduplicator.info('Started Liquidations Ingestion Service');
       } catch (error) {
-        logDeduplicator.error('Error starting Liquidations Ingestion Service:', { error });
+        logDeduplicator.error('Error starting Liquidations Ingestion Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
-    // 4. Run Backfill (REST → DB, awaits completion)
-    //    WS ingestion runs in parallel — skipDuplicates handles overlap
+    // 4. Run Backfill at startup + schedule daily at 03:00 UTC to fill gaps
     const backfillClient = this.clients.get('liquidationsBackfill');
     if (backfillClient) {
-      try {
-        await backfillClient.start();
-        logDeduplicator.info('Liquidations Backfill completed');
-      } catch (error) {
-        logDeduplicator.error('Error during Liquidations Backfill:', { error });
-      }
+      void backfillClient.start()
+        .then(() => {
+          logDeduplicator.info('Liquidations Backfill completed (startup)');
+        })
+        .catch((error: unknown) => {
+          logDeduplicator.error('Error during Liquidations Backfill (startup):', { error: error instanceof Error ? error.message : String(error) });
+        });
+
+      logDeduplicator.info('Started Liquidations Backfill Service in background');
+      this.scheduleDailyBackfill(backfillClient);
     }
 
     // 5. Start Telegram Wallet Dispatcher (connects to HypeDexer completed_trades)
@@ -247,22 +291,77 @@ export class ClientInitializerService {
         walletDispatcher.start();
         logDeduplicator.info('Started Telegram Wallet Dispatcher Service');
       } catch (error) {
-        logDeduplicator.error('Error starting Telegram Wallet Dispatcher Service:', { error });
+        logDeduplicator.error('Error starting Telegram Wallet Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    // 6. Start Telegram Liquidation Dispatcher (subscribes to LiquidationsWebSocketService)
+    const liquidationDispatcher = this.clients.get('liquidationDispatcher');
+    if (liquidationDispatcher) {
+      try {
+        liquidationDispatcher.start();
+        logDeduplicator.info('Started Telegram Liquidation Dispatcher Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Telegram Liquidation Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
     logDeduplicator.info('All client polling started successfully');
   }
 
+  private scheduleDailyBackfill(backfillClient: { start: () => Promise<void> }): void {
+    const scheduleNext = (): void => {
+      const now = new Date();
+      const next = new Date(now);
+      next.setUTCHours(3, 0, 0, 0);
+      if (next.getTime() <= now.getTime()) {
+        next.setUTCDate(next.getUTCDate() + 1);
+      }
+      const delay = next.getTime() - now.getTime();
+
+      logDeduplicator.info('Daily backfill scheduled', {
+        nextRun: next.toISOString(),
+        delayMs: delay,
+      });
+
+      this.dailyBackfillTimer = setTimeout(() => {
+        logDeduplicator.info('Starting daily backfill');
+        void backfillClient.start()
+          .then(() => { logDeduplicator.info('Daily backfill completed'); })
+          .catch((error: unknown) => { logDeduplicator.error('Daily backfill error:', { error: error instanceof Error ? error.message : String(error) }); })
+          .finally(() => { scheduleNext(); });
+      }, delay);
+    };
+
+    scheduleNext();
+  }
+
   public async stopAllPolling(): Promise<void> {
-    // Stop wallet dispatcher first
+    // Stop daily backfill timer
+    if (this.dailyBackfillTimer) {
+      clearTimeout(this.dailyBackfillTimer);
+      this.dailyBackfillTimer = null;
+    }
+
+    // Stop liquidation dispatcher
+    const liquidationDispatcher = this.clients.get('liquidationDispatcher');
+    if (liquidationDispatcher) {
+      try {
+        liquidationDispatcher.stop();
+        logDeduplicator.info('Telegram Liquidation Dispatcher Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Telegram Liquidation Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    // Stop wallet dispatcher
     const walletDispatcher = this.clients.get('walletDispatcher');
     if (walletDispatcher) {
       try {
         walletDispatcher.stop();
         logDeduplicator.info('Telegram Wallet Dispatcher Service stopped');
       } catch (error) {
-        logDeduplicator.error('Error stopping Telegram Wallet Dispatcher Service:', { error });
+        logDeduplicator.error('Error stopping Telegram Wallet Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -273,7 +372,7 @@ export class ClientInitializerService {
         await ingestionClient.stop();
         logDeduplicator.info('Liquidations Ingestion Service stopped (final flush complete)');
       } catch (error) {
-        logDeduplicator.error('Error stopping Liquidations Ingestion Service:', { error });
+        logDeduplicator.error('Error stopping Liquidations Ingestion Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -284,7 +383,7 @@ export class ClientInitializerService {
         backfillClient.stop();
         logDeduplicator.info('Liquidations Backfill Service stopped');
       } catch (error) {
-        logDeduplicator.error('Error stopping Liquidations Backfill Service:', { error });
+        logDeduplicator.error('Error stopping Liquidations Backfill Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -295,7 +394,7 @@ export class ClientInitializerService {
         wsClient.stop();
         logDeduplicator.info('Liquidations WebSocket Service stopped');
       } catch (error) {
-        logDeduplicator.error('Error stopping Liquidations WebSocket Service:', { error });
+        logDeduplicator.error('Error stopping Liquidations WebSocket Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -306,7 +405,7 @@ export class ClientInitializerService {
         sseClient.shutdown();
         logDeduplicator.info('SSE Manager shutdown successfully');
       } catch (error) {
-        logDeduplicator.error('Error shutting down SSE Manager:', { error });
+        logDeduplicator.error('Error shutting down SSE Manager:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
@@ -317,7 +416,7 @@ export class ClientInitializerService {
           client.stopPolling();
           logDeduplicator.info(`Stopped polling for ${name} client`);
         } catch (error) {
-          logDeduplicator.error(`Error stopping polling for ${name} client:`, { error });
+          logDeduplicator.error(`Error stopping polling for ${name} client:`, { error: error instanceof Error ? error.message : String(error) });
         }
       }
     }

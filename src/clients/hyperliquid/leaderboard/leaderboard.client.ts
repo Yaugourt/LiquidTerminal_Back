@@ -43,12 +43,12 @@ export class HyperliquidLeaderboardClient extends BaseApiService {
 
     logDeduplicator.info('Starting leaderboard polling');
     this.updateLeaderboardData().catch(err =>
-      logDeduplicator.error('Error in initial leaderboard update:', { error: err })
+      logDeduplicator.error('Error in initial leaderboard update:', { error: err instanceof Error ? err.message : String(err) })
     );
 
     this.pollingInterval = setInterval(() => {
       this.updateLeaderboardData().catch(err =>
-        logDeduplicator.error('Error in leaderboard polling:', { error: err })
+        logDeduplicator.error('Error in leaderboard polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, this.UPDATE_INTERVAL);
   }
@@ -78,7 +78,7 @@ export class HyperliquidLeaderboardClient extends BaseApiService {
         entries: leaderboardData.leaderboardRows.length,
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update leaderboard data:', { error });
+      logDeduplicator.error('Failed to update leaderboard data:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -95,7 +95,7 @@ export class HyperliquidLeaderboardClient extends BaseApiService {
       const newCachedData = await redisService.get(this.CACHE_KEY);
       return newCachedData ? JSON.parse(newCachedData) : null;
     } catch (error) {
-      logDeduplicator.error('Error getting leaderboard data:', { error });
+      logDeduplicator.error('Error getting leaderboard data:', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }

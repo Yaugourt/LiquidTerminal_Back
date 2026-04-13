@@ -88,7 +88,7 @@ export class PublicGoodService extends BaseService<
 
       return publicGood;
     } catch (error) {
-      logDeduplicator.error('Error creating public good:', { error, data });
+      logDeduplicator.error('Error creating public good:', { error: error instanceof Error ? error.message : String(error), data });
       throw error;
     }
   }
@@ -138,7 +138,7 @@ export class PublicGoodService extends BaseService<
 
       return publicGood;
     } catch (error) {
-      logDeduplicator.error('Error updating public good:', { error, id, data });
+      logDeduplicator.error('Error updating public good:', { error: error instanceof Error ? error.message : String(error), id, data });
       throw error;
     }
   }
@@ -157,7 +157,7 @@ export class PublicGoodService extends BaseService<
       
       logDeduplicator.info('Public good deleted successfully', { id });
     } catch (error) {
-      logDeduplicator.error('Error deleting public good:', { error, id });
+      logDeduplicator.error('Error deleting public good:', { error: error instanceof Error ? error.message : String(error), id });
       throw error;
     }
   }
@@ -179,7 +179,7 @@ export class PublicGoodService extends BaseService<
       
       return result;
     } catch (error) {
-      logDeduplicator.error('Error fetching public goods by submitter:', { error, submitterId });
+      logDeduplicator.error('Error fetching public goods by submitter:', { error: error instanceof Error ? error.message : String(error), submitterId });
       throw error;
     }
   }
@@ -200,7 +200,7 @@ export class PublicGoodService extends BaseService<
       
       return result;
     } catch (error) {
-      logDeduplicator.error('Error fetching pending public goods:', { error });
+      logDeduplicator.error('Error fetching pending public goods:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -238,7 +238,7 @@ export class PublicGoodService extends BaseService<
 
       return publicGood;
     } catch (error) {
-      logDeduplicator.error('Error reviewing public good:', { error, id, reviewData });
+      logDeduplicator.error('Error reviewing public good:', { error: error instanceof Error ? error.message : String(error), id, reviewData });
       throw error;
     }
   }
@@ -250,7 +250,7 @@ export class PublicGoodService extends BaseService<
     try {
       return await this.repository.isOwner(id, userId);
     } catch (error) {
-      logDeduplicator.error('Error checking ownership:', { error, id, userId });
+      logDeduplicator.error('Error checking ownership:', { error: error instanceof Error ? error.message : String(error), id, userId });
       return false;
     }
   }
@@ -303,7 +303,7 @@ export class PublicGoodService extends BaseService<
       
       return result;
     } catch (error) {
-      logDeduplicator.error('Error fetching public goods:', { error, query });
+      logDeduplicator.error('Error fetching public goods:', { error: error instanceof Error ? error.message : String(error), query });
       throw error;
     }
   }

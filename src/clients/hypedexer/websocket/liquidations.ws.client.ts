@@ -5,6 +5,7 @@ import {
   HypeDexerWSEvent,
   HypeDexerWSLiquidation,
   HypeDexerWSLiquidationEvent,
+  HypeDexerWSPingEvent,
   WSConnectionState,
 } from '../../../types/websocket.types';
 import { Liquidation } from '../../../types/liquidations.types';
@@ -58,6 +59,9 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
       }
     );
 
+    if (!HypeDexerLiquidationsWSClient.API_KEY) {
+      logDeduplicator.warn('HypeDexerLiquidationsWSClient: No HL_INDEXER_API_KEY set - Hypedexer may reject the connection');
+    }
     logDeduplicator.info('HypeDexerLiquidationsWSClient: Initialized', {
       url: HypeDexerLiquidationsWSClient.WS_URL,
       hasApiKey: !!HypeDexerLiquidationsWSClient.API_KEY,
@@ -191,8 +195,11 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
           break;
 
         case 'subscription_confirmed':
+        case 'subscription_added':
           this.isSubscribed = true;
-          logDeduplicator.info('HypeDexerLiquidationsWSClient: Subscription confirmed');
+          logDeduplicator.info('HypeDexerLiquidationsWSClient: Subscription confirmed', {
+            type: (event as { type?: string }).type,
+          });
           break;
 
         case 'error':
@@ -205,6 +212,14 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
         case 'welcome':
           // HypeDexer sends a welcome message on connection - ignore it
           logDeduplicator.info('HypeDexerLiquidationsWSClient: Welcome received');
+          break;
+
+        case 'ping':
+          // Heartbeat: HypeDexer expects pong within 60s or closes connection
+          this.send({
+            type: 'pong',
+            ts: (event as HypeDexerWSPingEvent).ts ?? Date.now(),
+          });
           break;
 
         default:
@@ -233,7 +248,7 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
       return;
     }
 
-    logDeduplicator.info('HypeDexerLiquidationsWSClient: Received liquidations', {
+    logDeduplicator.debug('HypeDexerLiquidationsWSClient: Received liquidations', {
       count,
       actualCount: data.length,
     });

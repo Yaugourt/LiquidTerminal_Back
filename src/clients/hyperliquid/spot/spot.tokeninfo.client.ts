@@ -47,7 +47,7 @@ export class HyperliquidTokenInfoClient extends BaseApiService {
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateAllTokens().catch(error => {
-        logDeduplicator.error('Error in token info polling:', { error });
+        logDeduplicator.error('Error in token info polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, this.UPDATE_INTERVAL);
   }
@@ -63,7 +63,7 @@ export class HyperliquidTokenInfoClient extends BaseApiService {
   private async updateAllTokens(): Promise<void> {
     const updatePromises = Array.from(this.activeTokens).map(tokenId => 
       this.updateTokenInfo(tokenId).catch(error => {
-        logDeduplicator.error('Error updating token info:', { tokenId, error });
+        logDeduplicator.error('Error updating token info:', { tokenId, error: error instanceof Error ? error.message : String(error) });
       })
     );
 
@@ -93,7 +93,7 @@ export class HyperliquidTokenInfoClient extends BaseApiService {
         lastUpdate: now
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update token info:', { tokenId, error });
+      logDeduplicator.error('Failed to update token info:', { tokenId, error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -125,7 +125,7 @@ export class HyperliquidTokenInfoClient extends BaseApiService {
       }
       return JSON.parse(freshData) as TokenInfoResponse;
     } catch (error) {
-      logDeduplicator.error('Error fetching token info:', { tokenId, error });
+      logDeduplicator.error('Error fetching token info:', { tokenId, error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

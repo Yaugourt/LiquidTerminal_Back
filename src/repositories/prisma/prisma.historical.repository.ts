@@ -30,7 +30,8 @@ export class PrismaHistoricalLiquidationRepository
         });
       },
       'batch insert raw liquidations',
-      { count: data.length }
+      { count: data.length },
+      { verboseSuccess: false }
     );
   }
 
@@ -63,7 +64,8 @@ export class PrismaHistoricalLiquidationRepository
         });
       },
       'upserting ingestion state',
-      { lastTid: Number(lastTid), newCount }
+      { lastTid: Number(lastTid), newCount },
+      { verboseSuccess: false }
     );
   }
 
@@ -158,13 +160,14 @@ export class PrismaHistoricalLiquidationRepository
     );
   }
 
-  async getChart(since: Date, bucketTrunc: string, coin?: string): Promise<RawChartBucket[]> {
+  async getChart(since: Date, bucketSizeMinutes: number, coin?: string): Promise<RawChartBucket[]> {
     return this.executeWithErrorHandling(
       async () => {
+        const bucketSeconds = bucketSizeMinutes * 60;
         const coinParam = coin ?? null;
         return this.prismaClient.$queryRaw<RawChartBucket[]>`
           SELECT
-            date_trunc(${bucketTrunc}, time AT TIME ZONE 'UTC') AS bucket,
+            (to_timestamp(floor(EXTRACT(EPOCH FROM time AT TIME ZONE 'UTC') / ${bucketSeconds}) * ${bucketSeconds}) AT TIME ZONE 'UTC') AS bucket,
             SUM(notional_total)::float AS total_volume,
             COUNT(*)::int AS total_count,
             SUM(CASE WHEN liq_dir = 'Long'  THEN notional_total ELSE 0 END)::float AS long_volume,
@@ -179,7 +182,7 @@ export class PrismaHistoricalLiquidationRepository
         `;
       },
       'computing chart buckets',
-      { since: since.toISOString(), bucketTrunc, coin }
+      { since: since.toISOString(), bucketSizeMinutes, coin }
     );
   }
 }

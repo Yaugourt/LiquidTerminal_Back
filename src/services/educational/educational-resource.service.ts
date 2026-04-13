@@ -177,7 +177,7 @@ export class EducationalResourceService extends BaseService<
           } catch (error) {
             // Ne pas bloquer la création si l'XP échoue
             logDeduplicator.error('Error granting XP for educational resource creation', {
-              error,
+              error: error instanceof Error ? error.message : String(error),
               userId: resource.addedBy,
               resourceId: resource.id
             });
@@ -189,7 +189,7 @@ export class EducationalResourceService extends BaseService<
           logDeduplicator.warn('Failed to generate link preview, keeping resource without preview', {
             resourceId: resource.id,
             url: data.url,
-            error: linkPreviewError
+            error: linkPreviewError instanceof Error ? linkPreviewError.message : String(linkPreviewError)
           });
 
           // En cas d'échec de la preview, on attribue quand même les XP
@@ -202,7 +202,7 @@ export class EducationalResourceService extends BaseService<
             });
           } catch (xpError) {
             logDeduplicator.error('Error granting XP for educational resource creation (fallback)', {
-              error: xpError,
+              error: xpError instanceof Error ? xpError.message : String(xpError),
               userId: resource.addedBy,
               resourceId: resource.id
             });
@@ -212,7 +212,7 @@ export class EducationalResourceService extends BaseService<
         }
       } catch (error) {
         logDeduplicator.error('Error creating educational resource', {
-          error,
+          error: error instanceof Error ? error.message : String(error),
           url: data.url
         });
         throw error;
@@ -250,7 +250,7 @@ export class EducationalResourceService extends BaseService<
         });
       });
     } catch (error) {
-      logDeduplicator.error('Error removing resource from category:', { error, resourceId, categoryId });
+      logDeduplicator.error('Error removing resource from category:', { error: error instanceof Error ? error.message : String(error), resourceId, categoryId });
       throw error;
     } finally {
       this.repository.resetPrismaClient();
@@ -282,7 +282,7 @@ export class EducationalResourceService extends BaseService<
       if (error instanceof EducationalCategoryNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching resources by category:', { error, categoryId });
+      logDeduplicator.error('Error fetching resources by category:', { error: error instanceof Error ? error.message : String(error), categoryId });
       throw error;
     }
   }
@@ -325,7 +325,7 @@ export class EducationalResourceService extends BaseService<
         });
       } catch (error) {
         logDeduplicator.error('Error deleting educational resource', {
-          error,
+          error: error instanceof Error ? error.message : String(error),
           resourceId: id
         });
         throw error;
@@ -340,7 +340,7 @@ export class EducationalResourceService extends BaseService<
     try {
       return await this.repository.findByUrl(url);
     } catch (error) {
-      logDeduplicator.error('Error finding resource by URL:', { error, url });
+      logDeduplicator.error('Error finding resource by URL:', { error: error instanceof Error ? error.message : String(error), url });
       throw error;
     }
   }
@@ -352,7 +352,7 @@ export class EducationalResourceService extends BaseService<
     try {
       return await this.repository.getResourceCategories(resourceId);
     } catch (error) {
-      logDeduplicator.error('Error getting resource categories:', { error, resourceId });
+      logDeduplicator.error('Error getting resource categories:', { error: error instanceof Error ? error.message : String(error), resourceId });
       throw error;
     }
   }
@@ -380,7 +380,7 @@ export class EducationalResourceService extends BaseService<
     try {
       return await (this.repository as any).findPending(params);
     } catch (error) {
-      logDeduplicator.error('Error getting pending resources:', { error });
+      logDeduplicator.error('Error getting pending resources:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -392,7 +392,7 @@ export class EducationalResourceService extends BaseService<
     try {
       return await (this.repository as any).countPending();
     } catch (error) {
-      logDeduplicator.error('Error counting pending resources:', { error });
+      logDeduplicator.error('Error counting pending resources:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -438,7 +438,7 @@ export class EducationalResourceService extends BaseService<
         });
       } catch (error) {
         logDeduplicator.error('Error granting XP for resource approval', {
-          error,
+          error: error instanceof Error ? error.message : String(error),
           resourceId,
           userId: resource.addedBy
         });
@@ -446,7 +446,7 @@ export class EducationalResourceService extends BaseService<
 
       return updated;
     } catch (error) {
-      logDeduplicator.error('Error approving resource:', { error, resourceId });
+      logDeduplicator.error('Error approving resource:', { error: error instanceof Error ? error.message : String(error), resourceId });
       throw error;
     }
   }
@@ -484,7 +484,7 @@ export class EducationalResourceService extends BaseService<
 
       return updated;
     } catch (error) {
-      logDeduplicator.error('Error rejecting resource:', { error, resourceId });
+      logDeduplicator.error('Error rejecting resource:', { error: error instanceof Error ? error.message : String(error), resourceId });
       throw error;
     }
   }
@@ -507,7 +507,7 @@ export class EducationalResourceService extends BaseService<
         status: 'APPROVED' as ResourceStatus
       });
     } catch (error) {
-      logDeduplicator.error('Error getting approved resources:', { error });
+      logDeduplicator.error('Error getting approved resources:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -528,7 +528,7 @@ export class EducationalResourceService extends BaseService<
         addedBy: userId
       });
     } catch (error) {
-      logDeduplicator.error('Error getting user submissions:', { error, userId });
+      logDeduplicator.error('Error getting user submissions:', { error: error instanceof Error ? error.message : String(error), userId });
       throw error;
     }
   }

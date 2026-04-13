@@ -143,7 +143,7 @@ const scanUploadedFile = async (filePath: string): Promise<boolean> => {
 
     return true;
   } catch (error) {
-    logDeduplicator.error('Error scanning uploaded file', { error, filePath });
+    logDeduplicator.error('Error scanning uploaded file', { error: error instanceof Error ? error.message : String(error), filePath });
     return false;
   }
 };
@@ -248,7 +248,7 @@ export const validateUploadedFile = async (req: Request, res: Response, next: Ne
     
     next();
   } catch (error) {
-    logDeduplicator.error('Error during file security scan', { error });
+    logDeduplicator.error('Error during file security scan', { error: error instanceof Error ? error.message : String(error) });
     
     // En cas d'erreur, supprimer tous les fichiers par précaution
     files.forEach(file => {
@@ -310,7 +310,7 @@ export const cleanupOldFiles = async (maxAge: number = 24 * 60 * 60 * 1000) => {
       }
     }
   } catch (error) {
-    logDeduplicator.error('Error cleaning up old files', { error });
+    logDeduplicator.error('Error cleaning up old files', { error: error instanceof Error ? error.message : String(error) });
   }
 };
 
@@ -339,7 +339,7 @@ export const deleteUploadedFile = (logoUrl: string): boolean => {
       return false;
     }
   } catch (error) {
-    logDeduplicator.error('Error deleting uploaded file', { error, logoUrl });
+    logDeduplicator.error('Error deleting uploaded file', { error: error instanceof Error ? error.message : String(error), logoUrl });
     return false;
   }
 }; 

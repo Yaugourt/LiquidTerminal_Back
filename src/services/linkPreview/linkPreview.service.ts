@@ -101,7 +101,7 @@ export class LinkPreviewService extends BaseService<
       return savedPreview;
 
     } catch (error) {
-      logDeduplicator.error('Error generating preview for', { url, error });
+      logDeduplicator.error('Error generating preview for', { url, error: error instanceof Error ? error.message : String(error) });
       
       if (error instanceof LinkPreviewFetchError || error instanceof LinkPreviewTimeoutError) {
         throw error;
@@ -158,13 +158,13 @@ export class LinkPreviewService extends BaseService<
           // Petit délai pour éviter rate limiting
           await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (error) {
-          logDeduplicator.error('Error refreshing preview', { url: preview.url, error });
+          logDeduplicator.error('Error refreshing preview', { url: preview.url, error: error instanceof Error ? error.message : String(error) });
         }
       }
 
       logDeduplicator.info('Finished refreshing expired previews', { count: expiredPreviews.length });
     } catch (error) {
-      logDeduplicator.error('Error refreshing expired previews', { error });
+      logDeduplicator.error('Error refreshing expired previews', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -217,10 +217,10 @@ export class LinkPreviewService extends BaseService<
       
       return count > 0;
     } catch (error) {
-      logDeduplicator.error('Error checking if link preview is used by other resources', { 
-        linkPreviewId, 
-        excludeResourceId, 
-        error 
+      logDeduplicator.error('Error checking if link preview is used by other resources', {
+        linkPreviewId,
+        excludeResourceId,
+        error: error instanceof Error ? error.message : String(error)
       });
       return false; // En cas d'erreur, on considère qu'elle est utilisée pour éviter la suppression
     }

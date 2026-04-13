@@ -179,7 +179,7 @@ const scanUploadedFile = async (filePath: string): Promise<boolean> => {
 
     return true;
   } catch (error) {
-    logDeduplicator.error('Error scanning uploaded file', { error, filePath });
+    logDeduplicator.error('Error scanning uploaded file', { error: error instanceof Error ? error.message : String(error), filePath });
     return false;
   }
 };
@@ -234,7 +234,7 @@ export const validateUploadedPublicGoodFiles = async (req: Request, res: Respons
     
     next();
   } catch (error) {
-    logDeduplicator.error('Error during file security scan', { error });
+    logDeduplicator.error('Error during file security scan', { error: error instanceof Error ? error.message : String(error) });
     
     // En cas d'erreur, supprimer tous les fichiers par précaution
     files.forEach(file => {
@@ -356,7 +356,7 @@ export const deleteUploadedPublicGoodFile = (fileUrl: string): boolean => {
       return false;
     }
   } catch (error) {
-    logDeduplicator.error('Error deleting uploaded file', { error, fileUrl });
+    logDeduplicator.error('Error deleting uploaded file', { error: error instanceof Error ? error.message : String(error), fileUrl });
     return false;
   }
 };

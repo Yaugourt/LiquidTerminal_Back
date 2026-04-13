@@ -1,34 +1,28 @@
 import Redis from 'ioredis';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
-// Configuration Redis simple et propre
-const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+// Shared Redis config optimized for production
+const REDIS_CONFIG = {
   family: 0, // Dual stack IPv4/IPv6
   maxRetriesPerRequest: 3,
-  enableReadyCheck: false,
+  enableReadyCheck: true, // Wait for Redis to be ready before accepting commands
   lazyConnect: false,
-  connectTimeout: 30000,
-  commandTimeout: 10000,
-  enableOfflineQueue: true,
-  keepAlive: 30000,
-});
+  connectTimeout: 10000, // 10s connect (was 30s - fail faster on real connection issues)
+  commandTimeout: 5000, // 5s per command (was 10s - avoid long hangs under load)
+  enableOfflineQueue: false, // Fail-fast instead of silently queuing when disconnected
+  keepAlive: 10000, // 10s keepalive (was 30s - detect dead connections faster)
+  retryStrategy: (times: number) => {
+    // Exponential backoff: 200ms, 400ms, 800ms... max 3s
+    return Math.min(times * 200, 3000);
+  },
+};
 
-// ✅ Corriger le warning de MaxListeners sur l'instance principale
+// Subscriber instance (for pub/sub - cannot do normal commands while subscribed)
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', REDIS_CONFIG);
 redis.setMaxListeners(20);
 
-// ✅ Connexion Redis séparée pour les opérations normales (éviter le mode subscriber)
-const redisNormal = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  family: 0,
-  maxRetriesPerRequest: 3,
-  enableReadyCheck: false,
-  lazyConnect: false,
-  connectTimeout: 30000,
-  commandTimeout: 10000,
-  enableOfflineQueue: true,
-  keepAlive: 30000,
-});
-
-// ✅ Corriger le warning de MaxListeners
+// Normal operations instance (GET, SET, pipeline, etc.)
+const redisNormal = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', REDIS_CONFIG);
 redisNormal.setMaxListeners(20);
 
 // Configuration des listeners d'événements pour le diagnostic

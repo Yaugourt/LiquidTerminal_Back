@@ -42,7 +42,7 @@ router.get('/account',
         data: account,
       });
     } catch (error) {
-      logDeduplicator.error('Error checking telegram account:', { error });
+      logDeduplicator.error('Error checking telegram account:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({
@@ -86,7 +86,7 @@ router.get('/wallets',
         pagination: result.pagination,
       });
     } catch (error) {
-      logDeduplicator.error('Error fetching telegram wallets:', { error });
+      logDeduplicator.error('Error fetching telegram wallets:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({
@@ -127,7 +127,7 @@ router.get('/wallet-lists',
         data: walletLists,
       });
     } catch (error) {
-      logDeduplicator.error('Error fetching telegram wallet lists:', { error });
+      logDeduplicator.error('Error fetching telegram wallet lists:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({
@@ -172,7 +172,7 @@ router.get('/wallet-lists/:id/items',
         pagination: result.pagination,
       });
     } catch (error) {
-      logDeduplicator.error('Error fetching telegram wallet list items:', { error });
+      logDeduplicator.error('Error fetching telegram wallet list items:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({
@@ -249,7 +249,7 @@ router.post('/verify-link',
         data: { userId: result.userId },
       });
     } catch (error) {
-      logDeduplicator.error('Error verifying telegram link:', { error });
+      logDeduplicator.error('Error verifying telegram link:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({
@@ -285,7 +285,7 @@ router.get('/wallet-subscriptions',
       const data = await walletSubService.list(telegramId);
       res.json({ success: true, data });
     } catch (error) {
-      logDeduplicator.error('Error listing wallet subscriptions:', { error });
+      logDeduplicator.error('Error listing wallet subscriptions:', { error: error instanceof Error ? error.message : String(error) });
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
       }
@@ -317,7 +317,7 @@ router.post('/wallet-subscriptions',
       });
       res.status(201).json({ success: true, data });
     } catch (error) {
-      logDeduplicator.error('Error creating wallet subscription:', { error });
+      logDeduplicator.error('Error creating wallet subscription:', { error: error instanceof Error ? error.message : String(error) });
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
       }
@@ -352,7 +352,7 @@ router.put('/wallet-subscriptions/:id',
       });
       res.json({ success: true, data });
     } catch (error) {
-      logDeduplicator.error('Error updating wallet subscription:', { error });
+      logDeduplicator.error('Error updating wallet subscription:', { error: error instanceof Error ? error.message : String(error) });
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
       }
@@ -377,7 +377,7 @@ router.delete('/wallet-subscriptions/:id',
       await walletSubService.delete(telegramId, subscriptionId);
       res.json({ success: true, message: 'Subscription deleted' });
     } catch (error) {
-      logDeduplicator.error('Error deleting wallet subscription:', { error });
+      logDeduplicator.error('Error deleting wallet subscription:', { error: error instanceof Error ? error.message : String(error) });
       if (error instanceof TelegramError) {
         return res.status(error.statusCode).json({ success: false, message: error.message, code: error.code });
       }
@@ -399,7 +399,7 @@ router.get('/wallet-subscriptions/active',
       const data = await walletSubService.getActiveSubscriptions();
       res.json({ success: true, data });
     } catch (error) {
-      logDeduplicator.error('Error fetching active wallet subscriptions:', { error });
+      logDeduplicator.error('Error fetching active wallet subscriptions:', { error: error instanceof Error ? error.message : String(error) });
       res.status(500).json({ success: false, message: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
     }
   }) as RequestHandler

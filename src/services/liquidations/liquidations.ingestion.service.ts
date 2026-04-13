@@ -250,7 +250,7 @@ export class LiquidationsIngestionService {
       await this.updateIngestionState(BigInt(maxTid), BigInt(maxTimeMs), inserted);
 
       if (inserted > 0) {
-        logDeduplicator.info('LiquidationsIngestionService: Batch flushed', {
+        logDeduplicator.debug('LiquidationsIngestionService: Batch flushed', {
           inserted,
           duplicatesSkipped,
           totalIngested: this.totalIngested,

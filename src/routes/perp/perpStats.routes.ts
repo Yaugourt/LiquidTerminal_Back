@@ -19,7 +19,7 @@ router.get('/', validateGetRequest(globalPerpStatsGetSchema), (async (_req: Requ
     });
     res.json(stats);
   } catch (error) {
-    logDeduplicator.error('Error fetching perp global stats:', { error });
+    logDeduplicator.error('Error fetching perp global stats:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof PerpGlobalStatsError) {
       return res.status(error.statusCode).json({

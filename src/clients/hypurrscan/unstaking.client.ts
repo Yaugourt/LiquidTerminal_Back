@@ -45,13 +45,13 @@ export class HypurrscanUnstakingClient extends BaseApiService {
     logDeduplicator.info('Starting Hypurrscan unstaking polling');
     // Faire une première mise à jour immédiate
     this.updateUnstakingQueue().catch(error => {
-      logDeduplicator.error('Error in initial Hypurrscan unstaking update:', { error });
+      logDeduplicator.error('Error in initial Hypurrscan unstaking update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     // Démarrer le polling régulier
     this.pollingInterval = setInterval(() => {
       this.updateUnstakingQueue().catch(error => {
-        logDeduplicator.error('Error in Hypurrscan unstaking polling:', { error });
+        logDeduplicator.error('Error in Hypurrscan unstaking polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, HypurrscanUnstakingClient.UPDATE_INTERVAL);
   }
@@ -83,7 +83,7 @@ export class HypurrscanUnstakingClient extends BaseApiService {
         lastUpdate: this.lastUpdate
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update unstaking queue data:', { error });
+      logDeduplicator.error('Failed to update unstaking queue data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
     });
@@ -111,7 +111,7 @@ export class HypurrscanUnstakingClient extends BaseApiService {
       }
       return JSON.parse(freshData);
     } catch (error) {
-      logDeduplicator.error('Error fetching unstaking queue:', { error });
+      logDeduplicator.error('Error fetching unstaking queue:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

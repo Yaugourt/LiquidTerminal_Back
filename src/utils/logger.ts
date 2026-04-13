@@ -18,6 +18,8 @@ interface LogRotationConfig {
   compress: boolean; // Compresser les anciens fichiers
 }
 
+type LogLevel = 'info' | 'warn' | 'error' | 'debug';
+
 class LogRotator {
   private config: LogRotationConfig;
   private currentSize: number = 0;
@@ -275,6 +277,9 @@ async function initializeLogger() {
     // Initialiser les streams avec rotation
     iwFileStream = await combinedStream.getStream();
     const iwPinoStreams: pino.StreamEntry[] = [{ level: 'info', stream: iwFileStream }];
+    if (process.env.NODE_ENV === 'production') {
+      iwPinoStreams.push({ level: 'info', stream: process.stdout });
+    }
     if (consoleTransport) {
       iwPinoStreams.push({ level: 'info', stream: pino.transport(consoleTransport) as unknown as Writable });
     }
@@ -282,25 +287,13 @@ async function initializeLogger() {
 
     edFileStream = await errorStream.getStream();
     const edPinoStreams: pino.StreamEntry[] = [{ level: 'debug', stream: edFileStream }];
+    if (process.env.NODE_ENV === 'production') {
+      edPinoStreams.push({ level: 'error', stream: process.stderr });
+    }
     if (consoleTransport) {
       edPinoStreams.push({ level: 'debug', stream: pino.transport(consoleTransport) as unknown as Writable });
     }
     errorDebugLogger = pino({ ...baseConfig, level: 'debug' }, pino.multistream(edPinoStreams));
-
-    const shutdown = async () => {
-      await combinedStream.flush();
-      await errorStream.flush();
-      
-      LogDeduplicatorInternal.getInstance().shutdown();
-      process.exit(0);
-    };
-
-    process.on('exit', async () => {
-      await combinedStream.flush();
-      await errorStream.flush();
-    });
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
 
     // Vérifier la rotation toutes les 5 minutes
     setInterval(async () => {
@@ -325,56 +318,85 @@ async function initializeLogger() {
 
 initializeLogger();
 
+async function maybeRotate(level: LogLevel): Promise<void> {
+  if (level === 'info' || level === 'warn') {
+    if (await logRotator.shouldRotate(combinedLogPath)) {
+      await combinedStream.rotate();
+    }
+    return;
+  }
+
+  if (await logRotator.shouldRotate(errorLogPath)) {
+    await errorStream.rotate();
+  }
+}
+
+function getFallbackConsole(level: LogLevel): typeof console.info {
+  switch (level) {
+    case 'error':
+      return console.error;
+    case 'warn':
+      return console.warn;
+    case 'debug':
+      return console.debug;
+    default:
+      return console.info;
+  }
+}
+
+function getLogger(level: LogLevel): pino.Logger | undefined {
+  return level === 'info' || level === 'warn' ? infoWarnLogger : errorDebugLogger;
+}
+
+async function writeLog(
+  level: LogLevel,
+  message: string,
+  metadata: Record<string, any> = {},
+  dedupe = true
+): Promise<void> {
+  const logger = getLogger(level);
+  if (!logger) {
+    getFallbackConsole(level)(message, metadata);
+    return;
+  }
+
+  let finalMessage = message;
+  let finalMetadata = metadata;
+
+  if (dedupe) {
+    const deduplicator = LogDeduplicatorInternal.getInstance();
+    const processedLog = deduplicator.processLog(level, message, metadata);
+    if (!processedLog) {
+      return;
+    }
+
+    finalMessage = processedLog.count > 1 ? `${message} (occurred ${processedLog.count} times)` : message;
+    finalMetadata = processedLog.metadata;
+  }
+
+  await maybeRotate(level);
+  logger[level](finalMetadata, finalMessage);
+}
+
 const deduplicatedLogger = {
-  info: async (message: string, metadata: Record<string, any> = {}) => {
-    if (!infoWarnLogger) { console.info(message, metadata); return; }
-    const deduplicator = LogDeduplicatorInternal.getInstance();
-    const processedLog = deduplicator.processLog('info', message, metadata);
-    if (processedLog) {
-      // Vérifier la rotation avant de logger
-      if (await logRotator.shouldRotate(combinedLogPath)) {
-        await combinedStream.rotate();
-      }
-      infoWarnLogger.info(processedLog.metadata, processedLog.count > 1 ? `${message} (occurred ${processedLog.count} times)` : message);
-    }
-  },
-  error: async (message: string, metadata: Record<string, any> = {}) => {
-    if (!errorDebugLogger) { console.error(message, metadata); return; }
-    const deduplicator = LogDeduplicatorInternal.getInstance();
-    const processedLog = deduplicator.processLog('error', message, metadata);
-    if (processedLog) {
-      // Vérifier la rotation avant de logger
-      if (await logRotator.shouldRotate(errorLogPath)) {
-        await errorStream.rotate();
-      }
-      errorDebugLogger.error(processedLog.metadata, processedLog.count > 1 ? `${message} (occurred ${processedLog.count} times)` : message);
-    }
-  },
-  debug: async (message: string, metadata: Record<string, any> = {}) => {
-    if (!errorDebugLogger) { console.debug(message, metadata); return; }
-    const deduplicator = LogDeduplicatorInternal.getInstance();
-    const processedLog = deduplicator.processLog('debug', message, metadata);
-    if (processedLog) {
-      // Vérifier la rotation avant de logger
-      if (await logRotator.shouldRotate(errorLogPath)) {
-        await errorStream.rotate();
-      }
-      errorDebugLogger.debug(processedLog.metadata, processedLog.count > 1 ? `${message} (occurred ${processedLog.count} times)` : message);
-    }
-  },
-  warn: async (message: string, metadata: Record<string, any> = {}) => {
-    if (!infoWarnLogger) { console.warn(message, metadata); return; }
-    const deduplicator = LogDeduplicatorInternal.getInstance();
-    const processedLog = deduplicator.processLog('warn', message, metadata);
-    if (processedLog) {
-      // Vérifier la rotation avant de logger
-      if (await logRotator.shouldRotate(combinedLogPath)) {
-        await combinedStream.rotate();
-      }
-      infoWarnLogger.warn(processedLog.metadata, processedLog.count > 1 ? `${message} (occurred ${processedLog.count} times)` : message);
-    }
-  },
+  info: async (message: string, metadata: Record<string, any> = {}) => writeLog('info', message, metadata),
+  error: async (message: string, metadata: Record<string, any> = {}) => writeLog('error', message, metadata),
+  debug: async (message: string, metadata: Record<string, any> = {}) => writeLog('debug', message, metadata),
+  warn: async (message: string, metadata: Record<string, any> = {}) => writeLog('warn', message, metadata),
 };
+
+export const rawLogger = {
+  info: async (message: string, metadata: Record<string, any> = {}) => writeLog('info', message, metadata, false),
+  error: async (message: string, metadata: Record<string, any> = {}) => writeLog('error', message, metadata, false),
+  debug: async (message: string, metadata: Record<string, any> = {}) => writeLog('debug', message, metadata, false),
+  warn: async (message: string, metadata: Record<string, any> = {}) => writeLog('warn', message, metadata, false),
+};
+
+export async function flushLogs(): Promise<void> {
+  await combinedStream.flush();
+  await errorStream.flush();
+  LogDeduplicatorInternal.getInstance().shutdown();
+}
 
 export const measureExecutionTime = async <T>(
   operation: () => Promise<T>,
@@ -399,7 +421,7 @@ export const measureExecutionTime = async <T>(
 
 export const stream = {
   write: async (message: string) => {
-    await deduplicatedLogger.info(message.trim());
+    await rawLogger.info(message.trim());
   },
 };
 

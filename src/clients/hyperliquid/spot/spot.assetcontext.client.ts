@@ -46,12 +46,12 @@ export class HyperliquidSpotClient extends BaseApiService {
 
     logDeduplicator.info('Starting spot polling');
     this.updateSpotData().catch(err =>
-      logDeduplicator.error('Error in initial spot update:', { error: err })
+      logDeduplicator.error('Error in initial spot update:', { error: err instanceof Error ? err.message : String(err) })
     );
 
     this.pollingInterval = setInterval(() => {
       this.updateSpotData().catch(err =>
-        logDeduplicator.error('Error in spot polling:', { error: err })
+        logDeduplicator.error('Error in spot polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, this.UPDATE_INTERVAL);
   }

@@ -95,7 +95,7 @@ export class CsvProjectService {
       return result;
 
     } catch (error) {
-      logDeduplicator.error('Error processing CSV project file', { error, filePath });
+      logDeduplicator.error('Error processing CSV project file', { error: error instanceof Error ? error.message : String(error), filePath });
       throw new ProjectError(
         'Erreur lors du traitement du fichier CSV',
         500,

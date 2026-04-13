@@ -14,7 +14,7 @@ router.get('', async (req, res) => {
       data: stats
     });
   } catch (error: unknown) {
-    logDeduplicator.error('Error fetching fees stats:', { error });
+    logDeduplicator.error('Error fetching fees stats:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof FeesError) {
       res.status(error.statusCode).json({
@@ -46,7 +46,7 @@ router.get('/raw', async (req, res) => {
       data: convertedData
     });
   } catch (error: unknown) {
-    logDeduplicator.error('Error fetching raw fees data:', { error });
+    logDeduplicator.error('Error fetching raw fees data:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof FeesError) {
       res.status(error.statusCode).json({

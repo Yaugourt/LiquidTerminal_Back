@@ -62,7 +62,7 @@ router.post('/with-upload',
         data: project
       });
     } catch (error) {
-      logDeduplicator.error('Error creating project with upload:', { error, body: req.body });
+      logDeduplicator.error('Error creating project with upload:', { error: error instanceof Error ? error.message : String(error), body: req.body });
       
       if (error instanceof ProjectError) {
         return res.status(error.statusCode).json({
@@ -91,7 +91,7 @@ router.post('/', validatePrivyToken, requireModerator, (async (req: Request, res
       data: project
     });
   } catch (error) {
-    logDeduplicator.error('Error creating project:', { error, body: req.body });
+    logDeduplicator.error('Error creating project:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     
     if (error instanceof ProjectError) {
       return res.status(error.statusCode).json({
@@ -115,7 +115,7 @@ router.get('/', (async (req: Request, res: Response) => {
     const projects = await projectService.getAll(req.query);
     res.json(projects);
   } catch (error) {
-    logDeduplicator.error('Error fetching projects:', { error, query: req.query });
+    logDeduplicator.error('Error fetching projects:', { error: error instanceof Error ? error.message : String(error), query: req.query });
     res.status(500).json({ message: 'Internal server error' });
   }
 }) as RequestHandler);
@@ -137,7 +137,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
     
     res.json(project);
   } catch (error) {
-    logDeduplicator.error('Error fetching project:', { error, projectId: req.params.id });
+    logDeduplicator.error('Error fetching project:', { error: error instanceof Error ? error.message : String(error), projectId: req.params.id });
     res.status(500).json({ message: 'Internal server error' });
   }
 }) as RequestHandler);
@@ -159,7 +159,7 @@ router.put('/:id', validatePrivyToken, requireModerator, (async (req: Request, r
       return res.status(404).json({ message: error.message });
     }
     
-    logDeduplicator.error('Error updating project:', { error, projectId: req.params.id, body: req.body });
+    logDeduplicator.error('Error updating project:', { error: error instanceof Error ? error.message : String(error), projectId: req.params.id, body: req.body });
     res.status(500).json({ message: 'Internal server error' });
   }
 }) as RequestHandler);
@@ -181,7 +181,7 @@ router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, re
       return res.status(404).json({ message: error.message });
     }
     
-    logDeduplicator.error('Error deleting project:', { error, projectId: req.params.id });
+    logDeduplicator.error('Error deleting project:', { error: error instanceof Error ? error.message : String(error), projectId: req.params.id });
     res.status(500).json({ message: 'Internal server error' });
   }
 }) as RequestHandler);
@@ -225,8 +225,8 @@ router.post('/:id/categories', validatePrivyToken, requireModerator, validateReq
       return res.status(404).json({ message: error.message });
     }
     
-    logDeduplicator.error('Error assigning project categories:', { 
-      error, 
+    logDeduplicator.error('Error assigning project categories:', {
+      error: error instanceof Error ? error.message : String(error),
       projectId: req.params.id,
       categoryIds: req.body.categoryIds
     });
@@ -265,8 +265,8 @@ router.delete('/:id/categories', validatePrivyToken, requireModerator, validateR
       return res.status(404).json({ message: error.message });
     }
     
-    logDeduplicator.error('Error removing project categories:', { 
-      error, 
+    logDeduplicator.error('Error removing project categories:', {
+      error: error instanceof Error ? error.message : String(error),
       projectId: req.params.id,
       categoryIds: req.body.categoryIds
     });
@@ -300,8 +300,8 @@ router.get('/:id/categories', (async (req: Request, res: Response) => {
       return res.status(404).json({ message: error.message });
     }
     
-    logDeduplicator.error('Error fetching project categories:', { 
-      error, 
+    logDeduplicator.error('Error fetching project categories:', {
+      error: error instanceof Error ? error.message : String(error),
       projectId: req.params.id
     });
     res.status(500).json({ message: 'Internal server error' });

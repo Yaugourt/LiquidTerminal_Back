@@ -155,7 +155,7 @@ export class WalletListItemService extends BaseService<
 
       return result;
     } catch (error) {
-      logDeduplicator.error('Error creating wallet list item:', { error, data });
+      logDeduplicator.error('Error creating wallet list item:', { error: error instanceof Error ? error.message : String(error), data });
       throw error;
     }
   }
@@ -198,7 +198,7 @@ export class WalletListItemService extends BaseService<
         CACHE_TTL.MEDIUM
       );
     } catch (error) {
-      logDeduplicator.error('Error fetching wallet list items by wallet list:', { error, walletListId, userId });
+      logDeduplicator.error('Error fetching wallet list items by wallet list:', { error: error instanceof Error ? error.message : String(error), walletListId, userId });
       throw error;
     }
   }
@@ -230,7 +230,7 @@ export class WalletListItemService extends BaseService<
         userId
       });
     } catch (error) {
-      logDeduplicator.error('Error reordering wallet list items:', { error, walletListId, itemOrders, userId });
+      logDeduplicator.error('Error reordering wallet list items:', { error: error instanceof Error ? error.message : String(error), walletListId, itemOrders, userId });
       throw error;
     }
   }
@@ -303,7 +303,7 @@ export class WalletListItemService extends BaseService<
         userId
       });
     } catch (error) {
-      logDeduplicator.error('Error removing userWallet from wallet list:', { error, walletListId, userWalletId, userId });
+      logDeduplicator.error('Error removing userWallet from wallet list:', { error: error instanceof Error ? error.message : String(error), walletListId, userWalletId, userId });
       throw error;
     }
   }

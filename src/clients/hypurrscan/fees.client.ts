@@ -48,12 +48,12 @@ export class HypurrscanFeesClient extends BaseApiService {
 
     logDeduplicator.info('Starting fees polling');
     this.updateFeesData().catch(error => {
-      logDeduplicator.error('Error in initial fees update:', { error });
+      logDeduplicator.error('Error in initial fees update:', { error: error instanceof Error ? error.message : String(error) });
     });
 
     this.pollingInterval = setInterval(() => {
       this.updateFeesData().catch(error => {
-        logDeduplicator.error('Error in fees polling:', { error });
+        logDeduplicator.error('Error in fees polling:', { error: error instanceof Error ? error.message : String(error) });
       });
     }, HypurrscanFeesClient.UPDATE_INTERVAL);
   }
@@ -95,7 +95,7 @@ export class HypurrscanFeesClient extends BaseApiService {
         lastUpdate: this.lastUpdate
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update fees data:', { error });
+      logDeduplicator.error('Failed to update fees data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }
@@ -118,7 +118,7 @@ export class HypurrscanFeesClient extends BaseApiService {
       }
       return JSON.parse(freshData);
     } catch (error) {
-      logDeduplicator.error('Error fetching fees data:', { error });
+      logDeduplicator.error('Error fetching fees data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
   }

@@ -16,6 +16,10 @@ class PrismaHistoricalService {
 
       const pool = new Pool({
         connectionString: process.env.HISTORICAL_DATABASE_URL,
+        // Prevent stale connections after DB restarts
+        idleTimeoutMillis: 10000,       // recycle idle connections after 10s
+        connectionTimeoutMillis: 5000,  // fail fast if DB unreachable
+        keepAlive: true,                // detect dead TCP connections early
       });
       const adapter = new PrismaPg(pool);
 
@@ -29,7 +33,7 @@ class PrismaHistoricalService {
           logDeduplicator.info('Successfully connected to historical database');
         })
         .catch((error: unknown) => {
-          logDeduplicator.error('Failed to connect to historical database', { error });
+          logDeduplicator.error('Failed to connect to historical database', { error: error instanceof Error ? error.message : String(error) });
         });
     }
 

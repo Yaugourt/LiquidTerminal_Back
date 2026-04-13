@@ -29,12 +29,12 @@ export class HyperliquidSpotStatsClient {
 
     logDeduplicator.info('Starting spot stats polling');
     this.updateSpotStats().catch(err =>
-      logDeduplicator.error('Error in initial spot stats update:', { error: err })
+      logDeduplicator.error('Error in initial spot stats update:', { error: err instanceof Error ? err.message : String(err) })
     );
 
     this.pollingInterval = setInterval(() => {
       this.updateSpotStats().catch(err =>
-        logDeduplicator.error('Error in spot stats polling:', { error: err })
+        logDeduplicator.error('Error in spot stats polling:', { error: err instanceof Error ? err.message : String(err) })
       );
     }, HyperliquidSpotStatsClient.UPDATE_INTERVAL);
   }
@@ -69,20 +69,19 @@ export class HyperliquidSpotStatsClient {
       // Calculer la capitalisation totale du marché
       const totalMarketCap = marketsData.reduce((total: number, market: MarketData) => total + market.marketCap, 0);
       
-      // Récupérer les données USDC spot les plus récentes
-      const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0 
-        ? spotUSDCData[spotUSDCData.length - 1] 
+      const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
+        ? spotUSDCData[spotUSDCData.length - 1]
         : null;
-      
+
       const totalSpotUSDC = latestSpotUSDCData?.totalSpotUSDC || 0;
-      const totalHIP2 = latestSpotUSDCData?.["HIP-2"] || 0;
+      const totalHIP2 = latestSpotUSDCData?.["HIP-2"] || latestSpotUSDCData?.USDC_HIP2 || 0;
 
       const stats: SpotGlobalStats = {
         totalVolume24h,
         totalPairs,
         totalMarketCap,
         totalSpotUSDC,
-        totalHIP2
+        totalHIP2,
       };
 
       // Mettre en cache les statistiques
@@ -102,7 +101,7 @@ export class HyperliquidSpotStatsClient {
         totalHIP2
       });
     } catch (error) {
-      logDeduplicator.error('Failed to update spot stats:', { error });
+      logDeduplicator.error('Failed to update spot stats:', { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -111,7 +110,7 @@ export class HyperliquidSpotStatsClient {
       const raw = await redisService.get(HyperliquidSpotStatsClient.SPOT_MARKETS_CACHE_KEY);
       return raw ? JSON.parse(raw) as MarketData[] : null;
     } catch (error) {
-      logDeduplicator.error('Error retrieving market data from cache:', { error });
+      logDeduplicator.error('Error retrieving market data from cache:', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }
@@ -121,7 +120,7 @@ export class HyperliquidSpotStatsClient {
       const cachedData = await redisService.get(HyperliquidSpotStatsClient.SPOT_USDC_CACHE_KEY);
       return cachedData ? JSON.parse(cachedData) : null;
     } catch (error) {
-      logDeduplicator.error('Error retrieving SpotUSDC data from cache:', { error });
+      logDeduplicator.error('Error retrieving SpotUSDC data from cache:', { error: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }

@@ -177,7 +177,7 @@ export const validateCsvFile = async (req: Request, res: Response, next: NextFun
     logDeduplicator.info('validateCsvFile calling next()');
     next();
   } catch (error) {
-    logDeduplicator.error('Error during CSV file validation', { error });
+    logDeduplicator.error('Error during CSV file validation', { error: error instanceof Error ? error.message : String(error) });
     
     // En cas d'erreur, supprimer le fichier par précaution
     if (req.file && fs.existsSync(req.file.path)) {
@@ -205,6 +205,6 @@ export const cleanupCsvFile = (filePath: string): void => {
       logDeduplicator.info('CSV file cleaned up', { filePath });
     }
   } catch (error) {
-    logDeduplicator.error('Error cleaning up CSV file', { error, filePath });
+    logDeduplicator.error('Error cleaning up CSV file', { error: error instanceof Error ? error.message : String(error), filePath });
   }
 }; 

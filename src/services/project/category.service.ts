@@ -97,7 +97,7 @@ export class CategoryService extends BaseService<CategoryResponse, CategoryCreat
       if (error instanceof CategoryNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching category with projects:', { error, categoryId: id });
+      logDeduplicator.error('Error fetching category with projects:', { error: error instanceof Error ? error.message : String(error), categoryId: id });
       throw error;
     }
   }
@@ -127,7 +127,7 @@ export class CategoryService extends BaseService<CategoryResponse, CategoryCreat
       if (error instanceof CategoryNotFoundError) {
         throw error;
       }
-      logDeduplicator.error('Error fetching projects by category:', { error, categoryId });
+      logDeduplicator.error('Error fetching projects by category:', { error: error instanceof Error ? error.message : String(error), categoryId });
       throw error;
     }
   }
@@ -141,7 +141,7 @@ export class CategoryService extends BaseService<CategoryResponse, CategoryCreat
     try {
       return await this.repository.findByName(name);
     } catch (error) {
-      logDeduplicator.error('Error finding category by name:', { error, name });
+      logDeduplicator.error('Error finding category by name:', { error: error instanceof Error ? error.message : String(error), name });
       throw error;
     }
   }

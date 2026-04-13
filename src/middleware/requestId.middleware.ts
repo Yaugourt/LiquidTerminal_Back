@@ -6,11 +6,13 @@ import { randomUUID } from 'crypto';
  * Permet le traçage des requêtes dans les logs de bout en bout
  */
 export const requestIdMiddleware = (req: Request, res: Response, next: NextFunction) => {
-  // Générer un UUID v4 unique pour cette requête
-  const requestId = randomUUID();
-  
+  const incomingRequestId = req.header('X-Request-Id');
+  const requestId = typeof incomingRequestId === 'string' && incomingRequestId.trim().length > 0
+    ? incomingRequestId.trim().slice(0, 128)
+    : randomUUID();
+
   // Attacher le requestId à la requête pour utilisation dans les logs
-  (req as any).requestId = requestId;
+  req.requestId = requestId;
   
   // Ajouter le Request-ID dans les headers de réponse
   res.setHeader('X-Request-Id', requestId);

@@ -22,7 +22,7 @@ router.get('/', (async (req: Request, res: Response) => {
       pagination: categories.pagination
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching categories:', { error });
+    logDeduplicator.error('Error fetching categories:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof CategoryError) {
       return res.status(error.statusCode).json({
@@ -58,7 +58,7 @@ router.get('/:id', (async (req: Request, res: Response) => {
       data: category
     });
   } catch (error) {
-    logDeduplicator.error('Error fetching category:', { error, id: req.params.id });
+    logDeduplicator.error('Error fetching category:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     
     if (error instanceof CategoryError) {
       return res.status(error.statusCode).json({
@@ -100,7 +100,7 @@ router.get('/:id/projects', (async (req: Request, res: Response) => {
       return res.status(404).json({ message: error.message });
     }
     
-    logDeduplicator.error('Error fetching category with projects:', { error, categoryId: req.params.id });
+    logDeduplicator.error('Error fetching category with projects:', { error: error instanceof Error ? error.message : String(error), categoryId: req.params.id });
     res.status(500).json({ message: 'Internal server error' });
   }
 }) as RequestHandler);
@@ -115,7 +115,7 @@ router.post('/', validatePrivyToken, requireModerator, (async (req: Request, res
       data: category
     });
   } catch (error) {
-    logDeduplicator.error('Error creating category:', { error, body: req.body });
+    logDeduplicator.error('Error creating category:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     
     if (error instanceof CategoryError) {
       return res.status(error.statusCode).json({
@@ -152,7 +152,7 @@ router.put('/:id', validatePrivyToken, requireModerator, (async (req: Request, r
       data: category
     });
   } catch (error) {
-    logDeduplicator.error('Error updating category:', { error, id: req.params.id, body: req.body });
+    logDeduplicator.error('Error updating category:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, body: req.body });
     
     if (error instanceof CategoryError) {
       return res.status(error.statusCode).json({
@@ -188,7 +188,7 @@ router.delete('/:id', validatePrivyToken, requireAdmin, (async (req: Request, re
       message: 'Category deleted successfully'
     });
   } catch (error) {
-    logDeduplicator.error('Error deleting category:', { error, id: req.params.id });
+    logDeduplicator.error('Error deleting category:', { error: error instanceof Error ? error.message : String(error), id: req.params.id });
     
     if (error instanceof CategoryError) {
       return res.status(error.statusCode).json({

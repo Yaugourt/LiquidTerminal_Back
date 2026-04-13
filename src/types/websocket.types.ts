@@ -82,6 +82,14 @@ export interface HypeDexerWSSubscriptionConfirm {
 }
 
 /**
+ * HypeDexer WebSocket subscription added (alternative confirmation type)
+ */
+export interface HypeDexerWSSubscriptionAdded {
+  type: 'subscription_added';
+  subscription?: HypeDexerWSSubscription;
+}
+
+/**
  * HypeDexer WebSocket welcome message (sent on connection)
  */
 export interface HypeDexerWSWelcomeEvent {
@@ -90,13 +98,23 @@ export interface HypeDexerWSWelcomeEvent {
 }
 
 /**
+ * HypeDexer WebSocket heartbeat ping (sent every 60s, expects pong response)
+ */
+export interface HypeDexerWSPingEvent {
+  type: 'ping';
+  ts: number;
+}
+
+/**
  * All possible HypeDexer WebSocket events
  */
-export type HypeDexerWSEvent = 
-  | HypeDexerWSLiquidationEvent 
-  | HypeDexerWSErrorEvent 
+export type HypeDexerWSEvent =
+  | HypeDexerWSLiquidationEvent
+  | HypeDexerWSErrorEvent
   | HypeDexerWSSubscriptionConfirm
-  | HypeDexerWSWelcomeEvent;
+  | HypeDexerWSSubscriptionAdded
+  | HypeDexerWSWelcomeEvent
+  | HypeDexerWSPingEvent;
 
 // ============================================================================
 // INTERNAL WEBSOCKET TYPES (Our API)
@@ -125,7 +143,7 @@ export interface WSClient {
  * Client subscription to our internal WebSocket
  */
 export interface WSClientSubscription {
-  type: 'liquidation' | 'wallet_event';
+  type: 'liquidation' | 'wallet_event' | 'liquidation_alert';
   filters: WSLiquidationFilters;
   subscribedAt: number;
 }
@@ -166,6 +184,7 @@ export type WSEventType =
   | 'unsubscribed'
   | 'liquidation'
   | 'wallet_event'
+  | 'liquidation_alert'
   | 'heartbeat'
   | 'error';
 
@@ -206,6 +225,18 @@ export interface WSLiquidationEvent extends WSServerMessage {
       totalNotional: number;
       avgMarkPrice: number;
     };
+  };
+}
+
+/**
+ * Internal WebSocket liquidation alert event (sent by TelegramLiquidationDispatcherService)
+ * The bot receives this and calls sendMessage(telegramId, message)
+ */
+export interface WSLiquidationAlertEvent extends WSServerMessage {
+  type: 'liquidation_alert';
+  data: {
+    telegramId: string;
+    message: string;
   };
 }
 

@@ -40,7 +40,7 @@ router.get('/', async (req: Request, res: Response) => {
     
     res.json(response);
   } catch (error) {
-    logDeduplicator.error('Error in /unstaking-queue route:', { error });
+    logDeduplicator.error('Error in /unstaking-queue route:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof ValidatorError) {
       res.status(error.statusCode).json({
@@ -80,7 +80,7 @@ router.get('/stats', async (req: Request, res: Response) => {
       data: stats
     });
   } catch (error) {
-    logDeduplicator.error('Error in /unstaking-queue/stats route:', { error });
+    logDeduplicator.error('Error in /unstaking-queue/stats route:', { error: error instanceof Error ? error.message : String(error) });
     
     if (error instanceof ValidatorError) {
       res.status(error.statusCode).json({
