@@ -15,7 +15,7 @@ export type CompletedTradeCallback = (trades: CompletedTrade[]) => void;
 /**
  * HypeDexer WebSocket Client for Completed Trades
  *
- * Connects to wss://api-eu.hypedexer.com/ws and subscribes to completed_trades events.
+ * Connects to wss://api.hypedexer.com/ws and subscribes to completed_trades events.
  * 1 global subscription — all wallet filtering is done client-side in TelegramWalletDispatcherService.
  *
  * Features:
@@ -27,7 +27,7 @@ export class HypeDexerCompletedTradesWSClient extends BaseWebSocketService {
   private static instance: HypeDexerCompletedTradesWSClient;
 
   // Configuration
-  private static readonly WS_URL = process.env.HYPEDEXER_WS_URL || 'wss://api-eu.hypedexer.com/ws';
+  private static readonly WS_URL = process.env.HYPEDEXER_WS_URL || 'wss://api.hypedexer.com/ws';
   private static readonly API_KEY = process.env.HL_INDEXER_API_KEY || '';
 
   // Subscription state

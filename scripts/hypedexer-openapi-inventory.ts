@@ -132,7 +132,7 @@ function main(): void {
   }
   const raw = fs.readFileSync(SPEC_PATH, 'utf8');
   if (!raw.trim()) {
-    console.error(`OpenAPI file is empty: ${SPEC_PATH}. Restore from partner or: curl -sS https://api-eu.hypedexer.com/openapi.json -o docs/hypedexer_endpoints.json`);
+    console.error(`OpenAPI file is empty: ${SPEC_PATH}. Restore from partner or: curl -sS https://api.hypedexer.com/openapi.json -o docs/hypedexer_endpoints.json`);
     process.exit(1);
   }
 

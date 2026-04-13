@@ -18,7 +18,7 @@ import { Pool } from 'pg';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ENV_PATH = resolve(__dirname, '..', '.env');
-const API_BASE = process.env.HL_INDEXER_API_URL || 'https://api-eu.hypedexer.com';
+const API_BASE = process.env.HL_INDEXER_API_URL || 'https://api.hypedexer.com';
 
 function loadEnv() {
   try {

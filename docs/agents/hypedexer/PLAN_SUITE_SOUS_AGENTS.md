@@ -8,7 +8,7 @@ Document pour **l’orchestrateur** : état actuel, ordre recommandé, parallél
 
 | Zone | Détail |
 |------|--------|
-| Spec OpenAPI | `docs/hypedexer_endpoints.json` — resync : `curl -sS https://api-eu.hypedexer.com/openapi.json -o docs/hypedexer_endpoints.json` |
+| Spec OpenAPI | `docs/hypedexer_endpoints.json` — resync : `curl -sS https://api.hypedexer.com/openapi.json -o docs/hypedexer_endpoints.json` |
 | Inventaire | `npm run hypedexer:inventory` → `docs/hypedexer_endpoints.inventory.md` |
 | Couverture REST `/indexer/*` | Liste exhaustive des paths proxifiés : tableau **Proxied via `/indexer/*`** dans l’inventaire (incl. fills, funding, overview, analytics, builders, completed-trades, HIP-3, spot, twaps, users, vaults). |
 | **Missing / Partial** | **0** missing, **0** partial (au dernier inventaire : 69 opérations OpenAPI, 68 implémentées côté REST hypedexer/rest ; écart = `GET /ws` géré par WebSocket). |

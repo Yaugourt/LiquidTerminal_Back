@@ -8,7 +8,7 @@ Les playbooks **MISSION-01 … MISSION-13** sont **archivés** dans [`archive/`]
 
 **Références**
 
-- Spec : `docs/hypedexer_endpoints.json` (sync : `curl -sS https://api-eu.hypedexer.com/openapi.json -o docs/hypedexer_endpoints.json`)
+- Spec : `docs/hypedexer_endpoints.json` (sync : `curl -sS https://api.hypedexer.com/openapi.json -o docs/hypedexer_endpoints.json`)
 - Inventaire : `npm run hypedexer:inventory` → `docs/hypedexer_endpoints.inventory.md`
 - Architecture : `docs/CLIENT_ARCHITECTURE.md` section 11
 - Redis : `src/constants/hypedexer.cache.ts`

@@ -513,7 +513,7 @@ This architecture allows for easy extensibility and simplified maintenance. Each
 
 ## 11. HypeDexer (HL Indexer) REST expansion
 
-**OpenAPI source:** `docs/hypedexer_endpoints.json` (refresh from `https://api-eu.hypedexer.com/openapi.json` if needed). **Inventory:** `npm run hypedexer:inventory` → `docs/hypedexer_endpoints.inventory.md`.
+**OpenAPI source:** `docs/hypedexer_endpoints.json` (refresh from `https://api.hypedexer.com/openapi.json` if needed). **Inventory:** `npm run hypedexer:inventory` → `docs/hypedexer_endpoints.inventory.md`.
 
 ### Folder layout (new code)
 

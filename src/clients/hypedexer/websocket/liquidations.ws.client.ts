@@ -18,7 +18,7 @@ export type LiquidationCallback = (liquidations: Liquidation[]) => void;
 /**
  * HypeDexer WebSocket Client for Liquidations
  * 
- * Connects to wss://api-eu.hypedexer.com/ws and subscribes to liquidation events.
+ * Connects to wss://api.hypedexer.com/ws and subscribes to liquidation events.
  * Follows singleton pattern like other clients in the architecture.
  * 
  * Features:
@@ -30,7 +30,7 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
   private static instance: HypeDexerLiquidationsWSClient;
 
   // Configuration
-  private static readonly WS_URL = process.env.HYPEDEXER_WS_URL || 'wss://api-eu.hypedexer.com/ws';
+  private static readonly WS_URL = process.env.HYPEDEXER_WS_URL || 'wss://api.hypedexer.com/ws';
   private static readonly API_KEY = process.env.HL_INDEXER_API_KEY || '';
 
   // Subscription state
