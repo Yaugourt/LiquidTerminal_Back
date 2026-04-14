@@ -7,7 +7,8 @@ import { IndexerFillsService } from './indexer-fills.service';
 import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
-const PAGE_LIMIT = 2000;
+/** HypeDexer `GET /fills/` rejects `limit` above 1000 (422). */
+const PAGE_LIMIT = 1000;
 const MAX_SCAN_ROWS = 50_000;
 /** Stay under common reverse-proxy timeouts (e.g. ~60s on Railway) while paginating upstream. */
 const COMPUTE_BUDGET_MS = 45_000;
