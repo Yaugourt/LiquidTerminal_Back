@@ -21,7 +21,7 @@ router.get(
     try {
       const q = req.query;
       const data = await service.getLeaderboard({
-        by: (q.by as 'volume' | 'pnl' | 'trades') ?? 'volume',
+        by: (q.by as 'volume' | 'pnl' | 'trades' | 'priority_fees') ?? 'volume',
         hours: q.hours !== undefined ? Number(q.hours) : 24,
         limit: q.limit !== undefined ? Number(q.limit) : 20,
       });

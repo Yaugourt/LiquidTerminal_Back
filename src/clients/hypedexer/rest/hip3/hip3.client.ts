@@ -78,6 +78,23 @@ export class HypeDexerHip3Client extends BaseApiService {
     return this.getUpstream('/hip3/overview');
   }
 
+  public getPriorityFeesGossipStatus(): Promise<HypeDexerApiResponse> {
+    return this.getUpstream('/hip3/priority-fees/gossip/status');
+  }
+
+  public getPriorityFeesGossipHistory(
+    params: {
+      slot_id?: number;
+      start_time?: string;
+      end_time?: string;
+      offset?: number;
+      limit?: number;
+      order?: string;
+    } = {}
+  ): Promise<HypeDexerApiResponse> {
+    return this.getUpstream(`/hip3/priority-fees/gossip/history${buildQuery(params)}`);
+  }
+
   public getAuctions(params: { status?: string; limit?: number; offset?: number } = {}): Promise<HypeDexerApiResponse> {
     return this.getUpstream(`/hip3/auctions${buildQuery(params)}`);
   }

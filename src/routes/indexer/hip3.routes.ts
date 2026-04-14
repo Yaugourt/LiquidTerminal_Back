@@ -7,6 +7,8 @@ import {
   hip3DexsQuerySchema,
   hip3DexIdParamsSchema,
   hip3OverviewSchema,
+  hip3PriorityFeesGossipStatusSchema,
+  hip3PriorityFeesGossipHistoryQuerySchema,
   hip3AuctionsQuerySchema,
   hip3AuctionCurrentSchema,
   hip3AuctionsHistoryQuerySchema,
@@ -55,6 +57,43 @@ router.get(
       res.json({ success: true, data: await svc.getOverview() });
     } catch (e) {
       send502(res, 'INDEXER_HIP3_OVERVIEW_ERROR', e);
+    }
+  }) as RequestHandler
+);
+
+router.get(
+  '/priority-fees/gossip/status',
+  marketRateLimiter,
+  validateGetRequest(hip3PriorityFeesGossipStatusSchema),
+  (async (_req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: await svc.getPriorityFeesGossipStatus() });
+    } catch (e) {
+      send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_STATUS_ERROR', e);
+    }
+  }) as RequestHandler
+);
+
+router.get(
+  '/priority-fees/gossip/history',
+  marketRateLimiter,
+  validateGetRequest(hip3PriorityFeesGossipHistoryQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const q = req.query;
+      res.json({
+        success: true,
+        data: await svc.getPriorityFeesGossipHistory({
+          slot_id: num(q.slot_id),
+          start_time: str(q.start_time),
+          end_time: str(q.end_time),
+          offset: num(q.offset),
+          limit: num(q.limit),
+          order: str(q.order),
+        }),
+      });
+    } catch (e) {
+      send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_HISTORY_ERROR', e);
     }
   }) as RequestHandler
 );

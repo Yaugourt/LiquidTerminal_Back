@@ -24,6 +24,7 @@
 | GET | `/overview/total-fills-24h` | … + /indexer/overview/total-fills-24h |
 | GET | `/overview/trading-volume-24h` | … + /indexer/overview/trading-volume-24h |
 | GET | `/analytics/fills/stats` | HypeDexerAnalyticsIndexerClient + /indexer/analytics/fills/stats |
+| GET | `/analytics/priority-fees/stats` | HypeDexerAnalyticsIndexerClient + /indexer/analytics/priority-fees/stats |
 | GET | `/builders/list` | HypeDexerBuildersIndexerClient + /indexer/builders/list |
 | GET | `/builders/stats` | … + /indexer/builders/stats |
 | GET | `/builders/stats/all-timeframes` | … + /indexer/builders/stats/all-timeframes |
@@ -38,6 +39,8 @@
 | GET | `/hip3/dexs` | … + /indexer/hip3/dexs |
 | GET | `/hip3/dexs/{dex_id}` | … + /indexer/hip3/dexs/:dex_id |
 | GET | `/hip3/overview` | … + /indexer/hip3/overview |
+| GET | `/hip3/priority-fees/gossip/status` | HypeDexerHip3Client + /indexer/hip3/priority-fees/gossip/status |
+| GET | `/hip3/priority-fees/gossip/history` | HypeDexerHip3Client + /indexer/hip3/priority-fees/gossip/history |
 | GET | `/hip3/auctions` | … + /indexer/hip3/auctions |
 | GET | `/hip3/auctions/current` | … + /indexer/hip3/auctions/current |
 | GET | `/hip3/auctions/history` | … + /indexer/hip3/auctions/history |
@@ -72,10 +75,10 @@
 
 ## Summary
 
-- **OpenAPI paths (operations):** 69
-- **Implemented** (exact match to polling REST clients under hypedexer/rest): 68
+- **OpenAPI paths (operations):** 83
+- **Implemented** (exact match to polling REST clients under hypedexer/rest): 71
 - **Partial** (spec differs from current client URL): 0
-- **Missing**: 0
+- **Missing**: 11
 - **WebSocket note** (`/ws`): 1
 
 ## Polling REST clients (hypedexer/rest — app routes)
@@ -95,6 +98,7 @@
 |--------|--------|------|------|-------------|
 | Implemented | GET | `/analytics/fills/stats` | Analytics | `get_fills_stats_analytics_fills_stats_get` |
 | Implemented | GET | `/analytics/liquidations/stats` | Analytics | `get_liquidations_stats_analytics_liquidations_stats_get` |
+| Implemented | GET | `/analytics/priority-fees/stats` | Analytics | `get_priority_fees_stats_analytics_priority_fees_stats_get` |
 | Implemented | GET | `/builders/list` | Builders | `list_builders_builders_list_get` |
 | Implemented | GET | `/builders/stats` | Builders | `builder_global_stats_builders_stats_get` |
 | Implemented | GET | `/builders/stats/all-timeframes` | Builders | `builder_stats_all_timeframes_builders_stats_all_timeframes_get` |
@@ -104,6 +108,17 @@
 | Implemented | GET | `/completed-trades/` | Completed Trades | `list_completed_trades_completed_trades__get` |
 | Implemented | GET | `/completed-trades/summary` | Completed Trades | `completed_trades_summary_completed_trades_summary_get` |
 | Implemented | GET | `/completed-trades/{trade_id}/fills` | Completed Trades | `get_fills_for_trade_completed_trades__trade_id__fills_get` |
+| Missing | GET | `/evm/blocks` | EVM | `get_blocks_evm_blocks_get` |
+| Missing | GET | `/evm/blocks/{block_number}` | EVM | `get_block_evm_blocks__block_number__get` |
+| Missing | GET | `/evm/blocks/{block_number}/transactions` | EVM | `get_block_transactions_evm_blocks__block_number__transactions_get` |
+| Missing | GET | `/evm/bridge/events` | EVM | `get_bridge_events_evm_bridge_events_get` |
+| Missing | GET | `/evm/ledger/transfers` | EVM | `get_ledger_transfers_evm_ledger_transfers_get` |
+| Missing | GET | `/evm/logs` | EVM | `get_logs_evm_logs_get` |
+| Missing | GET | `/evm/stats` | EVM | `get_stats_evm_stats_get` |
+| Missing | GET | `/evm/stats/daily` | EVM | `get_daily_stats_evm_stats_daily_get` |
+| Missing | GET | `/evm/transactions` | EVM | `get_transactions_evm_transactions_get` |
+| Missing | GET | `/evm/user/{address}/ledger-events` | EVM | `get_user_ledger_events_evm_user__address__ledger_events_get` |
+| Missing | GET | `/evm/user/{address}/ledger-summary` | EVM | `get_user_ledger_summary_evm_user__address__ledger_summary_get` |
 | Implemented | GET | `/fills/` | Fills | `get_fills_fills__get` |
 | Implemented | GET | `/fills/count` | Fills | `get_fills_count_fills_count_get` |
 | Implemented | GET | `/fills/recent` | Fills | `get_fills_recent_fills_recent_get` |
@@ -125,6 +140,8 @@
 | Implemented | GET | `/hip3/ohlcv` | HIP-3 | `get_ohlcv_hip3_ohlcv_get` |
 | Implemented | GET | `/hip3/oracle/stats` | HIP-3 | `get_oracle_stats_hip3_oracle_stats_get` |
 | Implemented | GET | `/hip3/overview` | HIP-3 | `get_overview_hip3_overview_get` |
+| Implemented | GET | `/hip3/priority-fees/gossip/history` | Priority Fees, HIP-3 | `get_gossip_history_hip3_priority_fees_gossip_history_get` |
+| Implemented | GET | `/hip3/priority-fees/gossip/status` | Priority Fees, HIP-3 | `get_gossip_status_hip3_priority_fees_gossip_status_get` |
 | Implemented | GET | `/hip3/snapshots` | HIP-3 | `get_snapshots_hip3_snapshots_get` |
 | Implemented | GET | `/hip3/stats/traders` | HIP-3 | `get_trader_stats_hip3_stats_traders_get` |
 | Implemented | GET | `/hip3/top-movers` | HIP-3 | `get_top_movers_hip3_top_movers_get` |

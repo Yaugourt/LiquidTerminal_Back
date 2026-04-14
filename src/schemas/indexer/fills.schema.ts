@@ -3,6 +3,14 @@ import { z } from 'zod';
 const optionalString = z.string().max(256).optional();
 const optionalNum = z.coerce.number().optional();
 
+/** Query param boolean: only true/false strings (coerce.boolean treats "false" as true). */
+const optionalHasPriorityGas = z.preprocess((val: unknown) => {
+  if (val === undefined || val === null || val === '') return undefined;
+  if (val === true || val === 'true') return true;
+  if (val === false || val === 'false') return false;
+  return undefined;
+}, z.boolean().optional());
+
 /**
  * Query validation for GET /indexer/fills, /indexer/fills/recent (mirrors OpenAPI query params).
  */
@@ -17,6 +25,7 @@ const fillsQueryShape = {
   limit: z.coerce.number().int().min(1).max(1000).optional(),
   cursor: optionalString,
   order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
+  has_priority_gas: optionalHasPriorityGas,
 };
 
 export const indexerFillsQuerySchema = z.object({
@@ -40,6 +49,7 @@ const userFillsQueryShape = {
   limit: z.coerce.number().int().min(1).max(1000).optional(),
   cursor: optionalString,
   order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
+  has_priority_gas: optionalHasPriorityGas,
 };
 
 export const indexerFillsUserAddressQuerySchema = z.object({
@@ -59,6 +69,7 @@ const spotFillsQueryShape = {
   offset: z.coerce.number().int().min(0).optional(),
   limit: z.coerce.number().int().min(1).max(1000).optional(),
   order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
+  has_priority_gas: optionalHasPriorityGas,
 };
 
 export const indexerFillsSpotQuerySchema = z.object({
@@ -75,6 +86,7 @@ export const indexerFillsSpotUserQuerySchema = z.object({
     offset: z.coerce.number().int().min(0).optional(),
     limit: z.coerce.number().int().min(1).max(1000).optional(),
     order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
+    has_priority_gas: optionalHasPriorityGas,
   }),
   params: z.object({
     user_address: ethAddress,

@@ -16,6 +16,8 @@ export interface IndexerFillsQuery {
   limit?: number;
   cursor?: string;
   order?: string;
+  /** When set, filter fills with/without priority gas (omitted = no filter). */
+  has_priority_gas?: boolean;
 }
 
 export interface IndexerFillsUserByAddressQuery {
@@ -25,6 +27,7 @@ export interface IndexerFillsUserByAddressQuery {
   offset?: number;
   cursor?: string;
   order?: string;
+  has_priority_gas?: boolean;
 }
 
 export interface IndexerFillsSpotQuery {
@@ -37,6 +40,7 @@ export interface IndexerFillsSpotQuery {
   offset?: number;
   limit?: number;
   order?: string;
+  has_priority_gas?: boolean;
 }
 
 /**
@@ -68,7 +72,7 @@ export class HypeDexerFillsClient extends BaseApiService {
 
   private buildQuery(params: IndexerFillsQuery): string {
     const sp = new URLSearchParams();
-    const entries: [string, string | number | undefined][] = [
+    const entries: [string, string | number | boolean | undefined][] = [
       ['user', params.user],
       ['coin', params.coin],
       ['side', params.side],
@@ -79,6 +83,7 @@ export class HypeDexerFillsClient extends BaseApiService {
       ['limit', params.limit],
       ['cursor', params.cursor],
       ['order', params.order],
+      ['has_priority_gas', params.has_priority_gas],
     ];
     for (const [k, v] of entries) {
       if (v === undefined || v === null || v === '') continue;
@@ -119,13 +124,14 @@ export class HypeDexerFillsClient extends BaseApiService {
 
   private buildUserByAddressQuery(params: IndexerFillsUserByAddressQuery): string {
     const sp = new URLSearchParams();
-    const entries: [string, string | number | undefined][] = [
+    const entries: [string, string | number | boolean | undefined][] = [
       ['time_range', params.time_range],
       ['coin', params.coin],
       ['limit', params.limit],
       ['offset', params.offset],
       ['cursor', params.cursor],
       ['order', params.order],
+      ['has_priority_gas', params.has_priority_gas],
     ];
     for (const [k, v] of entries) {
       if (v === undefined || v === null || v === '') continue;
@@ -137,7 +143,7 @@ export class HypeDexerFillsClient extends BaseApiService {
 
   private buildSpotQuery(params: IndexerFillsSpotQuery): string {
     const sp = new URLSearchParams();
-    const entries: [string, string | number | undefined][] = [
+    const entries: [string, string | number | boolean | undefined][] = [
       ['user', params.user],
       ['coin', params.coin],
       ['coins', params.coins],
@@ -147,6 +153,7 @@ export class HypeDexerFillsClient extends BaseApiService {
       ['offset', params.offset],
       ['limit', params.limit],
       ['order', params.order],
+      ['has_priority_gas', params.has_priority_gas],
     ];
     for (const [k, v] of entries) {
       if (v === undefined || v === null || v === '') continue;

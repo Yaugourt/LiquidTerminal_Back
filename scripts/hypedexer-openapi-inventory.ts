@@ -31,6 +31,11 @@ const HYPEDEXER_REST_INDEXER_MOUNT: Array<{ method: string; path: string; source
   { method: 'GET', path: '/overview/total-fills-24h', source: '… + /indexer/overview/total-fills-24h' },
   { method: 'GET', path: '/overview/trading-volume-24h', source: '… + /indexer/overview/trading-volume-24h' },
   { method: 'GET', path: '/analytics/fills/stats', source: 'HypeDexerAnalyticsIndexerClient + /indexer/analytics/fills/stats' },
+  {
+    method: 'GET',
+    path: '/analytics/priority-fees/stats',
+    source: 'HypeDexerAnalyticsIndexerClient + /indexer/analytics/priority-fees/stats',
+  },
   { method: 'GET', path: '/builders/list', source: 'HypeDexerBuildersIndexerClient + /indexer/builders/list' },
   { method: 'GET', path: '/builders/stats', source: '… + /indexer/builders/stats' },
   { method: 'GET', path: '/builders/stats/all-timeframes', source: '… + /indexer/builders/stats/all-timeframes' },
@@ -45,6 +50,16 @@ const HYPEDEXER_REST_INDEXER_MOUNT: Array<{ method: string; path: string; source
   { method: 'GET', path: '/hip3/dexs', source: '… + /indexer/hip3/dexs' },
   { method: 'GET', path: '/hip3/dexs/{dex_id}', source: '… + /indexer/hip3/dexs/:dex_id' },
   { method: 'GET', path: '/hip3/overview', source: '… + /indexer/hip3/overview' },
+  {
+    method: 'GET',
+    path: '/hip3/priority-fees/gossip/status',
+    source: 'HypeDexerHip3Client + /indexer/hip3/priority-fees/gossip/status',
+  },
+  {
+    method: 'GET',
+    path: '/hip3/priority-fees/gossip/history',
+    source: 'HypeDexerHip3Client + /indexer/hip3/priority-fees/gossip/history',
+  },
   { method: 'GET', path: '/hip3/auctions', source: '… + /indexer/hip3/auctions' },
   { method: 'GET', path: '/hip3/auctions/current', source: '… + /indexer/hip3/auctions/current' },
   { method: 'GET', path: '/hip3/auctions/history', source: '… + /indexer/hip3/auctions/history' },

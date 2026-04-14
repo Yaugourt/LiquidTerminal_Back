@@ -10,6 +10,9 @@ export interface IndexerAnalyticsFillsStatsQuery {
   coin?: string | null;
 }
 
+/** Same query shape as fills stats (OpenAPI: hours 1–168, optional coin). */
+export type IndexerAnalyticsPriorityFeesStatsQuery = IndexerAnalyticsFillsStatsQuery;
+
 /**
  * HypeDexer REST — Analytics (GET /analytics/fills/stats).
  */
@@ -58,6 +61,17 @@ export class HypeDexerAnalyticsIndexerClient extends BaseApiService {
       const q = this.buildFillsStatsQuery(params);
       const path = `/analytics/fills/stats${q}`;
       logDeduplicator.info('HypeDexerAnalyticsIndexerClient.getFillsStats', { path });
+      return this.get<HypeDexerApiResponse>(path);
+    });
+  }
+
+  public async getPriorityFeesStats(
+    params: IndexerAnalyticsPriorityFeesStatsQuery = {}
+  ): Promise<HypeDexerApiResponse> {
+    return this.circuitBreaker.execute(async () => {
+      const q = this.buildFillsStatsQuery(params);
+      const path = `/analytics/priority-fees/stats${q}`;
+      logDeduplicator.info('HypeDexerAnalyticsIndexerClient.getPriorityFeesStats', { path });
       return this.get<HypeDexerApiResponse>(path);
     });
   }

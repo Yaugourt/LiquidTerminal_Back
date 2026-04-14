@@ -1,6 +1,7 @@
 import {
   HypeDexerAnalyticsIndexerClient,
   IndexerAnalyticsFillsStatsQuery,
+  IndexerAnalyticsPriorityFeesStatsQuery,
 } from '../../clients/hypedexer/rest/analytics/analytics-indexer.client';
 import type { HypeDexerApiResponse } from '../../types/hypedexer-api.types';
 
@@ -17,5 +18,11 @@ export class IndexerAnalyticsService {
 
   public async getFillsStats(params: IndexerAnalyticsFillsStatsQuery): Promise<HypeDexerApiResponse> {
     return this.client.getFillsStats(params);
+  }
+
+  public async getPriorityFeesStats(
+    params: IndexerAnalyticsPriorityFeesStatsQuery
+  ): Promise<HypeDexerApiResponse> {
+    return this.client.getPriorityFeesStats(params);
   }
 }

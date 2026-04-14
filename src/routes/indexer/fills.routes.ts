@@ -19,6 +19,18 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 const router = Router();
 const service = IndexerFillsService.getInstance();
 
+function optionalQueryBoolean(query: Request['query'], key: string): boolean | undefined {
+  const v = query[key];
+  if (v === undefined || v === '') return undefined;
+  if (Array.isArray(v)) return optionalQueryBoolean({ [key]: v[0] } as Request['query'], key);
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string') {
+    if (v === 'true') return true;
+    if (v === 'false') return false;
+  }
+  return undefined;
+}
+
 function queryToParams(query: Request['query']): IndexerFillsQuery {
   const params: IndexerFillsQuery = {};
   if (typeof query.user === 'string') params.user = query.user;
@@ -31,6 +43,8 @@ function queryToParams(query: Request['query']): IndexerFillsQuery {
   if (query.limit !== undefined) params.limit = Number(query.limit);
   if (typeof query.cursor === 'string') params.cursor = query.cursor;
   if (typeof query.order === 'string') params.order = query.order;
+  const hpg = optionalQueryBoolean(query, 'has_priority_gas');
+  if (hpg !== undefined) params.has_priority_gas = hpg;
   return params;
 }
 
@@ -42,6 +56,8 @@ function userFillsQuery(query: Request['query']): IndexerFillsUserByAddressQuery
   if (query.limit !== undefined) params.limit = Number(query.limit);
   if (typeof query.cursor === 'string') params.cursor = query.cursor;
   if (typeof query.order === 'string') params.order = query.order;
+  const hpgU = optionalQueryBoolean(query, 'has_priority_gas');
+  if (hpgU !== undefined) params.has_priority_gas = hpgU;
   return params;
 }
 
@@ -56,6 +72,8 @@ function spotQueryToParams(query: Request['query']): IndexerFillsSpotQuery {
   if (query.offset !== undefined) params.offset = Number(query.offset);
   if (query.limit !== undefined) params.limit = Number(query.limit);
   if (typeof query.order === 'string') params.order = query.order;
+  const hpgS = optionalQueryBoolean(query, 'has_priority_gas');
+  if (hpgS !== undefined) params.has_priority_gas = hpgS;
   return params;
 }
 
