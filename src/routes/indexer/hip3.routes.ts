@@ -49,6 +49,13 @@ function send502(res: Response, code: string, error: unknown): void {
   });
 }
 
+/** Preserve HypeDexer `total_count` before unwrap drops the envelope. */
+function readHypeDexerTotalCount(body: unknown): number | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const tc = (body as Record<string, unknown>).total_count;
+  return typeof tc === 'number' && Number.isFinite(tc) ? tc : undefined;
+}
+
 router.get(
   '/overview',
   marketRateLimiter,
@@ -91,7 +98,15 @@ router.get(
         limit: num(q.limit),
         order: str(q.order),
       });
-      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
+      const totalCount = readHypeDexerTotalCount(upstream);
+      const rows = unwrapHypeDexerApiPayload(upstream);
+      res.json({
+        success: true,
+        data: {
+          rows: Array.isArray(rows) ? rows : [],
+          total_count: totalCount ?? null,
+        },
+      });
     } catch (e) {
       send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_HISTORY_ERROR', e);
     }
