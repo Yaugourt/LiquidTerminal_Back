@@ -13,6 +13,24 @@ const MAX_SCAN_ROWS = 50_000;
 /** Stay under common reverse-proxy timeouts (e.g. ~60s on Railway) while paginating upstream. */
 const COMPUTE_BUDGET_MS = 45_000;
 
+/**
+ * Max pages (× PAGE_LIMIT rows) per chart bucket. Scales down when there are many buckets so
+ * total upstream calls stay bounded. A single global DESC scan piles rows into the newest bucket only;
+ * per-bucket windows keep the series shape honest under the same budget.
+ */
+function maxPagesPerBucket(numBuckets: number): number {
+  if (numBuckets <= 24) {
+    return Math.min(18, Math.max(5, Math.floor(120 / numBuckets)));
+  }
+  if (numBuckets <= 48) {
+    return Math.min(12, Math.max(3, Math.floor(80 / numBuckets)));
+  }
+  if (numBuckets <= 96) {
+    return Math.min(6, Math.max(2, Math.floor(100 / numBuckets)));
+  }
+  return Math.max(1, Math.min(3, Math.floor(120 / numBuckets)));
+}
+
 export interface PriorityFeesFillsTimeseriesBucket {
   bucketStart: string;
   totalGas: number;
@@ -178,73 +196,112 @@ export class IndexerPriorityFeesAggregationService {
     const gasByIndex = new Array<number>(numBuckets).fill(0);
     const countByIndex = new Array<number>(numBuckets).fill(0);
 
-    let offset = 0;
     let scannedRows = 0;
     let partial = false;
     let computationNote: string | undefined;
     const computeStarted = Date.now();
+    const maxPages = maxPagesPerBucket(numBuckets);
+    let bucketCapped = false;
 
     try {
-      while (scannedRows < MAX_SCAN_ROWS) {
+      bucketLoop: for (let bucketIndex = 0; bucketIndex < numBuckets; bucketIndex++) {
         if (Date.now() - computeStarted > COMPUTE_BUDGET_MS) {
           partial = true;
           computationNote =
             'Stopped early to stay within server time limits; chart may be incomplete.';
-          break;
+          break bucketLoop;
         }
-
-        let upstream: unknown;
-        try {
-          upstream = await this.fills.getFills({
-            start_time: startIso,
-            end_time: endIso,
-            has_priority_gas: true,
-            limit: PAGE_LIMIT,
-            offset,
-            order: 'DESC',
-          });
-        } catch (pageError) {
-          partial = true;
-          computationNote =
-            pageError instanceof Error
-              ? `Upstream fills request failed: ${pageError.message}`
-              : 'Upstream fills request failed.';
-          logDeduplicator.warn('Priority fees fills timeseries page error', {
-            hours,
-            bucketHours,
-            offset,
-            errorMessage: pageError instanceof Error ? pageError.message : String(pageError),
-          });
-          break;
-        }
-
-        const rows = extractFillsRows(upstream);
-        if (rows.length === 0) {
-          break;
-        }
-
-        for (const row of rows) {
-          const ms = rowTimeMs(row);
-          if (ms === null || ms < windowStartMs || ms > windowEndMs) {
-            continue;
-          }
-          const idx = Math.min(
-            numBuckets - 1,
-            Math.max(0, Math.floor((ms - windowStartMs) / bucketMs))
-          );
-          gasByIndex[idx] += rowPriorityGas(row);
-          countByIndex[idx] += 1;
-        }
-
-        scannedRows += rows.length;
-        if (rows.length < PAGE_LIMIT) {
-          break;
-        }
-        offset += PAGE_LIMIT;
         if (scannedRows >= MAX_SCAN_ROWS) {
           partial = true;
-          break;
+          break bucketLoop;
         }
+
+        const bucketStartMs = windowStartMs + bucketIndex * bucketMs;
+        const bucketEndMs =
+          bucketIndex === numBuckets - 1
+            ? windowEndMs
+            : Math.min(windowEndMs, bucketStartMs + bucketMs);
+        const bucketStartIso = toIsoUtc(new Date(bucketStartMs));
+        const bucketEndIso = toIsoUtc(new Date(bucketEndMs));
+        const isLastBucket = bucketIndex === numBuckets - 1;
+
+        let offset = 0;
+        let pagesForBucket = 0;
+
+        while (pagesForBucket < maxPages && scannedRows < MAX_SCAN_ROWS) {
+          if (Date.now() - computeStarted > COMPUTE_BUDGET_MS) {
+            partial = true;
+            computationNote =
+              computationNote ??
+              'Stopped early to stay within server time limits; chart may be incomplete.';
+            break bucketLoop;
+          }
+
+          let upstream: unknown;
+          try {
+            upstream = await this.fills.getFills({
+              start_time: bucketStartIso,
+              end_time: bucketEndIso,
+              has_priority_gas: true,
+              limit: PAGE_LIMIT,
+              offset,
+              order: 'ASC',
+            });
+          } catch (pageError) {
+            partial = true;
+            computationNote =
+              pageError instanceof Error
+                ? `Upstream fills request failed: ${pageError.message}`
+                : 'Upstream fills request failed.';
+            logDeduplicator.warn('Priority fees fills timeseries bucket page error', {
+              hours,
+              bucketHours,
+              bucketIndex,
+              offset,
+              errorMessage: pageError instanceof Error ? pageError.message : String(pageError),
+            });
+            break bucketLoop;
+          }
+
+          const rows = extractFillsRows(upstream);
+          pagesForBucket += 1;
+
+          if (rows.length === 0) {
+            break;
+          }
+
+          for (const row of rows) {
+            const ms = rowTimeMs(row);
+            if (ms === null || ms < bucketStartMs) {
+              continue;
+            }
+            // Half-open buckets [start, end) match floor((t - windowStart) / bucketMs); last bucket includes end.
+            if (isLastBucket) {
+              if (ms > bucketEndMs) continue;
+            } else if (ms >= bucketEndMs) {
+              continue;
+            }
+            gasByIndex[bucketIndex] += rowPriorityGas(row);
+            countByIndex[bucketIndex] += 1;
+          }
+
+          scannedRows += rows.length;
+
+          if (rows.length < PAGE_LIMIT) {
+            break;
+          }
+
+          offset += PAGE_LIMIT;
+
+          if (pagesForBucket >= maxPages && rows.length === PAGE_LIMIT) {
+            bucketCapped = true;
+            partial = true;
+          }
+        }
+      }
+
+      if (bucketCapped && !computationNote) {
+        computationNote = `Some buckets may be capped at ~${maxPages * PAGE_LIMIT} fills per interval (high volume).`;
       }
     } catch (unexpected) {
       partial = true;
