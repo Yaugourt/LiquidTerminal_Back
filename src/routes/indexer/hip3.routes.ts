@@ -7,6 +7,8 @@ import {
   hip3DexsQuerySchema,
   hip3DexIdParamsSchema,
   hip3OverviewSchema,
+  hip3PriorityFeesGossipStatusSchema,
+  hip3PriorityFeesGossipHistoryQuerySchema,
   hip3AuctionsQuerySchema,
   hip3AuctionCurrentSchema,
   hip3AuctionsHistoryQuerySchema,
@@ -23,6 +25,7 @@ import {
 } from '../../schemas/indexer/hip3.schema';
 import { IndexerHip3Service } from '../../services/indexer/indexer-hip3.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
 
 const router = Router();
 const svc = IndexerHip3Service.getInstance();
@@ -46,6 +49,13 @@ function send502(res: Response, code: string, error: unknown): void {
   });
 }
 
+/** Preserve HypeDexer `total_count` before unwrap drops the envelope. */
+function readHypeDexerTotalCount(body: unknown): number | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const tc = (body as Record<string, unknown>).total_count;
+  return typeof tc === 'number' && Number.isFinite(tc) ? tc : undefined;
+}
+
 router.get(
   '/overview',
   marketRateLimiter,
@@ -55,6 +65,50 @@ router.get(
       res.json({ success: true, data: await svc.getOverview() });
     } catch (e) {
       send502(res, 'INDEXER_HIP3_OVERVIEW_ERROR', e);
+    }
+  }) as RequestHandler
+);
+
+router.get(
+  '/priority-fees/gossip/status',
+  marketRateLimiter,
+  validateGetRequest(hip3PriorityFeesGossipStatusSchema),
+  (async (_req: Request, res: Response) => {
+    try {
+      const upstream = await svc.getPriorityFeesGossipStatus();
+      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
+    } catch (e) {
+      send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_STATUS_ERROR', e);
+    }
+  }) as RequestHandler
+);
+
+router.get(
+  '/priority-fees/gossip/history',
+  marketRateLimiter,
+  validateGetRequest(hip3PriorityFeesGossipHistoryQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const q = req.query;
+      const upstream = await svc.getPriorityFeesGossipHistory({
+        slot_id: num(q.slot_id),
+        start_time: str(q.start_time),
+        end_time: str(q.end_time),
+        offset: num(q.offset),
+        limit: num(q.limit),
+        order: str(q.order),
+      });
+      const totalCount = readHypeDexerTotalCount(upstream);
+      const rows = unwrapHypeDexerApiPayload(upstream);
+      res.json({
+        success: true,
+        data: {
+          rows: Array.isArray(rows) ? rows : [],
+          total_count: totalCount ?? null,
+        },
+      });
+    } catch (e) {
+      send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_HISTORY_ERROR', e);
     }
   }) as RequestHandler
 );

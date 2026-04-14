@@ -35,6 +35,16 @@ export class IndexerHip3Service {
     return this.client.getOverview();
   }
 
+  public getPriorityFeesGossipStatus(): Promise<HypeDexerApiResponse> {
+    return this.client.getPriorityFeesGossipStatus();
+  }
+
+  public getPriorityFeesGossipHistory(
+    p: Parameters<HypeDexerHip3Client['getPriorityFeesGossipHistory']>[0]
+  ): Promise<HypeDexerApiResponse> {
+    return this.client.getPriorityFeesGossipHistory(p);
+  }
+
   public getAuctions(p: Parameters<HypeDexerHip3Client['getAuctions']>[0]): Promise<HypeDexerApiResponse> {
     return this.client.getAuctions(p);
   }

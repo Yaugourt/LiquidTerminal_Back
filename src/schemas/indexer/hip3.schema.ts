@@ -43,6 +43,20 @@ export const hip3DexIdParamsSchema = z.object({
 
 export const hip3OverviewSchema = z.object(empty);
 
+export const hip3PriorityFeesGossipStatusSchema = z.object(empty);
+
+export const hip3PriorityFeesGossipHistoryQuerySchema = z.object({
+  query: z.object({
+    slot_id: z.coerce.number().int().min(0).max(4).optional(),
+    start_time: optionalString,
+    end_time: optionalString,
+    offset: z.coerce.number().int().min(0).optional(),
+    limit: z.coerce.number().int().min(1).max(10000).optional(),
+    order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
+  }),
+  params: z.object({}),
+});
+
 export const hip3AuctionsQuerySchema = z.object({
   query: z.object({
     status: optionalString,

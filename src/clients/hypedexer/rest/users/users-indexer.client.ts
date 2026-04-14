@@ -6,7 +6,7 @@ import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api
 import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
 
 export interface IndexerUsersLeaderboardQuery {
-  by?: 'volume' | 'pnl' | 'trades';
+  by?: 'volume' | 'pnl' | 'trades' | 'priority_fees';
   hours?: number;
   limit?: number;
 }

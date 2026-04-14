@@ -9,7 +9,7 @@ const timeRangeQuery = {
 
 export const indexerUsersLeaderboardQuerySchema = z.object({
   query: z.object({
-    by: z.enum(['volume', 'pnl', 'trades']).optional().default('volume'),
+    by: z.enum(['volume', 'pnl', 'trades', 'priority_fees']).optional().default('volume'),
     hours: z.coerce.number().int().min(1).max(168).optional().default(24),
     limit: z.coerce.number().int().min(1).max(100).optional().default(20),
   }),
