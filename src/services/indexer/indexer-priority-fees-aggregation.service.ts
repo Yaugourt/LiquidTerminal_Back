@@ -9,6 +9,8 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const PAGE_LIMIT = 2000;
 const MAX_SCAN_ROWS = 50_000;
+/** Stay under common reverse-proxy timeouts (e.g. ~60s on Railway) while paginating upstream. */
+const COMPUTE_BUDGET_MS = 45_000;
 
 export interface PriorityFeesFillsTimeseriesBucket {
   bucketStart: string;
@@ -22,6 +24,8 @@ export interface PriorityFeesFillsTimeseriesResult {
   buckets: PriorityFeesFillsTimeseriesBucket[];
   partial: boolean;
   scannedRows: number;
+  /** Present when partial is true due to time budget or upstream failure (not row-cap only). */
+  computationNote?: string;
 }
 
 function toIsoUtc(d: Date): string {
@@ -101,11 +105,59 @@ export class IndexerPriorityFeesAggregationService {
     const { hours, bucketHours } = params;
     const cacheKey = HYPEDEXER_PRIORITY_FEES_CACHE_KEYS.fillsTimeseries(hours, bucketHours);
 
-    return cacheService.getOrSet(
-      cacheKey,
-      () => this.computeFillsPriorityGasTimeseries(params),
-      HYPEDEXER_TTL.priorityFeesFillsTimeseries
-    );
+    try {
+      return await cacheService.getOrSet(
+        cacheKey,
+        () => this.computeFillsPriorityGasTimeseries(params),
+        HYPEDEXER_TTL.priorityFeesFillsTimeseries
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logDeduplicator.error('Priority fees fills timeseries unavailable (cache or compute)', {
+        hours,
+        bucketHours,
+        errorMessage: message,
+      });
+      return this.buildEmptyShellTimeseriesResult(
+        params,
+        `Service temporarily unavailable: ${message}`
+      );
+    }
+  }
+
+  /**
+   * Zero-filled buckets for the requested window — avoids 502 when cache or compute throws.
+   */
+  private buildEmptyShellTimeseriesResult(
+    params: { hours: number; bucketHours: 1 | 6 | 24 },
+    computationNote: string
+  ): PriorityFeesFillsTimeseriesResult {
+    const { hours, bucketHours } = params;
+    const end = new Date();
+    const start = new Date(end.getTime() - hours * 3600 * 1000);
+    const startIso = toIsoUtc(start);
+    const endIso = toIsoUtc(end);
+    const windowStartMs = start.getTime();
+    const windowEndMs = end.getTime();
+    const bucketMs = bucketHours * 3600 * 1000;
+    const numBuckets = Math.max(1, Math.ceil((windowEndMs - windowStartMs) / bucketMs));
+    const buckets: PriorityFeesFillsTimeseriesBucket[] = [];
+    for (let i = 0; i < numBuckets; i++) {
+      const bucketStartMs = windowStartMs + i * bucketMs;
+      buckets.push({
+        bucketStart: toIsoUtc(new Date(bucketStartMs)),
+        totalGas: 0,
+        fillCount: 0,
+      });
+    }
+    return {
+      bucketHours,
+      window: { start: startIso, end: endIso },
+      buckets,
+      partial: true,
+      scannedRows: 0,
+      computationNote,
+    };
   }
 
   private async computeFillsPriorityGasTimeseries(params: {
@@ -128,44 +180,80 @@ export class IndexerPriorityFeesAggregationService {
     let offset = 0;
     let scannedRows = 0;
     let partial = false;
+    let computationNote: string | undefined;
+    const computeStarted = Date.now();
 
-    while (scannedRows < MAX_SCAN_ROWS) {
-      const upstream = await this.fills.getFills({
-        start_time: startIso,
-        end_time: endIso,
-        has_priority_gas: true,
-        limit: PAGE_LIMIT,
-        offset,
-        order: 'DESC',
-      });
-
-      const rows = extractFillsRows(upstream);
-      if (rows.length === 0) {
-        break;
-      }
-
-      for (const row of rows) {
-        const ms = rowTimeMs(row);
-        if (ms === null || ms < windowStartMs || ms > windowEndMs) {
-          continue;
+    try {
+      while (scannedRows < MAX_SCAN_ROWS) {
+        if (Date.now() - computeStarted > COMPUTE_BUDGET_MS) {
+          partial = true;
+          computationNote =
+            'Stopped early to stay within server time limits; chart may be incomplete.';
+          break;
         }
-        const idx = Math.min(
-          numBuckets - 1,
-          Math.max(0, Math.floor((ms - windowStartMs) / bucketMs))
-        );
-        gasByIndex[idx] += rowPriorityGas(row);
-        countByIndex[idx] += 1;
-      }
 
-      scannedRows += rows.length;
-      if (rows.length < PAGE_LIMIT) {
-        break;
+        let upstream: unknown;
+        try {
+          upstream = await this.fills.getFills({
+            start_time: startIso,
+            end_time: endIso,
+            has_priority_gas: true,
+            limit: PAGE_LIMIT,
+            offset,
+            order: 'DESC',
+          });
+        } catch (pageError) {
+          partial = true;
+          computationNote =
+            pageError instanceof Error
+              ? `Upstream fills request failed: ${pageError.message}`
+              : 'Upstream fills request failed.';
+          logDeduplicator.warn('Priority fees fills timeseries page error', {
+            hours,
+            bucketHours,
+            offset,
+            errorMessage: pageError instanceof Error ? pageError.message : String(pageError),
+          });
+          break;
+        }
+
+        const rows = extractFillsRows(upstream);
+        if (rows.length === 0) {
+          break;
+        }
+
+        for (const row of rows) {
+          const ms = rowTimeMs(row);
+          if (ms === null || ms < windowStartMs || ms > windowEndMs) {
+            continue;
+          }
+          const idx = Math.min(
+            numBuckets - 1,
+            Math.max(0, Math.floor((ms - windowStartMs) / bucketMs))
+          );
+          gasByIndex[idx] += rowPriorityGas(row);
+          countByIndex[idx] += 1;
+        }
+
+        scannedRows += rows.length;
+        if (rows.length < PAGE_LIMIT) {
+          break;
+        }
+        offset += PAGE_LIMIT;
+        if (scannedRows >= MAX_SCAN_ROWS) {
+          partial = true;
+          break;
+        }
       }
-      offset += PAGE_LIMIT;
-      if (scannedRows >= MAX_SCAN_ROWS) {
-        partial = true;
-        break;
-      }
+    } catch (unexpected) {
+      partial = true;
+      computationNote =
+        unexpected instanceof Error ? unexpected.message : 'Unexpected aggregation error.';
+      logDeduplicator.error('Priority fees fills timeseries compute failed', {
+        hours,
+        bucketHours,
+        errorMessage: unexpected instanceof Error ? unexpected.message : String(unexpected),
+      });
     }
 
     const buckets: PriorityFeesFillsTimeseriesBucket[] = [];
@@ -184,6 +272,7 @@ export class IndexerPriorityFeesAggregationService {
       scannedRows,
       partial,
       bucketCount: buckets.length,
+      computationNote,
     });
 
     return {
@@ -192,6 +281,7 @@ export class IndexerPriorityFeesAggregationService {
       buckets,
       partial,
       scannedRows,
+      computationNote,
     };
   }
 }
