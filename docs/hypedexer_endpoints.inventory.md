@@ -25,7 +25,6 @@
 | GET | `/overview/trading-volume-24h` | … + /indexer/overview/trading-volume-24h |
 | GET | `/analytics/fills/stats` | HypeDexerAnalyticsIndexerClient + /indexer/analytics/fills/stats |
 | GET | `/analytics/priority-fees/stats` | HypeDexerAnalyticsIndexerClient + /indexer/analytics/priority-fees/stats |
-| GET | `/analytics/priority-fees/fills-timeseries` | IndexerPriorityFeesAggregationService (aggregates GET /fills/) + /indexer/analytics/priority-fees/fills-timeseries |
 | GET | `/builders/list` | HypeDexerBuildersIndexerClient + /indexer/builders/list |
 | GET | `/builders/stats` | … + /indexer/builders/stats |
 | GET | `/builders/stats/all-timeframes` | … + /indexer/builders/stats/all-timeframes |

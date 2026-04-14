@@ -47,19 +47,6 @@ jest.mock('../../../src/services/indexer/indexer-overview.service', () => ({
 jest.mock('../../../src/services/indexer/indexer-analytics.service', () => ({
   IndexerAnalyticsService: { getInstance: mockGetInstance },
 }));
-jest.mock('../../../src/services/indexer/indexer-priority-fees-aggregation.service', () => ({
-  IndexerPriorityFeesAggregationService: {
-    getInstance: jest.fn(() => ({
-      getFillsPriorityGasTimeseries: jest.fn().mockResolvedValue({
-        bucketHours: 1,
-        window: { start: '1970-01-01T00:00:00Z', end: '1970-01-01T00:00:00Z' },
-        buckets: [],
-        partial: false,
-        scannedRows: 0,
-      }),
-    })),
-  },
-}));
 jest.mock('../../../src/services/indexer/indexer-builders-indexer.service', () => ({
   IndexerBuildersIndexerService: { getInstance: mockGetInstance },
 }));
@@ -110,7 +97,6 @@ describe('Indexer GET validation smoke', () => {
     '/indexer/fills/count',
     '/indexer/analytics/fills/stats',
     '/indexer/analytics/priority-fees/stats',
-    '/indexer/analytics/priority-fees/fills-timeseries',
     '/indexer/overview/active-traders-24h',
     '/indexer/hip3/overview',
     '/indexer/hip3/priority-fees/gossip/status',
