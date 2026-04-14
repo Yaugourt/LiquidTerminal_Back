@@ -25,6 +25,7 @@ import {
 } from '../../schemas/indexer/hip3.schema';
 import { IndexerHip3Service } from '../../services/indexer/indexer-hip3.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
 
 const router = Router();
 const svc = IndexerHip3Service.getInstance();
@@ -67,7 +68,8 @@ router.get(
   validateGetRequest(hip3PriorityFeesGossipStatusSchema),
   (async (_req: Request, res: Response) => {
     try {
-      res.json({ success: true, data: await svc.getPriorityFeesGossipStatus() });
+      const upstream = await svc.getPriorityFeesGossipStatus();
+      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
     } catch (e) {
       send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_STATUS_ERROR', e);
     }
@@ -81,17 +83,15 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getPriorityFeesGossipHistory({
-          slot_id: num(q.slot_id),
-          start_time: str(q.start_time),
-          end_time: str(q.end_time),
-          offset: num(q.offset),
-          limit: num(q.limit),
-          order: str(q.order),
-        }),
+      const upstream = await svc.getPriorityFeesGossipHistory({
+        slot_id: num(q.slot_id),
+        start_time: str(q.start_time),
+        end_time: str(q.end_time),
+        offset: num(q.offset),
+        limit: num(q.limit),
+        order: str(q.order),
       });
+      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
     } catch (e) {
       send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_HISTORY_ERROR', e);
     }

@@ -7,6 +7,7 @@ import {
 } from '../../schemas/indexer/analytics.schema';
 import { IndexerAnalyticsService } from '../../services/indexer/indexer-analytics.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
 
 const router = Router();
 const service = IndexerAnalyticsService.getInstance();
@@ -18,11 +19,11 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { hours, coin } = req.query;
-      const data = await service.getFillsStats({
+      const upstream = await service.getFillsStats({
         hours: hours !== undefined ? Number(hours) : undefined,
         coin: typeof coin === 'string' ? coin : undefined,
       });
-      res.json({ success: true, data });
+      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
     } catch (error) {
       logDeduplicator.error('GET /indexer/analytics/fills/stats', {
         error: error instanceof Error ? error.message : String(error),
@@ -43,11 +44,11 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { hours, coin } = req.query;
-      const data = await service.getPriorityFeesStats({
+      const upstream = await service.getPriorityFeesStats({
         hours: hours !== undefined ? Number(hours) : undefined,
         coin: typeof coin === 'string' ? coin : undefined,
       });
-      res.json({ success: true, data });
+      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
     } catch (error) {
       logDeduplicator.error('GET /indexer/analytics/priority-fees/stats', {
         error: error instanceof Error ? error.message : String(error),

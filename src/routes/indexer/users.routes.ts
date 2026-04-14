@@ -9,6 +9,7 @@ import {
 } from '../../schemas/indexer/users-indexer.schema';
 import { IndexerUsersService } from '../../services/indexer/indexer-users.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
 
 const router = Router();
 const service = IndexerUsersService.getInstance();
@@ -20,12 +21,12 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const q = req.query;
-      const data = await service.getLeaderboard({
+      const upstream = await service.getLeaderboard({
         by: (q.by as 'volume' | 'pnl' | 'trades' | 'priority_fees') ?? 'volume',
         hours: q.hours !== undefined ? Number(q.hours) : 24,
         limit: q.limit !== undefined ? Number(q.limit) : 20,
       });
-      res.json({ success: true, data });
+      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
     } catch (error) {
       logDeduplicator.error('GET /indexer/users/leaderboard', {
         error: error instanceof Error ? error.message : String(error),
