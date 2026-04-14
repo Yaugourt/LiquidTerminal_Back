@@ -36,6 +36,12 @@ const HYPEDEXER_REST_INDEXER_MOUNT: Array<{ method: string; path: string; source
     path: '/analytics/priority-fees/stats',
     source: 'HypeDexerAnalyticsIndexerClient + /indexer/analytics/priority-fees/stats',
   },
+  {
+    method: 'GET',
+    path: '/analytics/priority-fees/fills-timeseries',
+    source:
+      'IndexerPriorityFeesAggregationService (aggregates GET /fills/) + /indexer/analytics/priority-fees/fills-timeseries',
+  },
   { method: 'GET', path: '/builders/list', source: 'HypeDexerBuildersIndexerClient + /indexer/builders/list' },
   { method: 'GET', path: '/builders/stats', source: '… + /indexer/builders/stats' },
   { method: 'GET', path: '/builders/stats/all-timeframes', source: '… + /indexer/builders/stats/all-timeframes' },

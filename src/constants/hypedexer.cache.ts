@@ -29,4 +29,12 @@ export const HYPEDEXER_LOCKS = {
 export const HYPEDEXER_TTL = {
   fillsCount: 30,
   overviewSlice: 55,
+  /** Aggregated priority-gas buckets from fills (on-demand + cache stampede guard). */
+  priorityFeesFillsTimeseries: 90,
+} as const;
+
+/** Cache keys for indexer-derived priority-fee aggregates (not raw HypeDexer pass-through). */
+export const HYPEDEXER_PRIORITY_FEES_CACHE_KEYS = {
+  fillsTimeseries: (hours: number, bucketHours: number) =>
+    `${HYPEDEXER_CACHE_PREFIX}:priority-fees:fills-timeseries:${hours}:${bucketHours}`,
 } as const;
