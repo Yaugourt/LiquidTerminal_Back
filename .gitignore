@@ -17,6 +17,10 @@ build/
 .env.local
 .env.*.local
 
+# Cursor (local hook state, continual-learning index)
+.cursor/hooks/state/
+.cursor/settings.json
+
 # IDE and editor files
 .idea/
 .vscode/
