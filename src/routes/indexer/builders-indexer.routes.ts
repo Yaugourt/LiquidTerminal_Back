@@ -12,6 +12,7 @@ import {
 import { IndexerBuildersIndexerService } from '../../services/indexer/indexer-builders-indexer.service';
 import type { IndexerBuildersTimeframe } from '../../clients/hypedexer/rest/builders/builders-indexer.client';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendIndexerHypeDexerSuccess } from '../../utils/indexer-hypedexer-response.util';
 
 const router = Router();
 const service = IndexerBuildersIndexerService.getInstance();
@@ -27,8 +28,8 @@ router.get(
   validateGetRequest(indexerBuildersListQuerySchema),
   (async (_req: Request, res: Response) => {
     try {
-      const data = await service.listBuilders();
-      res.json({ success: true, data });
+      const upstream = await service.listBuilders();
+      sendIndexerHypeDexerSuccess(res, upstream);
     } catch (error) {
       logDeduplicator.error('GET /indexer/builders/list', {
         error: error instanceof Error ? error.message : String(error),
@@ -48,8 +49,8 @@ router.get(
   validateGetRequest(indexerBuildersStatsAllTimeframesQuerySchema),
   (async (_req: Request, res: Response) => {
     try {
-      const data = await service.getStatsAllTimeframes();
-      res.json({ success: true, data });
+      const upstream = await service.getStatsAllTimeframes();
+      sendIndexerHypeDexerSuccess(res, upstream);
     } catch (error) {
       logDeduplicator.error('GET /indexer/builders/stats/all-timeframes', {
         error: error instanceof Error ? error.message : String(error),
@@ -91,12 +92,12 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { timeframe, sort, limit } = req.query;
-      const data = await service.getTopBuilders({
+      const upstream = await service.getTopBuilders({
         timeframe: parseTimeframe(timeframe),
         sort: typeof sort === 'string' ? sort : undefined,
         limit: limit !== undefined ? Number(limit) : undefined,
       });
-      res.json({ success: true, data });
+      sendIndexerHypeDexerSuccess(res, upstream);
     } catch (error) {
       logDeduplicator.error('GET /indexer/builders/top', {
         error: error instanceof Error ? error.message : String(error),
@@ -117,10 +118,10 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const builderAddress = String(req.params.builder_address);
-      const data = await service.getBuilderStats(builderAddress, {
+      const upstream = await service.getBuilderStats(builderAddress, {
         timeframe: parseTimeframe(req.query.timeframe),
       });
-      res.json({ success: true, data });
+      sendIndexerHypeDexerSuccess(res, upstream);
     } catch (error) {
       logDeduplicator.error('GET /indexer/builders/:address/stats', {
         error: error instanceof Error ? error.message : String(error),
@@ -142,11 +143,11 @@ router.get(
     try {
       const builderAddress = String(req.params.builder_address);
       const { timeframe, limit } = req.query;
-      const data = await service.getBuilderUsers(builderAddress, {
+      const upstream = await service.getBuilderUsers(builderAddress, {
         timeframe: parseTimeframe(timeframe),
         limit: limit !== undefined ? Number(limit) : undefined,
       });
-      res.json({ success: true, data });
+      sendIndexerHypeDexerSuccess(res, upstream);
     } catch (error) {
       logDeduplicator.error('GET /indexer/builders/:address/users', {
         error: error instanceof Error ? error.message : String(error),
