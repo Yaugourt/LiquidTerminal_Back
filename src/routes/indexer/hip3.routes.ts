@@ -25,7 +25,10 @@ import {
 } from '../../schemas/indexer/hip3.schema';
 import { IndexerHip3Service } from '../../services/indexer/indexer-hip3.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
+import {
+  sendIndexerHypeDexerRowsWithTotalCount,
+  sendIndexerHypeDexerSuccess,
+} from '../../utils/indexer-hypedexer-response.util';
 
 const router = Router();
 const svc = IndexerHip3Service.getInstance();
@@ -49,20 +52,13 @@ function send502(res: Response, code: string, error: unknown): void {
   });
 }
 
-/** Preserve HypeDexer `total_count` before unwrap drops the envelope. */
-function readHypeDexerTotalCount(body: unknown): number | undefined {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return undefined;
-  const tc = (body as Record<string, unknown>).total_count;
-  return typeof tc === 'number' && Number.isFinite(tc) ? tc : undefined;
-}
-
 router.get(
   '/overview',
   marketRateLimiter,
   validateGetRequest(hip3OverviewSchema),
   (async (_req: Request, res: Response) => {
     try {
-      res.json({ success: true, data: await svc.getOverview() });
+      sendIndexerHypeDexerSuccess(res, await svc.getOverview());
     } catch (e) {
       send502(res, 'INDEXER_HIP3_OVERVIEW_ERROR', e);
     }
@@ -75,8 +71,7 @@ router.get(
   validateGetRequest(hip3PriorityFeesGossipStatusSchema),
   (async (_req: Request, res: Response) => {
     try {
-      const upstream = await svc.getPriorityFeesGossipStatus();
-      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
+      sendIndexerHypeDexerSuccess(res, await svc.getPriorityFeesGossipStatus());
     } catch (e) {
       send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_STATUS_ERROR', e);
     }
@@ -98,15 +93,7 @@ router.get(
         limit: num(q.limit),
         order: str(q.order),
       });
-      const totalCount = readHypeDexerTotalCount(upstream);
-      const rows = unwrapHypeDexerApiPayload(upstream);
-      res.json({
-        success: true,
-        data: {
-          rows: Array.isArray(rows) ? rows : [],
-          total_count: totalCount ?? null,
-        },
-      });
+      sendIndexerHypeDexerRowsWithTotalCount(res, upstream);
     } catch (e) {
       send502(res, 'INDEXER_HIP3_PRIORITY_FEES_GOSSIP_HISTORY_ERROR', e);
     }
@@ -120,15 +107,15 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { dex_id, search, limit, offset } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getAssets({
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getAssets({
           dex_id: str(dex_id),
           search: str(search),
           limit: num(limit),
           offset: num(offset),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_ASSETS_ERROR', e);
     }
@@ -141,7 +128,7 @@ router.get(
   validateGetRequest(hip3AssetTickerParamsSchema),
   (async (req: Request, res: Response) => {
     try {
-      res.json({ success: true, data: await svc.getAssetByTicker(String(req.params.ticker)) });
+      sendIndexerHypeDexerSuccess(res, await svc.getAssetByTicker(String(req.params.ticker)));
     } catch (e) {
       send502(res, 'INDEXER_HIP3_ASSET_TICKER_ERROR', e);
     }
@@ -155,10 +142,7 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { limit, offset } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getDexs({ limit: num(limit), offset: num(offset) }),
-      });
+      sendIndexerHypeDexerSuccess(res, await svc.getDexs({ limit: num(limit), offset: num(offset) }));
     } catch (e) {
       send502(res, 'INDEXER_HIP3_DEXS_ERROR', e);
     }
@@ -171,7 +155,7 @@ router.get(
   validateGetRequest(hip3DexIdParamsSchema),
   (async (req: Request, res: Response) => {
     try {
-      res.json({ success: true, data: await svc.getDexById(String(req.params.dex_id)) });
+      sendIndexerHypeDexerSuccess(res, await svc.getDexById(String(req.params.dex_id)));
     } catch (e) {
       send502(res, 'INDEXER_HIP3_DEX_ERROR', e);
     }
@@ -184,7 +168,7 @@ router.get(
   validateGetRequest(hip3AuctionCurrentSchema),
   (async (_req: Request, res: Response) => {
     try {
-      res.json({ success: true, data: await svc.getAuctionCurrent() });
+      sendIndexerHypeDexerSuccess(res, await svc.getAuctionCurrent());
     } catch (e) {
       send502(res, 'INDEXER_HIP3_AUCTION_CURRENT_ERROR', e);
     }
@@ -198,14 +182,14 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { dex_id, limit, offset } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getAuctionsHistory({
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getAuctionsHistory({
           dex_id: str(dex_id),
           limit: num(limit),
           offset: num(offset),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_AUCTIONS_HISTORY_ERROR', e);
     }
@@ -219,14 +203,14 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { status, limit, offset } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getAuctions({
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getAuctions({
           status: str(status),
           limit: num(limit),
           offset: num(offset),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_AUCTIONS_ERROR', e);
     }
@@ -240,9 +224,9 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getFills({
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getFills({
           dex_id: str(q.dex_id),
           coin: str(q.coin),
           user: str(q.user),
@@ -252,8 +236,8 @@ router.get(
           min_notional: num(q.min_notional),
           limit: num(q.limit),
           offset: num(q.offset),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_FILLS_ERROR', e);
     }
@@ -267,14 +251,14 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { by, dex_id, limit } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getLeaderboard({
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getLeaderboard({
           by: str(by),
           dex_id: str(dex_id),
           limit: num(limit),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_LEADERBOARD_ERROR', e);
     }
@@ -288,16 +272,16 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { coin, dex_id, start, end, limit } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getOhlcv({
-          coin: coin as string,
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getOhlcv({
+          coin: str(coin) as string,
           dex_id: str(dex_id),
           start: str(start),
           end: str(end),
           limit: num(limit),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_OHLCV_ERROR', e);
     }
@@ -311,16 +295,16 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { dex_id, asset_id, start, end, limit } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getOracleStats({
-          dex_id: dex_id as string,
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getOracleStats({
+          dex_id: str(dex_id) as string,
           asset_id: str(asset_id),
           start: str(start),
           end: str(end),
           limit: num(limit),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_ORACLE_STATS_ERROR', e);
     }
@@ -334,10 +318,7 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { dex_id, coin } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getSnapshots({ dex_id: str(dex_id), coin: str(coin) }),
-      });
+      sendIndexerHypeDexerSuccess(res, await svc.getSnapshots({ dex_id: str(dex_id), coin: str(coin) }));
     } catch (e) {
       send502(res, 'INDEXER_HIP3_SNAPSHOTS_ERROR', e);
     }
@@ -351,15 +332,15 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const { dex_id, coin, limit, offset } = req.query;
-      res.json({
-        success: true,
-        data: await svc.getStatsTraders({
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getStatsTraders({
           dex_id: str(dex_id),
           coin: str(coin),
           limit: num(limit),
           offset: num(offset),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_STATS_TRADERS_ERROR', e);
     }
@@ -372,10 +353,7 @@ router.get(
   validateGetRequest(hip3TopMoversQuerySchema),
   (async (req: Request, res: Response) => {
     try {
-      res.json({
-        success: true,
-        data: await svc.getTopMovers({ limit: num(req.query.limit) }),
-      });
+      sendIndexerHypeDexerSuccess(res, await svc.getTopMovers({ limit: num(req.query.limit) }));
     } catch (e) {
       send502(res, 'INDEXER_HIP3_TOP_MOVERS_ERROR', e);
     }
@@ -389,10 +367,7 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const address = String(req.params.address);
-      res.json({
-        success: true,
-        data: await svc.getUserCoins(address, { limit: num(req.query.limit) }),
-      });
+      sendIndexerHypeDexerSuccess(res, await svc.getUserCoins(address, { limit: num(req.query.limit) }));
     } catch (e) {
       send502(res, 'INDEXER_HIP3_USER_COINS_ERROR', e);
     }
@@ -407,17 +382,17 @@ router.get(
     try {
       const address = String(req.params.address);
       const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getUserFills(address, {
+      sendIndexerHypeDexerSuccess(
+        res,
+        await svc.getUserFills(address, {
           coin: str(q.coin),
           dex_id: str(q.dex_id),
           start: str(q.start),
           end: str(q.end),
           limit: num(q.limit),
           offset: num(q.offset),
-        }),
-      });
+        })
+      );
     } catch (e) {
       send502(res, 'INDEXER_HIP3_USER_FILLS_ERROR', e);
     }
@@ -430,10 +405,7 @@ router.get(
   validateGetRequest(hip3UserOverviewSchema),
   (async (req: Request, res: Response) => {
     try {
-      res.json({
-        success: true,
-        data: await svc.getUserOverview(String(req.params.address)),
-      });
+      sendIndexerHypeDexerSuccess(res, await svc.getUserOverview(String(req.params.address)));
     } catch (e) {
       send502(res, 'INDEXER_HIP3_USER_OVERVIEW_ERROR', e);
     }
