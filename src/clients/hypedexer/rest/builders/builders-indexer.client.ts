@@ -35,7 +35,13 @@ export class HypeDexerBuildersIndexerClient extends BaseApiService {
 
   private constructor() {
     super(HYPEDEXER_API_URL, hypedexerJsonHeaders);
-    this.circuitBreaker = CircuitBreakerService.getInstance('hypedexer-builders-rest');
+    // Builders hub fires several parallel indexer calls on mount; use a slightly
+    // higher failure budget so transient upstream blips do not trip the breaker
+    // as fast as a single-threaded client would.
+    this.circuitBreaker = CircuitBreakerService.getInstance('hypedexer-builders-rest', {
+      maxFailures: 15,
+      circuitBreakerTimeout: 90_000,
+    });
     this.rateLimiter = RateLimiterService.getInstance('hypedexer-builders-rest', {
       maxWeightPerMinute: HypeDexerBuildersIndexerClient.MAX_WEIGHT_PER_MINUTE,
       requestWeight: HypeDexerBuildersIndexerClient.REQUEST_WEIGHT,

@@ -4,6 +4,13 @@ interface CircuitBreakerState {
   isOpen: boolean;
 }
 
+/** Optional tuning for a named circuit; applied only on first `getInstance` for that name. */
+export interface CircuitBreakerOptions {
+  maxFailures?: number;
+  resetTimeout?: number;
+  circuitBreakerTimeout?: number;
+}
+
 export class CircuitBreakerService {
   private static instances = new Map<string, CircuitBreakerService>();
   private state: CircuitBreakerState;
@@ -26,9 +33,14 @@ export class CircuitBreakerService {
     };
   }
 
-  public static getInstance(serviceName: string): CircuitBreakerService {
+  public static getInstance(serviceName: string, options?: CircuitBreakerOptions): CircuitBreakerService {
     if (!CircuitBreakerService.instances.has(serviceName)) {
-      CircuitBreakerService.instances.set(serviceName, new CircuitBreakerService());
+      const instance = new CircuitBreakerService(
+        options?.maxFailures ?? 5,
+        options?.resetTimeout ?? 60000,
+        options?.circuitBreakerTimeout ?? 30000
+      );
+      CircuitBreakerService.instances.set(serviceName, instance);
     }
     return CircuitBreakerService.instances.get(serviceName)!;
   }

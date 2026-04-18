@@ -70,8 +70,8 @@ router.get(
   validateGetRequest(indexerBuildersStatsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
-      const data = await service.getGlobalStats(parseTimeframe(req.query.timeframe));
-      res.json({ success: true, data });
+      const upstream = await service.getGlobalStats(parseTimeframe(req.query.timeframe));
+      sendIndexerHypeDexerSuccess(res, upstream);
     } catch (error) {
       logDeduplicator.error('GET /indexer/builders/stats', {
         error: error instanceof Error ? error.message : String(error),
