@@ -38,17 +38,18 @@ export abstract class BaseApiService {
   
     // Méthode principale pour les requêtes avec timeout
     protected async fetchWithTimeout<T>(
-      endpoint: string, 
-      options: RequestInit
+      endpoint: string,
+      options: RequestInit,
+      timeoutMs: number = this.API_TIMEOUT
     ): Promise<T> {
       logDeduplicator.info('Making API request', {
         url: `${this.baseUrl}${endpoint}`,
         method: options.method,
-        timeout: this.API_TIMEOUT
+        timeout: timeoutMs
       });
-      
+
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.API_TIMEOUT);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
   
       try {
         const response = await fetch(`${this.baseUrl}${endpoint}`, {
@@ -147,13 +148,21 @@ export abstract class BaseApiService {
     }
   
     public async get<T>(endpoint: string): Promise<T> {
-      return this.withRetry(() => 
+      return this.withRetry(() =>
         this.fetchWithTimeout<T>(endpoint, {
           method: 'GET',
         })
       );
     }
-  
+
+    /**
+     * GET without `withRetry` — avoids multiplying long waits when upstream is slow.
+     * Use for indexer leaf routes that can exceed the default timeout (e.g. per-builder stats).
+     */
+    protected async getSingleAttempt<T>(endpoint: string, timeoutMs: number = this.API_TIMEOUT): Promise<T> {
+      return this.fetchWithTimeout<T>(endpoint, { method: 'GET' }, timeoutMs);
+    }
+
     // Utilitaires
     private delay(ms: number): Promise<void> {
       return new Promise(resolve => setTimeout(resolve, ms));
