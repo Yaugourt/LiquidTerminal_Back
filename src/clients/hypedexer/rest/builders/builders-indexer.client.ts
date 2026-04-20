@@ -29,7 +29,7 @@ export class HypeDexerBuildersIndexerClient extends HypeDexerBaseClient {
   private static readonly REQUEST_WEIGHT = 12;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
   /** Per-builder HypeDexer routes can exceed 30s; avoid withRetry(×3) stacking timeouts. */
-  private static readonly SLOW_LEAF_TIMEOUT_MS = 120_000;
+  private static readonly SLOW_LEAF_TIMEOUT_MS = 90_000;
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
