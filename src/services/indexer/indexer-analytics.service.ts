@@ -3,7 +3,6 @@ import {
   IndexerAnalyticsFillsStatsQuery,
   IndexerAnalyticsPriorityFeesStatsQuery,
 } from '../../clients/hypedexer/rest/analytics/analytics-indexer.client';
-import type { HypeDexerApiResponse } from '../../types/hypedexer-api.types';
 
 export class IndexerAnalyticsService {
   private static instance: IndexerAnalyticsService;
@@ -16,13 +15,13 @@ export class IndexerAnalyticsService {
     return IndexerAnalyticsService.instance;
   }
 
-  public async getFillsStats(params: IndexerAnalyticsFillsStatsQuery): Promise<HypeDexerApiResponse> {
+  public async getFillsStats(params: IndexerAnalyticsFillsStatsQuery): Promise<unknown> {
     return this.client.getFillsStats(params);
   }
 
   public async getPriorityFeesStats(
     params: IndexerAnalyticsPriorityFeesStatsQuery
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.client.getPriorityFeesStats(params);
   }
 }

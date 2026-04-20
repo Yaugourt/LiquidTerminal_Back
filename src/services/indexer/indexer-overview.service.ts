@@ -1,5 +1,6 @@
 import { HypeDexerOverviewIndexerClient } from '../../clients/hypedexer/rest/overview/overview-indexer.client';
-import type { HypeDexerApiResponse } from '../../types/hypedexer-api.types';
+import { cacheService } from '../../core/cache.service';
+import { HYPEDEXER_CACHE_KEYS, HYPEDEXER_TTL, HYPEDEXER_USER_CACHE_KEY } from '../../constants/hypedexer.cache';
 
 export class IndexerOverviewService {
   private static instance: IndexerOverviewService;
@@ -12,31 +13,59 @@ export class IndexerOverviewService {
     return IndexerOverviewService.instance;
   }
 
-  public getActiveTraders24h(): Promise<HypeDexerApiResponse> {
-    return this.client.getActiveTraders24h();
+  public getActiveTraders24h(): Promise<unknown> {
+    return cacheService.getOrSet<unknown>(
+      HYPEDEXER_CACHE_KEYS.overviewActiveTraders24h,
+      () => this.client.getActiveTraders24h(),
+      HYPEDEXER_TTL.globalRolling
+    );
   }
 
-  public getCoinDistribution(user: string): Promise<HypeDexerApiResponse> {
-    return this.client.getCoinDistribution({ user });
+  public getCoinDistribution(user: string): Promise<unknown> {
+    return cacheService.getOrSet(
+      HYPEDEXER_USER_CACHE_KEY.coinDistribution(user),
+      () => this.client.getCoinDistribution({ user }),
+      HYPEDEXER_TTL.userAddress
+    );
   }
 
-  public getDailyPnl10d(): Promise<HypeDexerApiResponse> {
-    return this.client.getDailyPnl10d();
+  public getDailyPnl10d(): Promise<unknown> {
+    return cacheService.getOrSet<unknown>(
+      HYPEDEXER_CACHE_KEYS.overviewDailyPnl10d,
+      () => this.client.getDailyPnl10d(),
+      HYPEDEXER_TTL.globalSnapshot
+    );
   }
 
-  public getDailyVolume10d(): Promise<HypeDexerApiResponse> {
-    return this.client.getDailyVolume10d();
+  public getDailyVolume10d(): Promise<unknown> {
+    return cacheService.getOrSet<unknown>(
+      HYPEDEXER_CACHE_KEYS.overviewDailyVolume10d,
+      () => this.client.getDailyVolume10d(),
+      HYPEDEXER_TTL.globalSnapshot
+    );
   }
 
-  public getTotalFees24h(): Promise<HypeDexerApiResponse> {
-    return this.client.getTotalFees24h();
+  public getTotalFees24h(): Promise<unknown> {
+    return cacheService.getOrSet<unknown>(
+      HYPEDEXER_CACHE_KEYS.overviewTotalFees24h,
+      () => this.client.getTotalFees24h(),
+      HYPEDEXER_TTL.globalRolling
+    );
   }
 
-  public getTotalFills24h(): Promise<HypeDexerApiResponse> {
-    return this.client.getTotalFills24h();
+  public getTotalFills24h(): Promise<unknown> {
+    return cacheService.getOrSet<unknown>(
+      HYPEDEXER_CACHE_KEYS.overviewTotalFills24h,
+      () => this.client.getTotalFills24h(),
+      HYPEDEXER_TTL.globalRolling
+    );
   }
 
-  public getTradingVolume24h(): Promise<HypeDexerApiResponse> {
-    return this.client.getTradingVolume24h();
+  public getTradingVolume24h(): Promise<unknown> {
+    return cacheService.getOrSet<unknown>(
+      HYPEDEXER_CACHE_KEYS.overviewTradingVolume24h,
+      () => this.client.getTradingVolume24h(),
+      HYPEDEXER_TTL.globalRolling
+    );
   }
 }

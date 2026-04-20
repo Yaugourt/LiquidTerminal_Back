@@ -1,4 +1,3 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { BuildersApiResponse } from '../../../../types/builders.types';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
@@ -6,6 +5,7 @@ import { redisService } from '../../../../core/redis.service';
 import { withDistributedLock } from '../../../../utils/distributedLock';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 const CACHE_KEY = 'builders:all';
 const UPDATE_CHANNEL = 'builders:updated';
@@ -17,7 +17,7 @@ const CACHE_TTL = 290; // Just under 5 minutes
  * Circuit breaker / rate limiter IDs: `builders`.
  * Pass-through builders analytics live in `builders-indexer.client.ts`.
  */
-export class HLIndexerBuildersClient extends BaseApiService {
+export class HLIndexerBuildersClient extends HypeDexerBaseClient {
   private static instance: HLIndexerBuildersClient;
   private static readonly REQUEST_WEIGHT = 12;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -90,7 +90,7 @@ export class HLIndexerBuildersClient extends BaseApiService {
 
   private async fetchAllBuilders(): Promise<BuildersApiResponse> {
     return this.circuitBreaker.execute(() =>
-      this.get<BuildersApiResponse>('/builders/list?limit=1000&offset=0&sort=volume_usd&order=DESC')
+      this.getUnwrapped<BuildersApiResponse>('/builders/list?limit=1000&offset=0&sort=volume_usd&order=DESC')
     );
   }
 

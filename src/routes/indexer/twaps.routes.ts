@@ -9,7 +9,6 @@ import {
   twapsFillsQuerySchema,
 } from '../../schemas/indexer/twaps.schema';
 import { IndexerTwapsService } from '../../services/indexer/indexer-twaps.service';
-import { sendIndexerHypeDexerSuccess } from '../../utils/indexer-hypedexer-response.util';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
@@ -144,7 +143,7 @@ router.get(
   validateGetRequest(twapsByIdParamsSchema),
   (async (req: Request, res: Response) => {
     try {
-      sendIndexerHypeDexerSuccess(res, await svc.getTwap(String(req.params.twap_id)));
+      res.json({ success: true, data: await svc.getTwap(String(req.params.twap_id)) });
     } catch (e) {
       logDeduplicator.error('GET /indexer/twaps/:twap_id', { error: e instanceof Error ? e.message : String(e) });
       res.status(502).json({

@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 function q(record: Record<string, string | number | undefined | null>): string {
   const sp = new URLSearchParams();
@@ -18,7 +17,7 @@ function q(record: Record<string, string | number | undefined | null>): string {
 /**
  * HypeDexer REST — Spot indexer (pairs, tokens, auctions).
  */
-export class HypeDexerSpotIndexerClient extends BaseApiService {
+export class HypeDexerSpotIndexerClient extends HypeDexerBaseClient {
   private static instance: HypeDexerSpotIndexerClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -46,26 +45,26 @@ export class HypeDexerSpotIndexerClient extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
-  private getPath(path: string): Promise<HypeDexerApiResponse> {
+  private getPath(path: string): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       logDeduplicator.info('HypeDexerSpotIndexerClient', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public getAuctionsHist(params: { lookback_hours?: number; limit?: number; offset?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getAuctionsHist(params: { lookback_hours?: number; limit?: number; offset?: number } = {}): Promise<unknown> {
     return this.getPath(`/spot/auctions/hist${q(params)}`);
   }
 
-  public getAuctionsLive(params: { freshness_sec?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getAuctionsLive(params: { freshness_sec?: number } = {}): Promise<unknown> {
     return this.getPath(`/spot/auctions/live${q(params)}`);
   }
 
-  public getPairs(params: { limit?: number; offset?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getPairs(params: { limit?: number; offset?: number } = {}): Promise<unknown> {
     return this.getPath(`/spot/pairs${q(params)}`);
   }
 
-  public getTokens(params: { search?: string; limit?: number; offset?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getTokens(params: { search?: string; limit?: number; offset?: number } = {}): Promise<unknown> {
     return this.getPath(`/spot/tokens${q(params)}`);
   }
 }

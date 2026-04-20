@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 function buildQuery(record: Record<string, string | number | boolean | undefined | null>): string {
   const sp = new URLSearchParams();
@@ -18,7 +17,7 @@ function buildQuery(record: Record<string, string | number | boolean | undefined
 /**
  * HypeDexer REST — Overview analytics snapshots (GET-only, no path params).
  */
-export class HypeDexerOverviewIndexerClient extends BaseApiService {
+export class HypeDexerOverviewIndexerClient extends HypeDexerBaseClient {
   private static instance: HypeDexerOverviewIndexerClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -46,38 +45,38 @@ export class HypeDexerOverviewIndexerClient extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
-  private async getPath(path: string): Promise<HypeDexerApiResponse> {
+  private async getPath(path: string): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       logDeduplicator.info('HypeDexerOverviewIndexerClient', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public getActiveTraders24h(): Promise<HypeDexerApiResponse> {
+  public getActiveTraders24h(): Promise<unknown> {
     return this.getPath('/overview/active-traders-24h');
   }
 
-  public getCoinDistribution(params: { user: string }): Promise<HypeDexerApiResponse> {
+  public getCoinDistribution(params: { user: string }): Promise<unknown> {
     return this.getPath(`/overview/coin-distribution${buildQuery(params)}`);
   }
 
-  public getDailyPnl10d(): Promise<HypeDexerApiResponse> {
+  public getDailyPnl10d(): Promise<unknown> {
     return this.getPath('/overview/daily-pnl-10d');
   }
 
-  public getDailyVolume10d(): Promise<HypeDexerApiResponse> {
+  public getDailyVolume10d(): Promise<unknown> {
     return this.getPath('/overview/daily-volume-10d');
   }
 
-  public getTotalFees24h(): Promise<HypeDexerApiResponse> {
+  public getTotalFees24h(): Promise<unknown> {
     return this.getPath('/overview/total-fees-24h');
   }
 
-  public getTotalFills24h(): Promise<HypeDexerApiResponse> {
+  public getTotalFills24h(): Promise<unknown> {
     return this.getPath('/overview/total-fills-24h');
   }
 
-  public getTradingVolume24h(): Promise<HypeDexerApiResponse> {
+  public getTradingVolume24h(): Promise<unknown> {
     return this.getPath('/overview/trading-volume-24h');
   }
 }

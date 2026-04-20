@@ -15,16 +15,13 @@ export class CircuitBreakerService {
   private static instances = new Map<string, CircuitBreakerService>();
   private state: CircuitBreakerState;
   private readonly maxFailures: number;
-  private readonly resetTimeout: number;
   private readonly circuitBreakerTimeout: number;
 
   private constructor(
     maxFailures: number = 5,
-    resetTimeout: number = 60000, // 1 minute
     circuitBreakerTimeout: number = 30000 // 30 seconds
   ) {
     this.maxFailures = maxFailures;
-    this.resetTimeout = resetTimeout;
     this.circuitBreakerTimeout = circuitBreakerTimeout;
     this.state = {
       failures: 0,
@@ -37,7 +34,6 @@ export class CircuitBreakerService {
     if (!CircuitBreakerService.instances.has(serviceName)) {
       const instance = new CircuitBreakerService(
         options?.maxFailures ?? 5,
-        options?.resetTimeout ?? 60000,
         options?.circuitBreakerTimeout ?? 30000
       );
       CircuitBreakerService.instances.set(serviceName, instance);

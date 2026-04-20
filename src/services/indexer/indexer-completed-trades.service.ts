@@ -3,7 +3,6 @@ import {
   IndexerCompletedTradesQuery,
   IndexerCompletedTradesSummaryQuery,
 } from '../../clients/hypedexer/rest/completed-trades/completed-trades.client';
-import type { HypeDexerApiResponse } from '../../types/hypedexer-api.types';
 
 export class IndexerCompletedTradesService {
   private static instance: IndexerCompletedTradesService;
@@ -16,15 +15,15 @@ export class IndexerCompletedTradesService {
     return IndexerCompletedTradesService.instance;
   }
 
-  public async listCompletedTrades(params: IndexerCompletedTradesQuery): Promise<HypeDexerApiResponse> {
+  public async listCompletedTrades(params: IndexerCompletedTradesQuery): Promise<unknown> {
     return this.client.listCompletedTrades(params);
   }
 
-  public async getSummary(params: IndexerCompletedTradesSummaryQuery): Promise<HypeDexerApiResponse> {
+  public async getSummary(params: IndexerCompletedTradesSummaryQuery): Promise<unknown> {
     return this.client.getSummary(params);
   }
 
-  public async getTradeFills(tradeId: string): Promise<HypeDexerApiResponse> {
+  public async getTradeFills(tradeId: string): Promise<unknown> {
     return this.client.getTradeFills(tradeId);
   }
 }

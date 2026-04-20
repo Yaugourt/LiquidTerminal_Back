@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 function buildQuery(record: Record<string, string | number | undefined | null>): string {
   const sp = new URLSearchParams();
@@ -18,7 +17,7 @@ function buildQuery(record: Record<string, string | number | undefined | null>):
 /**
  * HypeDexer REST — HIP-3 (perp deployer) domain.
  */
-export class HypeDexerHip3Client extends BaseApiService {
+export class HypeDexerHip3Client extends HypeDexerBaseClient {
   private static instance: HypeDexerHip3Client;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -46,10 +45,10 @@ export class HypeDexerHip3Client extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
-  private async getUpstream(path: string): Promise<HypeDexerApiResponse> {
+  private async getUpstream(path: string): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       logDeduplicator.info('HypeDexerHip3Client', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
@@ -58,27 +57,27 @@ export class HypeDexerHip3Client extends BaseApiService {
     search?: string;
     limit?: number;
     offset?: number;
-  } = {}): Promise<HypeDexerApiResponse> {
+  } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/assets${buildQuery(params)}`);
   }
 
-  public getAssetByTicker(ticker: string): Promise<HypeDexerApiResponse> {
+  public getAssetByTicker(ticker: string): Promise<unknown> {
     return this.getUpstream(`/hip3/assets/${encodeURIComponent(ticker)}`);
   }
 
-  public getDexs(params: { limit?: number; offset?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getDexs(params: { limit?: number; offset?: number } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/dexs${buildQuery(params)}`);
   }
 
-  public getDexById(dexId: string): Promise<HypeDexerApiResponse> {
+  public getDexById(dexId: string): Promise<unknown> {
     return this.getUpstream(`/hip3/dexs/${encodeURIComponent(dexId)}`);
   }
 
-  public getOverview(): Promise<HypeDexerApiResponse> {
+  public getOverview(): Promise<unknown> {
     return this.getUpstream('/hip3/overview');
   }
 
-  public getPriorityFeesGossipStatus(): Promise<HypeDexerApiResponse> {
+  public getPriorityFeesGossipStatus(): Promise<unknown> {
     return this.getUpstream('/hip3/priority-fees/gossip/status');
   }
 
@@ -91,19 +90,19 @@ export class HypeDexerHip3Client extends BaseApiService {
       limit?: number;
       order?: string;
     } = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.getUpstream(`/hip3/priority-fees/gossip/history${buildQuery(params)}`);
   }
 
-  public getAuctions(params: { status?: string; limit?: number; offset?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getAuctions(params: { status?: string; limit?: number; offset?: number } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/auctions${buildQuery(params)}`);
   }
 
-  public getAuctionCurrent(): Promise<HypeDexerApiResponse> {
+  public getAuctionCurrent(): Promise<unknown> {
     return this.getUpstream('/hip3/auctions/current');
   }
 
-  public getAuctionsHistory(params: { dex_id?: string; limit?: number; offset?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getAuctionsHistory(params: { dex_id?: string; limit?: number; offset?: number } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/auctions/history${buildQuery(params)}`);
   }
 
@@ -117,11 +116,11 @@ export class HypeDexerHip3Client extends BaseApiService {
     min_notional?: number;
     limit?: number;
     offset?: number;
-  } = {}): Promise<HypeDexerApiResponse> {
+  } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/fills${buildQuery(params)}`);
   }
 
-  public getLeaderboard(params: { by?: string; dex_id?: string; limit?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getLeaderboard(params: { by?: string; dex_id?: string; limit?: number } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/leaderboard${buildQuery(params)}`);
   }
 
@@ -131,7 +130,7 @@ export class HypeDexerHip3Client extends BaseApiService {
     start?: string;
     end?: string;
     limit?: number;
-  }): Promise<HypeDexerApiResponse> {
+  }): Promise<unknown> {
     return this.getUpstream(`/hip3/ohlcv${buildQuery(params)}`);
   }
 
@@ -141,11 +140,11 @@ export class HypeDexerHip3Client extends BaseApiService {
     start?: string;
     end?: string;
     limit?: number;
-  }): Promise<HypeDexerApiResponse> {
+  }): Promise<unknown> {
     return this.getUpstream(`/hip3/oracle/stats${buildQuery(params)}`);
   }
 
-  public getSnapshots(params: { dex_id?: string; coin?: string } = {}): Promise<HypeDexerApiResponse> {
+  public getSnapshots(params: { dex_id?: string; coin?: string } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/snapshots${buildQuery(params)}`);
   }
 
@@ -154,15 +153,15 @@ export class HypeDexerHip3Client extends BaseApiService {
     coin?: string;
     limit?: number;
     offset?: number;
-  } = {}): Promise<HypeDexerApiResponse> {
+  } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/stats/traders${buildQuery(params)}`);
   }
 
-  public getTopMovers(params: { limit?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getTopMovers(params: { limit?: number } = {}): Promise<unknown> {
     return this.getUpstream(`/hip3/top-movers${buildQuery(params)}`);
   }
 
-  public getUserCoins(address: string, params: { limit?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getUserCoins(address: string, params: { limit?: number } = {}): Promise<unknown> {
     const enc = encodeURIComponent(address);
     return this.getUpstream(`/hip3/users/${enc}/coins${buildQuery(params)}`);
   }
@@ -177,12 +176,12 @@ export class HypeDexerHip3Client extends BaseApiService {
       limit?: number;
       offset?: number;
     } = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     const enc = encodeURIComponent(address);
     return this.getUpstream(`/hip3/users/${enc}/fills${buildQuery(params)}`);
   }
 
-  public getUserOverview(address: string): Promise<HypeDexerApiResponse> {
+  public getUserOverview(address: string): Promise<unknown> {
     const enc = encodeURIComponent(address);
     return this.getUpstream(`/hip3/users/${enc}/overview`);
   }

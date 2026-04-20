@@ -9,7 +9,6 @@ import {
 } from '../../schemas/indexer/users-indexer.schema';
 import { IndexerUsersService } from '../../services/indexer/indexer-users.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
 
 const router = Router();
 const service = IndexerUsersService.getInstance();
@@ -26,7 +25,7 @@ router.get(
         hours: q.hours !== undefined ? Number(q.hours) : 24,
         limit: q.limit !== undefined ? Number(q.limit) : 20,
       });
-      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
+      res.json({ success: true, data: upstream });
     } catch (error) {
       logDeduplicator.error('GET /indexer/users/leaderboard', {
         error: error instanceof Error ? error.message : String(error),

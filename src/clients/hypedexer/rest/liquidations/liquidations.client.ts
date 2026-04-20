@@ -1,4 +1,3 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { redisService } from '../../../../core/redis.service';
 import { LiquidationResponse, LiquidationQueryParams } from '../../../../types/liquidations.types';
 import { AnalyticsLiquidationStatsResponse, AnalyticsLiquidationStatsParams } from '../../../../types/analytics-liquidations.types';
@@ -6,6 +5,7 @@ import { CircuitBreakerService } from '../../../../core/circuit.breaker.service'
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 /** Cache config for getRecentLiquidations (default params only) */
 const CACHE_KEY = 'liquidations:recent';
@@ -17,7 +17,7 @@ const UPDATE_CHANNEL = 'liquidations:recent:updated';
  * Client for HypeDexer Liquidations API (Redis polling + on-demand).
  * Circuit breaker / rate limiter IDs: `liquidations`.
  */
-export class HLIndexerLiquidationsClient extends BaseApiService {
+export class HLIndexerLiquidationsClient extends HypeDexerBaseClient {
   private static instance: HLIndexerLiquidationsClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -85,7 +85,7 @@ export class HLIndexerLiquidationsClient extends BaseApiService {
         params,
       });
 
-      const response = await this.get<LiquidationResponse>(endpoint);
+      const response = await this.getUnwrapped<LiquidationResponse>(endpoint);
 
       logDeduplicator.info('Successfully fetched liquidations', {
         count: response.data?.length || 0,
@@ -116,6 +116,7 @@ export class HLIndexerLiquidationsClient extends BaseApiService {
 
   /**
    * Internal fetch: call API for recent liquidations (no cache). Used by polling.
+   * NOTE: returns the raw envelope so Redis stores the full response shape.
    */
   private async fetchRecentLiquidationsFromApi(params: LiquidationQueryParams): Promise<LiquidationResponse> {
     const queryString = this.buildQueryString(params);
@@ -175,7 +176,7 @@ export class HLIndexerLiquidationsClient extends BaseApiService {
         const queryString = this.buildQueryString(params);
         const endpoint = `/liquidations/recent${queryString}`;
         logDeduplicator.info('Fetching recent liquidations from HypeDexer', { endpoint, params });
-        const response = await this.get<LiquidationResponse>(endpoint);
+        const response = await this.getUnwrapped<LiquidationResponse>(endpoint);
         logDeduplicator.info('Successfully fetched recent liquidations', {
           count: response.data?.length || 0,
           hasMore: response.has_more,
@@ -231,7 +232,7 @@ export class HLIndexerLiquidationsClient extends BaseApiService {
         params,
       });
 
-      const response = await this.get<AnalyticsLiquidationStatsResponse>(endpoint);
+      const response = await this.getUnwrapped<AnalyticsLiquidationStatsResponse>(endpoint);
 
       logDeduplicator.info('Successfully fetched analytics liquidation stats', {
         numberLiquidations: response.data?.number_liquidation,

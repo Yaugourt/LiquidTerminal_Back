@@ -1,4 +1,3 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import {
   TopTradersApiResponse,
   TopTradersQueryParams,
@@ -10,6 +9,7 @@ import { redisService } from '../../../../core/redis.service';
 import { withDistributedLock } from '../../../../utils/distributedLock';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 const CACHE_KEY_PREFIX = 'toptraders';
 const UPDATE_CHANNEL = 'toptraders:updated';
@@ -22,7 +22,7 @@ const SORT_TYPES: TopTradersSortType[] = ['pnl_pos', 'pnl_neg', 'volume', 'trade
  * GET /overview/top-traders-24h
  * Circuit breaker / rate limiter IDs: `toptraders`.
  */
-export class HLIndexerTopTradersClient extends BaseApiService {
+export class HLIndexerTopTradersClient extends HypeDexerBaseClient {
   private static instance: HLIndexerTopTradersClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -100,7 +100,7 @@ export class HLIndexerTopTradersClient extends BaseApiService {
   private async fetchTopTraders(sort: TopTradersSortType, limit: number): Promise<TopTradersApiResponse> {
     const queryString = `?sort=${sort}&limit=${limit}`;
     return this.circuitBreaker.execute(() =>
-      this.get<TopTradersApiResponse>(`/overview/top-traders-24h${queryString}`)
+      this.getUnwrapped<TopTradersApiResponse>(`/overview/top-traders-24h${queryString}`)
     );
   }
 

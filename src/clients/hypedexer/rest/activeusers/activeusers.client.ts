@@ -1,4 +1,3 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import {
   ActiveUsersApiResponse,
   ActiveUsersQueryParams,
@@ -9,6 +8,7 @@ import { redisService } from '../../../../core/redis.service';
 import { withDistributedLock } from '../../../../utils/distributedLock';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 const CACHE_KEY_PREFIX = 'activeusers';
 const UPDATE_CHANNEL = 'activeusers:updated';
@@ -21,7 +21,7 @@ const HOURS_TO_CACHE = [1, 4, 12, 24];
  * GET /users/active
  * Circuit breaker / rate limiter IDs: `activeusers`.
  */
-export class HLIndexerActiveUsersClient extends BaseApiService {
+export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
   private static instance: HLIndexerActiveUsersClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -109,7 +109,7 @@ export class HLIndexerActiveUsersClient extends BaseApiService {
 
   private async fetchRaw(params: ActiveUsersQueryParams): Promise<ActiveUsersApiResponse> {
     const queryString = this.buildQueryString({ hours: params.hours || 24, limit: params.limit || 100 });
-    return this.get<ActiveUsersApiResponse>(`/users/active${queryString}`);
+    return this.getUnwrapped<ActiveUsersApiResponse>(`/users/active${queryString}`);
   }
 
   /**

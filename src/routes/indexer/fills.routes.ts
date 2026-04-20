@@ -15,7 +15,6 @@ import {
   IndexerFillsUserByAddressQuery,
 } from '../../clients/hypedexer/rest/fills/fills.client';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { unwrapHypeDexerApiPayload } from '../../utils/hypedexer-api-response.util';
 
 const router = Router();
 const service = IndexerFillsService.getInstance();
@@ -84,8 +83,8 @@ router.get(
   validateGetRequest(indexerFillsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
-      const upstream = await service.getFillsRecent(queryToParams(req.query));
-      res.json({ success: true, data: unwrapHypeDexerApiPayload(upstream) });
+      const data = await service.getFillsRecent(queryToParams(req.query));
+      res.json({ success: true, data });
     } catch (error) {
       logDeduplicator.error('GET /indexer/fills/recent', { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({

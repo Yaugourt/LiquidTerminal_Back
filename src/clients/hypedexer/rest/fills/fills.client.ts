@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 export interface IndexerFillsQuery {
   user?: string;
@@ -46,7 +45,7 @@ export interface IndexerFillsSpotQuery {
 /**
  * HypeDexer REST — Fills domain (OpenAPI tag Fills).
  */
-export class HypeDexerFillsClient extends BaseApiService {
+export class HypeDexerFillsClient extends HypeDexerBaseClient {
   private static instance: HypeDexerFillsClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -97,28 +96,28 @@ export class HypeDexerFillsClient extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
-  public async getFills(params: IndexerFillsQuery = {}): Promise<HypeDexerApiResponse> {
+  public async getFills(params: IndexerFillsQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q = this.buildQuery(params);
       const endpoint = `/fills/${q}`;
       logDeduplicator.info('HypeDexerFillsClient.getFills', { endpoint });
-      return this.get<HypeDexerApiResponse>(endpoint);
+      return this.getUnwrapped<unknown>(endpoint);
     });
   }
 
-  public async getFillsRecent(params: IndexerFillsQuery = {}): Promise<HypeDexerApiResponse> {
+  public async getFillsRecent(params: IndexerFillsQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q = this.buildQuery(params);
       const endpoint = `/fills/recent${q}`;
       logDeduplicator.info('HypeDexerFillsClient.getFillsRecent', { endpoint });
-      return this.get<HypeDexerApiResponse>(endpoint);
+      return this.getUnwrapped<unknown>(endpoint);
     });
   }
 
-  public async getFillsCount(): Promise<HypeDexerApiResponse> {
+  public async getFillsCount(): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       logDeduplicator.info('HypeDexerFillsClient.getFillsCount');
-      return this.get<HypeDexerApiResponse>('/fills/count');
+      return this.getUnwrapped<unknown>('/fills/count');
     });
   }
 
@@ -166,35 +165,35 @@ export class HypeDexerFillsClient extends BaseApiService {
   public async getUserFills(
     userAddress: string,
     params: IndexerFillsUserByAddressQuery = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const enc = encodeURIComponent(userAddress);
       const q = this.buildUserByAddressQuery(params);
       const endpoint = `/fills/user/${enc}${q}`;
       logDeduplicator.info('HypeDexerFillsClient.getUserFills', { endpoint });
-      return this.get<HypeDexerApiResponse>(endpoint);
+      return this.getUnwrapped<unknown>(endpoint);
     });
   }
 
-  public async getSpotFills(params: IndexerFillsSpotQuery = {}): Promise<HypeDexerApiResponse> {
+  public async getSpotFills(params: IndexerFillsSpotQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q = this.buildSpotQuery(params);
       const endpoint = q ? `/fills/spot/${q}` : '/fills/spot/';
       logDeduplicator.info('HypeDexerFillsClient.getSpotFills', { endpoint });
-      return this.get<HypeDexerApiResponse>(endpoint);
+      return this.getUnwrapped<unknown>(endpoint);
     });
   }
 
   public async getSpotUserFills(
     userAddress: string,
     params: Omit<IndexerFillsSpotQuery, 'user'> = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const enc = encodeURIComponent(userAddress);
       const q = this.buildSpotQuery(params);
       const endpoint = `/fills/spot/user/${enc}${q}`;
       logDeduplicator.info('HypeDexerFillsClient.getSpotUserFills', { endpoint });
-      return this.get<HypeDexerApiResponse>(endpoint);
+      return this.getUnwrapped<unknown>(endpoint);
     });
   }
 }

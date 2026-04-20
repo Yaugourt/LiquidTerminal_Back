@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 export type IndexerBuildersTimeframe = '1h' | '24h' | '7d' | '30d';
 
@@ -25,7 +24,7 @@ export interface IndexerBuilderUsersQuery {
 /**
  * HypeDexer REST — Builders (OpenAPI paths under /builders/*).
  */
-export class HypeDexerBuildersIndexerClient extends BaseApiService {
+export class HypeDexerBuildersIndexerClient extends HypeDexerBaseClient {
   private static instance: HypeDexerBuildersIndexerClient;
   private static readonly REQUEST_WEIGHT = 12;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -64,15 +63,15 @@ export class HypeDexerBuildersIndexerClient extends BaseApiService {
   /**
    * OpenAPI: GET /builders/list — optional legacy query for sort/pagination (upstream may accept).
    */
-  public async listBuilders(legacyQuery?: string): Promise<HypeDexerApiResponse> {
+  public async listBuilders(legacyQuery?: string): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const path = legacyQuery ? `/builders/list${legacyQuery}` : '/builders/list';
       logDeduplicator.info('HypeDexerBuildersIndexerClient.listBuilders', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public async getGlobalStats(timeframe?: IndexerBuildersTimeframe): Promise<HypeDexerApiResponse> {
+  public async getGlobalStats(timeframe?: IndexerBuildersTimeframe): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q =
         timeframe !== undefined
@@ -80,18 +79,18 @@ export class HypeDexerBuildersIndexerClient extends BaseApiService {
           : '';
       const path = `/builders/stats${q}`;
       logDeduplicator.info('HypeDexerBuildersIndexerClient.getGlobalStats', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public async getStatsAllTimeframes(): Promise<HypeDexerApiResponse> {
+  public async getStatsAllTimeframes(): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       logDeduplicator.info('HypeDexerBuildersIndexerClient.getStatsAllTimeframes');
-      return this.get<HypeDexerApiResponse>('/builders/stats/all-timeframes');
+      return this.getUnwrapped<unknown>('/builders/stats/all-timeframes');
     });
   }
 
-  public async getTopBuilders(params: IndexerBuildersTopQuery = {}): Promise<HypeDexerApiResponse> {
+  public async getTopBuilders(params: IndexerBuildersTopQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const sp = new URLSearchParams();
       if (params.timeframe !== undefined) sp.append('timeframe', params.timeframe);
@@ -100,14 +99,14 @@ export class HypeDexerBuildersIndexerClient extends BaseApiService {
       const q = sp.toString();
       const path = `/builders/top${q ? `?${q}` : ''}`;
       logDeduplicator.info('HypeDexerBuildersIndexerClient.getTopBuilders', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
   public async getBuilderStats(
     builderAddress: string,
     params: IndexerBuilderDetailQuery = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const enc = encodeURIComponent(builderAddress);
       const q =
@@ -116,14 +115,14 @@ export class HypeDexerBuildersIndexerClient extends BaseApiService {
           : '';
       const path = `/builders/${enc}/stats${q}`;
       logDeduplicator.info('HypeDexerBuildersIndexerClient.getBuilderStats', { path });
-      return this.getSingleAttempt<HypeDexerApiResponse>(path, HypeDexerBuildersIndexerClient.SLOW_LEAF_TIMEOUT_MS);
+      return this.getSingleAttemptUnwrapped<unknown>(path, HypeDexerBuildersIndexerClient.SLOW_LEAF_TIMEOUT_MS);
     });
   }
 
   public async getBuilderUsers(
     builderAddress: string,
     params: IndexerBuilderUsersQuery = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const enc = encodeURIComponent(builderAddress);
       const sp = new URLSearchParams();
@@ -132,7 +131,7 @@ export class HypeDexerBuildersIndexerClient extends BaseApiService {
       const q = sp.toString();
       const path = `/builders/${enc}/users${q ? `?${q}` : ''}`;
       logDeduplicator.info('HypeDexerBuildersIndexerClient.getBuilderUsers', { path });
-      return this.getSingleAttempt<HypeDexerApiResponse>(path, HypeDexerBuildersIndexerClient.SLOW_LEAF_TIMEOUT_MS);
+      return this.getSingleAttemptUnwrapped<unknown>(path, HypeDexerBuildersIndexerClient.SLOW_LEAF_TIMEOUT_MS);
     });
   }
 }

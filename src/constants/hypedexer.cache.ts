@@ -27,6 +27,45 @@ export const HYPEDEXER_LOCKS = {
 
 /** Example TTLs (seconds). Heavy /fills/* = on-demand by default; use short TTL only for hot keys. */
 export const HYPEDEXER_TTL = {
-  fillsCount: 30,
-  overviewSlice: 55,
+  fillsCount:      30,   // existant
+  overviewSlice:   55,   // existant
+  globalSnapshot: 300,   // daily-pnl-10d, daily-volume-10d
+  globalRolling:   55,   // fenêtres glissantes 24h
+  staticList:     120,   // dexs, assets (quasi-statiques)
+  userAddress:     30,   // données user-spécifiques
+} as const;
+
+/** Clés de cache pour les endpoints globaux (identiques pour tous les users) */
+export const HYPEDEXER_CACHE_KEYS = {
+  // Overview — globaux
+  overviewActiveTraders24h: 'hypedexer:overview:active-traders-24h',
+  overviewDailyPnl10d:      'hypedexer:overview:daily-pnl-10d',
+  overviewDailyVolume10d:   'hypedexer:overview:daily-volume-10d',
+  overviewTotalFees24h:     'hypedexer:overview:total-fees-24h',
+  overviewTotalFills24h:    'hypedexer:overview:total-fills-24h',
+  overviewTradingVolume24h: 'hypedexer:overview:trading-volume-24h',
+  // Funding — global
+  fundingPredicted:         'hypedexer:funding:predicted',
+  // HIP3 — globaux
+  hip3Overview:             'hypedexer:hip3:overview',
+  hip3TopMovers:            'hypedexer:hip3:top-movers',
+  hip3Dexs:                 'hypedexer:hip3:dexs',
+  hip3Assets:               'hypedexer:hip3:assets',
+  hip3AuctionCurrent:       'hypedexer:hip3:auction-current',
+} as const;
+
+/** Clés de cache par adresse utilisateur — fonctions génératrices */
+export const HYPEDEXER_USER_CACHE_KEY = {
+  overview:         (addr: string) => `hypedexer:user:${addr}:overview`,
+  coins:            (addr: string) => `hypedexer:user:${addr}:coins`,
+  performance:      (addr: string) => `hypedexer:user:${addr}:performance`,
+  fills:            (addr: string) => `hypedexer:user:${addr}:fills`,
+  spotFills:        (addr: string) => `hypedexer:user:${addr}:spot-fills`,
+  userFunding:      (addr: string) => `hypedexer:user:${addr}:funding`,
+  coinDistribution: (addr: string) => `hypedexer:user:${addr}:coin-distribution`,
+  vaultEquities:    (addr: string) => `hypedexer:user:${addr}:vault-equities`,
+  twaps:            (addr: string) => `hypedexer:user:${addr}:twaps`,
+  hip3Overview:     (addr: string) => `hypedexer:hip3:user:${addr}:overview`,
+  hip3Coins:        (addr: string) => `hypedexer:hip3:user:${addr}:coins`,
+  hip3Fills:        (addr: string) => `hypedexer:hip3:user:${addr}:fills`,
 } as const;

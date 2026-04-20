@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 function q(record: object): string {
   const sp = new URLSearchParams();
@@ -42,7 +41,7 @@ export interface IndexerTwapsUserQuery {
 /**
  * HypeDexer REST — TWAPs.
  */
-export class HypeDexerTwapsClient extends BaseApiService {
+export class HypeDexerTwapsClient extends HypeDexerBaseClient {
   private static instance: HypeDexerTwapsClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -70,35 +69,35 @@ export class HypeDexerTwapsClient extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
-  private getPath(path: string): Promise<HypeDexerApiResponse> {
+  private getPath(path: string): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       logDeduplicator.info('HypeDexerTwapsClient', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public listTwaps(params: IndexerTwapsListQuery = {}): Promise<HypeDexerApiResponse> {
+  public listTwaps(params: IndexerTwapsListQuery = {}): Promise<unknown> {
     const qs = q(params);
     return this.getPath(qs ? `/twaps/${qs}` : '/twaps/');
   }
 
-  public getStats(params: IndexerTwapsStatsQuery = {}): Promise<HypeDexerApiResponse> {
+  public getStats(params: IndexerTwapsStatsQuery = {}): Promise<unknown> {
     return this.getPath(`/twaps/stats${q(params)}`);
   }
 
-  public getUserTwaps(userAddress: string, params: IndexerTwapsUserQuery = {}): Promise<HypeDexerApiResponse> {
+  public getUserTwaps(userAddress: string, params: IndexerTwapsUserQuery = {}): Promise<unknown> {
     const enc = encodeURIComponent(userAddress);
     return this.getPath(`/twaps/user/${enc}${q(params)}`);
   }
 
-  public getTwap(twapId: string): Promise<HypeDexerApiResponse> {
+  public getTwap(twapId: string): Promise<unknown> {
     return this.getPath(`/twaps/${encodeURIComponent(twapId)}`);
   }
 
   public getTwapFills(
     twapId: string,
     params: { limit?: number; offset?: number; order?: string } = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.getPath(`/twaps/${encodeURIComponent(twapId)}/fills${q(params)}`);
   }
 }

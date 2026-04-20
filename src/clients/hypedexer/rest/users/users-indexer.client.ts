@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 export interface IndexerUsersLeaderboardQuery {
   by?: 'volume' | 'pnl' | 'trades' | 'priority_fees';
@@ -14,7 +13,7 @@ export interface IndexerUsersLeaderboardQuery {
 /**
  * HypeDexer REST — Users domain (leaderboard pass-through; `/users/active` polling client lives in `rest/activeusers/`).
  */
-export class HypeDexerUsersIndexerClient extends BaseApiService {
+export class HypeDexerUsersIndexerClient extends HypeDexerBaseClient {
   private static instance: HypeDexerUsersIndexerClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -42,7 +41,7 @@ export class HypeDexerUsersIndexerClient extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
-  public async getLeaderboard(q: IndexerUsersLeaderboardQuery = {}): Promise<HypeDexerApiResponse> {
+  public async getLeaderboard(q: IndexerUsersLeaderboardQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const sp = new URLSearchParams();
       sp.append('by', q.by ?? 'volume');
@@ -50,14 +49,14 @@ export class HypeDexerUsersIndexerClient extends BaseApiService {
       sp.append('limit', String(q.limit ?? 20));
       const endpoint = `/users/leaderboard?${sp.toString()}`;
       logDeduplicator.info('HypeDexerUsersIndexerClient.getLeaderboard', { endpoint });
-      return this.get<HypeDexerApiResponse>(endpoint);
+      return this.getUnwrapped<unknown>(endpoint);
     });
   }
 
   public async getUserCoins(
     user: string,
     params: { start_time?: string; end_time?: string; limit?: number } = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const sp = new URLSearchParams();
       if (params.start_time) sp.append('start_time', params.start_time);
@@ -66,14 +65,14 @@ export class HypeDexerUsersIndexerClient extends BaseApiService {
       const qs = sp.toString();
       const path = `/users/${encodeURIComponent(user)}/coins${qs ? `?${qs}` : ''}`;
       logDeduplicator.info('HypeDexerUsersIndexerClient.getUserCoins', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
   public async getUserOverview(
     user: string,
     params: { start_time?: string; end_time?: string } = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const sp = new URLSearchParams();
       if (params.start_time) sp.append('start_time', params.start_time);
@@ -81,14 +80,14 @@ export class HypeDexerUsersIndexerClient extends BaseApiService {
       const qs = sp.toString();
       const path = `/users/${encodeURIComponent(user)}/overview${qs ? `?${qs}` : ''}`;
       logDeduplicator.info('HypeDexerUsersIndexerClient.getUserOverview', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
   public async getUserPerformance(
     user: string,
     params: { start_time?: string; end_time?: string } = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const sp = new URLSearchParams();
       if (params.start_time) sp.append('start_time', params.start_time);
@@ -96,7 +95,7 @@ export class HypeDexerUsersIndexerClient extends BaseApiService {
       const qs = sp.toString();
       const path = `/users/${encodeURIComponent(user)}/performance${qs ? `?${qs}` : ''}`;
       logDeduplicator.info('HypeDexerUsersIndexerClient.getUserPerformance', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 }

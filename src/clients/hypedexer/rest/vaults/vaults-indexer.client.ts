@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 function q(record: object): string {
   const sp = new URLSearchParams();
@@ -47,7 +46,7 @@ export interface VaultLedgerQuery {
 /**
  * HypeDexer REST — Vaults indexer (distinct from Hyperliquid /market/vaults when applicable).
  */
-export class HypeDexerVaultsIndexerClient extends BaseApiService {
+export class HypeDexerVaultsIndexerClient extends HypeDexerBaseClient {
   private static instance: HypeDexerVaultsIndexerClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -75,34 +74,34 @@ export class HypeDexerVaultsIndexerClient extends BaseApiService {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
-  private getPath(path: string): Promise<HypeDexerApiResponse> {
+  private getPath(path: string): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       logDeduplicator.info('HypeDexerVaultsIndexerClient', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public getVaultDetails(params: VaultDetailsQuery): Promise<HypeDexerApiResponse> {
+  public getVaultDetails(params: VaultDetailsQuery): Promise<unknown> {
     return this.getPath(`/vaults/vaultDetails${q(params)}`);
   }
 
-  public getVaultSummaries(params: { includeClosed?: boolean; limit?: number } = {}): Promise<HypeDexerApiResponse> {
+  public getVaultSummaries(params: { includeClosed?: boolean; limit?: number } = {}): Promise<unknown> {
     return this.getPath(`/vaults/vaultSummaries${q(params)}`);
   }
 
-  public getUserVaultEquities(params: UserVaultEquitiesQuery): Promise<HypeDexerApiResponse> {
+  public getUserVaultEquities(params: UserVaultEquitiesQuery): Promise<unknown> {
     return this.getPath(`/vaults/userVaultEquities${q(params)}`);
   }
 
-  public getDailySnapshots(params: VaultSnapshotsQuery): Promise<HypeDexerApiResponse> {
+  public getDailySnapshots(params: VaultSnapshotsQuery): Promise<unknown> {
     return this.getPath(`/vaults/dailySnapshots${q(params)}`);
   }
 
-  public getEquitySnapshots(params: VaultSnapshotsQuery): Promise<HypeDexerApiResponse> {
+  public getEquitySnapshots(params: VaultSnapshotsQuery): Promise<unknown> {
     return this.getPath(`/vaults/equitySnapshots${q(params)}`);
   }
 
-  public getVaultLedger(params: VaultLedgerQuery): Promise<HypeDexerApiResponse> {
+  public getVaultLedger(params: VaultLedgerQuery): Promise<unknown> {
     return this.getPath(`/vaults/vaultLedger${q(params)}`);
   }
 }

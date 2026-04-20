@@ -1,5 +1,4 @@
 import { HypeDexerSpotIndexerClient } from '../../clients/hypedexer/rest/spot/spot-indexer.client';
-import type { HypeDexerApiResponse } from '../../types/hypedexer-api.types';
 
 export class IndexerSpotIndexerService {
   private static instance: IndexerSpotIndexerService;
@@ -12,19 +11,19 @@ export class IndexerSpotIndexerService {
     return IndexerSpotIndexerService.instance;
   }
 
-  public getAuctionsHist(p: Parameters<HypeDexerSpotIndexerClient['getAuctionsHist']>[0]): Promise<HypeDexerApiResponse> {
+  public getAuctionsHist(p: Parameters<HypeDexerSpotIndexerClient['getAuctionsHist']>[0]): Promise<unknown> {
     return this.client.getAuctionsHist(p);
   }
 
-  public getAuctionsLive(p: Parameters<HypeDexerSpotIndexerClient['getAuctionsLive']>[0]): Promise<HypeDexerApiResponse> {
+  public getAuctionsLive(p: Parameters<HypeDexerSpotIndexerClient['getAuctionsLive']>[0]): Promise<unknown> {
     return this.client.getAuctionsLive(p);
   }
 
-  public getPairs(p: Parameters<HypeDexerSpotIndexerClient['getPairs']>[0]): Promise<HypeDexerApiResponse> {
+  public getPairs(p: Parameters<HypeDexerSpotIndexerClient['getPairs']>[0]): Promise<unknown> {
     return this.client.getPairs(p);
   }
 
-  public getTokens(p: Parameters<HypeDexerSpotIndexerClient['getTokens']>[0]): Promise<HypeDexerApiResponse> {
+  public getTokens(p: Parameters<HypeDexerSpotIndexerClient['getTokens']>[0]): Promise<unknown> {
     return this.client.getTokens(p);
   }
 }

@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 export interface IndexerAnalyticsFillsStatsQuery {
   hours?: number;
@@ -16,7 +15,7 @@ export type IndexerAnalyticsPriorityFeesStatsQuery = IndexerAnalyticsFillsStatsQ
 /**
  * HypeDexer REST — Analytics (GET /analytics/fills/stats).
  */
-export class HypeDexerAnalyticsIndexerClient extends BaseApiService {
+export class HypeDexerAnalyticsIndexerClient extends HypeDexerBaseClient {
   private static instance: HypeDexerAnalyticsIndexerClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -56,23 +55,23 @@ export class HypeDexerAnalyticsIndexerClient extends BaseApiService {
     return s ? `?${s}` : '';
   }
 
-  public async getFillsStats(params: IndexerAnalyticsFillsStatsQuery = {}): Promise<HypeDexerApiResponse> {
+  public async getFillsStats(params: IndexerAnalyticsFillsStatsQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q = this.buildFillsStatsQuery(params);
       const path = `/analytics/fills/stats${q}`;
       logDeduplicator.info('HypeDexerAnalyticsIndexerClient.getFillsStats', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
   public async getPriorityFeesStats(
     params: IndexerAnalyticsPriorityFeesStatsQuery = {}
-  ): Promise<HypeDexerApiResponse> {
+  ): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q = this.buildFillsStatsQuery(params);
       const path = `/analytics/priority-fees/stats${q}`;
       logDeduplicator.info('HypeDexerAnalyticsIndexerClient.getPriorityFeesStats', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 }

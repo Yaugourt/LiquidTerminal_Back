@@ -1,9 +1,8 @@
-import { BaseApiService } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
-import type { HypeDexerApiResponse } from '../../../../types/hypedexer-api.types';
+import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 export interface IndexerCompletedTradesQuery {
   user?: string | null;
@@ -31,7 +30,7 @@ export interface IndexerCompletedTradesSummaryQuery {
 /**
  * HypeDexer REST — Completed trades.
  */
-export class HypeDexerCompletedTradesClient extends BaseApiService {
+export class HypeDexerCompletedTradesClient extends HypeDexerBaseClient {
   private static instance: HypeDexerCompletedTradesClient;
   private static readonly REQUEST_WEIGHT = 10;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1000;
@@ -93,30 +92,30 @@ export class HypeDexerCompletedTradesClient extends BaseApiService {
     return s ? `?${s}` : '';
   }
 
-  public async listCompletedTrades(params: IndexerCompletedTradesQuery = {}): Promise<HypeDexerApiResponse> {
+  public async listCompletedTrades(params: IndexerCompletedTradesQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q = this.buildListQuery(params);
       const path = `/completed-trades/${q}`;
       logDeduplicator.info('HypeDexerCompletedTradesClient.listCompletedTrades', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public async getSummary(params: IndexerCompletedTradesSummaryQuery = {}): Promise<HypeDexerApiResponse> {
+  public async getSummary(params: IndexerCompletedTradesSummaryQuery = {}): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const q = this.buildSummaryQuery(params);
       const path = `/completed-trades/summary${q}`;
       logDeduplicator.info('HypeDexerCompletedTradesClient.getSummary', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 
-  public async getTradeFills(tradeId: string): Promise<HypeDexerApiResponse> {
+  public async getTradeFills(tradeId: string): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
       const enc = encodeURIComponent(tradeId);
       const path = `/completed-trades/${enc}/fills`;
       logDeduplicator.info('HypeDexerCompletedTradesClient.getTradeFills', { path });
-      return this.get<HypeDexerApiResponse>(path);
+      return this.getUnwrapped<unknown>(path);
     });
   }
 }
