@@ -27,12 +27,15 @@ export const HYPEDEXER_LOCKS = {
 
 /** Example TTLs (seconds). Heavy /fills/* = on-demand by default; use short TTL only for hot keys. */
 export const HYPEDEXER_TTL = {
-  fillsCount:      30,   // existant
-  overviewSlice:   55,   // existant
-  globalSnapshot: 300,   // daily-pnl-10d, daily-volume-10d
-  globalRolling:   55,   // fenêtres glissantes 24h
-  staticList:     120,   // dexs, assets (quasi-statiques)
-  userAddress:     30,   // données user-spécifiques
+  fillsCount:             30,   // existant
+  overviewSlice:          55,   // existant
+  globalSnapshot:        300,   // daily-pnl-10d, daily-volume-10d
+  globalRolling:          55,   // fenêtres glissantes 24h
+  staticList:            120,   // dexs, assets (quasi-statiques)
+  userAddress:            30,   // données user-spécifiques
+  buildersAllTimeframes:  55,   // 55s — très lent chez HypeDexer
+  buildersStats:          30,   // 30s — données actives
+  buildersTop:            30,   // 30s — données actives
 } as const;
 
 /** Clés de cache pour les endpoints globaux (identiques pour tous les users) */
@@ -52,6 +55,13 @@ export const HYPEDEXER_CACHE_KEYS = {
   hip3Dexs:                 'hypedexer:hip3:dexs',
   hip3Assets:               'hypedexer:hip3:assets',
   hip3AuctionCurrent:       'hypedexer:hip3:auction-current',
+} as const;
+
+/** Clés de cache pour les endpoints builders — combinaisons timeframe/sort */
+export const HYPEDEXER_BUILDERS_CACHE_KEY = {
+  statsAllTimeframes: 'hypedexer:builders:stats:all-timeframes',
+  stats: (timeframe: string) => `hypedexer:builders:stats:${timeframe}`,
+  top:   (timeframe: string, sort: string) => `hypedexer:builders:top:${timeframe}:${sort}`,
 } as const;
 
 /** Clés de cache par adresse utilisateur — fonctions génératrices */
