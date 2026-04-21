@@ -1,7 +1,7 @@
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
-import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
+import { HYPEDEXER_TESTNET_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 function buildQuery(record: Record<string, string | number | undefined | null>): string {
@@ -26,7 +26,7 @@ export class HypeDexerHip4Client extends HypeDexerBaseClient {
   private rateLimiter: RateLimiterService;
 
   private constructor() {
-    super(HYPEDEXER_API_URL, hypedexerJsonHeaders);
+    super(HYPEDEXER_TESTNET_API_URL, hypedexerJsonHeaders);
     this.circuitBreaker = CircuitBreakerService.getInstance('hypedexer-hip4');
     this.rateLimiter = RateLimiterService.getInstance('hypedexer-hip4', {
       maxWeightPerMinute: HypeDexerHip4Client.MAX_WEIGHT_PER_MINUTE,
