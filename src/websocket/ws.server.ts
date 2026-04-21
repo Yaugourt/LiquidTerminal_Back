@@ -138,7 +138,12 @@ export class InternalWebSocketServer {
    */
   public getStats(): WSConnectionStats {
     let authenticatedCount = 0;
-    const subscriptionCounts: Record<string, number> = { liquidation: 0 };
+    const subscriptionCounts: Record<string, number> = {
+      liquidation: 0,
+      wallet_event: 0,
+      liquidation_alert: 0,
+      hip4_event_alert: 0,
+    };
 
     for (const client of this.clients.values()) {
       if (client.isAuthenticated) {
@@ -276,10 +281,17 @@ export class InternalWebSocketServer {
   private handleSubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
     const subType = message.subscription?.type;
 
-    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event' && subType !== 'liquidation_alert')) {
+    if (
+      !subType ||
+      (subType !== 'liquidation' &&
+        subType !== 'wallet_event' &&
+        subType !== 'liquidation_alert' &&
+        subType !== 'hip4_event_alert')
+    ) {
       this.sendMessage(ws, {
         type: 'error',
-        error: 'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert',
+        error:
+          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, hip4_event_alert',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -289,7 +301,7 @@ export class InternalWebSocketServer {
     // Check if already subscribed to this type
     const existingIndex = client.subscriptions.findIndex((s) => s.type === subType);
     if (existingIndex >= 0) {
-      // Update existing subscription filters (wallet_event and liquidation_alert have no filters)
+      // Update existing subscription filters (wallet_event, liquidation_alert, hip4_event_alert have no filters)
       if (subType === 'liquidation') {
         client.subscriptions[existingIndex].filters = message.subscription?.filters || {};
       }
@@ -315,6 +327,13 @@ export class InternalWebSocketServer {
       clientId: client.id,
       type: subType,
     });
+
+    if (subType === 'hip4_event_alert') {
+      logDeduplicator.info(
+        'InternalWebSocketServer: [hip4_ws] Bot (or client) subscribed to hip4_event_alert — will receive HIP-4 Telegram fan-out',
+        { clientId: client.id, ip: client.ip }
+      );
+    }
   }
 
   /**
@@ -323,10 +342,17 @@ export class InternalWebSocketServer {
   private handleUnsubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
     const subType = message.subscription?.type;
 
-    if (!subType || (subType !== 'liquidation' && subType !== 'wallet_event' && subType !== 'liquidation_alert')) {
+    if (
+      !subType ||
+      (subType !== 'liquidation' &&
+        subType !== 'wallet_event' &&
+        subType !== 'liquidation_alert' &&
+        subType !== 'hip4_event_alert')
+    ) {
       this.sendMessage(ws, {
         type: 'error',
-        error: 'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert',
+        error:
+          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, hip4_event_alert',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -535,6 +561,46 @@ export class InternalWebSocketServer {
         clientCount: sentCount,
       });
     }
+  }
+
+  /**
+   * Broadcast HIP-4 alert to clients subscribed to `hip4_event_alert` (Telegram bot).
+   * @returns Number of WebSocket clients that received the message (0 = no subscriber — bot may be down).
+   */
+  public broadcastHip4EventAlert(telegramId: string, message: string): number {
+    if (!this.wss) return 0;
+
+    const serialized = JSON.stringify({
+      type: 'hip4_event_alert',
+      data: { telegramId, message },
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    let sentCount = 0;
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      const client = this.clients.get(clientId);
+      if (!client) continue;
+
+      const hasSub = client.subscriptions.some((s) => s.type === 'hip4_event_alert');
+      if (!hasSub) continue;
+
+      this.sendRawMessage(ws, serialized);
+      sentCount++;
+    }
+
+    if (sentCount > 0) {
+      logDeduplicator.info('InternalWebSocketServer: Broadcast HIP-4 event alert', {
+        telegramId,
+        clientCount: sentCount,
+      });
+    } else {
+      logDeduplicator.warn('InternalWebSocketServer: [hip4_ws] Broadcast HIP-4 alert to 0 clients (no hip4_event_alert subscriber — Telegram bot disconnected?)', {
+        telegramId,
+      });
+    }
+
+    return sentCount;
   }
 
   /**

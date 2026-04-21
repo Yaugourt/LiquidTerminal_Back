@@ -142,8 +142,14 @@ export interface WSClient {
 /**
  * Client subscription to our internal WebSocket
  */
+export type WSInternalSubscriptionType =
+  | 'liquidation'
+  | 'wallet_event'
+  | 'liquidation_alert'
+  | 'hip4_event_alert';
+
 export interface WSClientSubscription {
-  type: 'liquidation' | 'wallet_event' | 'liquidation_alert';
+  type: WSInternalSubscriptionType;
   filters: WSLiquidationFilters;
   subscribedAt: number;
 }
@@ -168,7 +174,7 @@ export type WSMethod = 'subscribe' | 'unsubscribe' | 'ping';
 export interface WSClientMessage {
   method: WSMethod;
   subscription?: {
-    type: 'liquidation' | 'wallet_event';
+    type: WSInternalSubscriptionType;
     filters?: WSLiquidationFilters;
   };
   token?: string;           // Privy JWT for authentication
@@ -185,6 +191,7 @@ export type WSEventType =
   | 'liquidation'
   | 'wallet_event'
   | 'liquidation_alert'
+  | 'hip4_event_alert'
   | 'heartbeat'
   | 'error';
 
@@ -234,6 +241,17 @@ export interface WSLiquidationEvent extends WSServerMessage {
  */
 export interface WSLiquidationAlertEvent extends WSServerMessage {
   type: 'liquidation_alert';
+  data: {
+    telegramId: string;
+    message: string;
+  };
+}
+
+/**
+ * HIP-4 alert to Telegram bot (same shape as liquidation_alert).
+ */
+export interface WSHip4EventAlertEvent extends WSServerMessage {
+  type: 'hip4_event_alert';
   data: {
     telegramId: string;
     message: string;
