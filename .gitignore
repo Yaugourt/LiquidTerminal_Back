@@ -43,3 +43,6 @@ prisma-historical/generated/
 
 # Test coverage
 coverage/
+
+# Local database dumps (pg_dump)
+backups/

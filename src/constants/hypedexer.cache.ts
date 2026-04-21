@@ -55,6 +55,11 @@ export const HYPEDEXER_CACHE_KEYS = {
   hip3Dexs:                 'hypedexer:hip3:dexs',
   hip3Assets:               'hypedexer:hip3:assets',
   hip3AuctionCurrent:       'hypedexer:hip3:auction-current',
+  // HIP4 — globaux
+  hip4Markets:              'hypedexer:hip4:markets',
+  hip4Questions:            'hypedexer:hip4:questions',
+  hip4OutcomeTokens:        'hypedexer:hip4:outcome-tokens',
+  hip4FeeScales:            'hypedexer:hip4:fee-scales',
 } as const;
 
 /** Clés de cache pour les endpoints builders — combinaisons timeframe/sort */
@@ -78,4 +83,7 @@ export const HYPEDEXER_USER_CACHE_KEY = {
   hip3Overview:     (addr: string) => `hypedexer:hip3:user:${addr}:overview`,
   hip3Coins:        (addr: string) => `hypedexer:hip3:user:${addr}:coins`,
   hip3Fills:        (addr: string) => `hypedexer:hip3:user:${addr}:fills`,
+  hip4Fills:        (addr: string) => `hypedexer:hip4:user:${addr}:fills`,
+  hip4Fees:         (addr: string) => `hypedexer:hip4:user:${addr}:fees`,
+  hip4UserActions:  (addr: string) => `hypedexer:hip4:user:${addr}:actions`,
 } as const;
