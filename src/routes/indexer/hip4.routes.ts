@@ -3,14 +3,9 @@ import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   hip4FillsQuerySchema,
-  hip4FeesQuerySchema,
-  hip4MarketsQuerySchema,
-  hip4OutcomesQuerySchema,
-  hip4QuestionsQuerySchema,
   hip4SettlementsQuerySchema,
-  hip4OutcomeTokensQuerySchema,
-  hip4FeeScalesQuerySchema,
-  hip4UserActionsQuerySchema,
+  hip4MarketsEnrichedQuerySchema,
+  hip4QuestionsWithOutcomesQuerySchema,
 } from '../../schemas/indexer/hip4.schema';
 import { IndexerHip4Service } from '../../services/indexer/indexer-hip4.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -63,99 +58,6 @@ router.get(
 );
 
 router.get(
-  '/fees',
-  marketRateLimiter,
-  validateGetRequest(hip4FeesQuerySchema),
-  (async (req: Request, res: Response) => {
-    try {
-      const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getFees({
-          user: str(q.user),
-          coin: str(q.coin),
-          start: str(q.start),
-          end: str(q.end),
-          limit: num(q.limit),
-          offset: num(q.offset),
-        }),
-      });
-    } catch (e) {
-      send502(res, 'INDEXER_HIP4_FEES_ERROR', e);
-    }
-  }) as RequestHandler
-);
-
-router.get(
-  '/markets',
-  marketRateLimiter,
-  validateGetRequest(hip4MarketsQuerySchema),
-  (async (req: Request, res: Response) => {
-    try {
-      const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getMarkets({
-          outcome_id: num(q.outcome_id),
-          class: str(q.class),
-          underlying: str(q.underlying),
-          question_id: num(q.question_id),
-          limit: num(q.limit),
-          offset: num(q.offset),
-        }),
-      });
-    } catch (e) {
-      send502(res, 'INDEXER_HIP4_MARKETS_ERROR', e);
-    }
-  }) as RequestHandler
-);
-
-router.get(
-  '/outcomes',
-  marketRateLimiter,
-  validateGetRequest(hip4OutcomesQuerySchema),
-  (async (req: Request, res: Response) => {
-    try {
-      const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getOutcomes({
-          outcome_id: num(q.outcome_id),
-          class: str(q.class),
-          underlying: str(q.underlying),
-          question_id: num(q.question_id),
-          limit: num(q.limit),
-          offset: num(q.offset),
-        }),
-      });
-    } catch (e) {
-      send502(res, 'INDEXER_HIP4_OUTCOMES_ERROR', e);
-    }
-  }) as RequestHandler
-);
-
-router.get(
-  '/questions',
-  marketRateLimiter,
-  validateGetRequest(hip4QuestionsQuerySchema),
-  (async (req: Request, res: Response) => {
-    try {
-      const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getQuestions({
-          question_id: num(q.question_id),
-          limit: num(q.limit),
-          offset: num(q.offset),
-        }),
-      });
-    } catch (e) {
-      send502(res, 'INDEXER_HIP4_QUESTIONS_ERROR', e);
-    }
-  }) as RequestHandler
-);
-
-router.get(
   '/settlements',
   marketRateLimiter,
   validateGetRequest(hip4SettlementsQuerySchema),
@@ -179,70 +81,45 @@ router.get(
 );
 
 router.get(
-  '/outcome-tokens',
+  '/markets-enriched',
   marketRateLimiter,
-  validateGetRequest(hip4OutcomeTokensQuerySchema),
+  validateGetRequest(hip4MarketsEnrichedQuerySchema),
   (async (req: Request, res: Response) => {
     try {
       const q = req.query;
       res.json({
         success: true,
-        data: await svc.getOutcomeTokens({
-          outcome_id: num(q.outcome_id),
-          coin: str(q.coin),
+        data: await svc.getMarketsEnriched({
+          class: str(q.class),
+          underlying: str(q.underlying),
+          question_id: num(q.question_id),
           limit: num(q.limit),
           offset: num(q.offset),
         }),
       });
     } catch (e) {
-      send502(res, 'INDEXER_HIP4_OUTCOME_TOKENS_ERROR', e);
+      send502(res, 'INDEXER_HIP4_MARKETS_ENRICHED_ERROR', e);
     }
   }) as RequestHandler
 );
 
 router.get(
-  '/fee-scales',
+  '/questions-with-outcomes',
   marketRateLimiter,
-  validateGetRequest(hip4FeeScalesQuerySchema),
+  validateGetRequest(hip4QuestionsWithOutcomesQuerySchema),
   (async (req: Request, res: Response) => {
     try {
       const q = req.query;
       res.json({
         success: true,
-        data: await svc.getFeeScales({
-          start: str(q.start),
-          end: str(q.end),
+        data: await svc.getQuestionsWithOutcomes({
+          question_id: num(q.question_id),
           limit: num(q.limit),
           offset: num(q.offset),
         }),
       });
     } catch (e) {
-      send502(res, 'INDEXER_HIP4_FEE_SCALES_ERROR', e);
-    }
-  }) as RequestHandler
-);
-
-router.get(
-  '/user-actions',
-  marketRateLimiter,
-  validateGetRequest(hip4UserActionsQuerySchema),
-  (async (req: Request, res: Response) => {
-    try {
-      const q = req.query;
-      res.json({
-        success: true,
-        data: await svc.getUserActions({
-          user: str(q.user),
-          action_type: str(q.action_type),
-          outcome_id: num(q.outcome_id),
-          start: str(q.start),
-          end: str(q.end),
-          limit: num(q.limit),
-          offset: num(q.offset),
-        }),
-      });
-    } catch (e) {
-      send502(res, 'INDEXER_HIP4_USER_ACTIONS_ERROR', e);
+      send502(res, 'INDEXER_HIP4_QUESTIONS_WITH_OUTCOMES_ERROR', e);
     }
   }) as RequestHandler
 );

@@ -53,7 +53,7 @@ export class HypeDexerHip4Client extends HypeDexerBaseClient {
   }
 
   /** Prediction market fills. */
-  public getFills(params: {
+  public getFills<T = unknown>(params: {
     user?: string;
     coin?: string;
     outcome_id?: number;
@@ -61,96 +61,49 @@ export class HypeDexerHip4Client extends HypeDexerBaseClient {
     end?: string;
     limit?: number;
     offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/fills${buildQuery(params)}`);
+  } = {}): Promise<T> {
+    return this.getUpstream(`/hip4/fills${buildQuery(params)}`) as Promise<T>;
   }
 
-  /** Fees aggregated per user, coin and day. */
-  public getFees(params: {
-    user?: string;
-    coin?: string;
-    start?: string;
-    end?: string;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/fees${buildQuery(params)}`);
-  }
-
-  /** Outcome markets with question and volume stats. */
-  public getMarkets(params: {
+  /** Outcome markets with question/volume stats — used by enriched endpoints. */
+  public getMarkets<T = unknown>(params: {
     outcome_id?: number;
     class?: string;
     underlying?: string;
     question_id?: number;
     limit?: number;
     offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/markets${buildQuery(params)}`);
+  } = {}): Promise<T> {
+    return this.getUpstream(`/hip4/markets${buildQuery(params)}`) as Promise<T>;
   }
 
-  /** Outcome markets — alias of /hip4/markets. */
-  public getOutcomes(params: {
-    outcome_id?: number;
-    class?: string;
-    underlying?: string;
+  /** Questions grouping related outcomes — used by enriched endpoints. */
+  public getQuestions<T = unknown>(params: {
     question_id?: number;
     limit?: number;
     offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/outcomes${buildQuery(params)}`);
-  }
-
-  /** Questions grouping related outcomes. */
-  public getQuestions(params: {
-    question_id?: number;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/questions${buildQuery(params)}`);
+  } = {}): Promise<T> {
+    return this.getUpstream(`/hip4/questions${buildQuery(params)}`) as Promise<T>;
   }
 
   /** Market resolutions. */
-  public getSettlements(params: {
+  public getSettlements<T = unknown>(params: {
     outcome_id?: number;
     start?: string;
     end?: string;
     limit?: number;
     offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/settlements${buildQuery(params)}`);
+  } = {}): Promise<T> {
+    return this.getUpstream(`/hip4/settlements${buildQuery(params)}`) as Promise<T>;
   }
 
-  /** Outcome token metadata. */
-  public getOutcomeTokens(params: {
+  /** Outcome token metadata — used by enriched endpoints for human-readable names. */
+  public getOutcomeTokens<T = unknown>(params: {
     outcome_id?: number;
     coin?: string;
     limit?: number;
     offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/outcome-tokens${buildQuery(params)}`);
-  }
-
-  /** Outcome fee scale governance events. */
-  public getFeeScales(params: {
-    start?: string;
-    end?: string;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/fee-scales${buildQuery(params)}`);
-  }
-
-  /** User outcome actions (split, merge, negate). */
-  public getUserActions(params: {
-    user?: string;
-    action_type?: string;
-    outcome_id?: number;
-    start?: string;
-    end?: string;
-    limit?: number;
-    offset?: number;
-  } = {}): Promise<unknown> {
-    return this.getUpstream(`/hip4/user-actions${buildQuery(params)}`);
+  } = {}): Promise<T> {
+    return this.getUpstream(`/hip4/outcome-tokens${buildQuery(params)}`) as Promise<T>;
   }
 }
