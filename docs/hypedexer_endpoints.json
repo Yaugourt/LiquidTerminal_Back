@@ -535,10 +535,48 @@
                   "type": "null"
                 }
               ],
-              "description": "UTC time window ending at now. If omitted, no time filter (use limit/offset/cursor for pagination). Allowed values: 1h, 24h, 7d, 30d.",
+              "description": "UTC time window ending at now. If omitted and start_time/end_time are not set, no time filter. Ignored when start_time or end_time is provided. Allowed values: 1h, 24h, 7d, 30d.",
               "title": "Time Range"
             },
-            "description": "UTC time window ending at now. If omitted, no time filter (use limit/offset/cursor for pagination). Allowed values: 1h, 24h, 7d, 30d."
+            "description": "UTC time window ending at now. If omitted and start_time/end_time are not set, no time filter. Ignored when start_time or end_time is provided. Allowed values: 1h, 24h, 7d, 30d."
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start of time range (ISO UTC, e.g. 2024-01-01T00:00:00Z). Takes priority over time_range.",
+              "title": "Start Time"
+            },
+            "description": "Start of time range (ISO UTC, e.g. 2024-01-01T00:00:00Z). Takes priority over time_range."
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End of time range (ISO UTC). Takes priority over time_range.",
+              "title": "End Time"
+            },
+            "description": "End of time range (ISO UTC). Takes priority over time_range."
           },
           {
             "name": "coin",
@@ -580,11 +618,11 @@
             "schema": {
               "type": "integer",
               "minimum": 0,
-              "description": "Pagination offset (deprecated, prefer cursor)",
+              "description": "Pagination offset (prefer cursor for large offsets)",
               "default": 0,
               "title": "Offset"
             },
-            "description": "Pagination offset (deprecated, prefer cursor)"
+            "description": "Pagination offset (prefer cursor for large offsets)"
           },
           {
             "name": "cursor",
@@ -8812,6 +8850,1761 @@
         },
         "x-websocket": true
       }
+    },
+    "/evm/stats": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Global EVM indexing stats",
+        "description": "Total blocks, transactions, logs indexed and block range.",
+        "operationId": "get_stats_evm_stats_get",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/stats/daily": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Daily block/tx stats",
+        "operationId": "get_daily_stats_evm_stats_daily_get",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 365,
+              "minimum": 1,
+              "description": "Number of days to look back",
+              "default": 30,
+              "title": "Days"
+            },
+            "description": "Number of days to look back"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/blocks": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "List EVM blocks",
+        "operationId": "get_blocks_evm_blocks_get",
+        "parameters": [
+          {
+            "name": "start_block",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Min block number",
+              "title": "Start Block"
+            },
+            "description": "Min block number"
+          },
+          {
+            "name": "end_block",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Max block number",
+              "title": "End Block"
+            },
+            "description": "Max block number"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/blocks/{block_number}": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Get block by number",
+        "operationId": "get_block_evm_blocks__block_number__get",
+        "parameters": [
+          {
+            "name": "block_number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "description": "Block number",
+              "title": "Block Number"
+            },
+            "description": "Block number"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/transactions": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "List EVM transactions",
+        "operationId": "get_transactions_evm_transactions_get",
+        "parameters": [
+          {
+            "name": "block_number",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by block number",
+              "title": "Block Number"
+            },
+            "description": "Filter by block number"
+          },
+          {
+            "name": "to_addr",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by to address",
+              "title": "To Addr"
+            },
+            "description": "Filter by to address"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "include_system",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include system transactions",
+              "default": true,
+              "title": "Include System"
+            },
+            "description": "Include system transactions"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/blocks/{block_number}/transactions": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Transactions in a specific block",
+        "operationId": "get_block_transactions_evm_blocks__block_number__transactions_get",
+        "parameters": [
+          {
+            "name": "block_number",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "description": "Block number",
+              "title": "Block Number"
+            },
+            "description": "Block number"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/logs": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "List EVM event logs",
+        "operationId": "get_logs_evm_logs_get",
+        "parameters": [
+          {
+            "name": "block_number",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by block number",
+              "title": "Block Number"
+            },
+            "description": "Filter by block number"
+          },
+          {
+            "name": "address",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by contract address",
+              "title": "Address"
+            },
+            "description": "Filter by contract address"
+          },
+          {
+            "name": "topic0",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by event signature (topic0)",
+              "title": "Topic0"
+            },
+            "description": "Filter by event signature (topic0)"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/ledger/transfers": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "List ledger transfers (L1 actions)",
+        "operationId": "get_ledger_transfers_evm_ledger_transfers_get",
+        "parameters": [
+          {
+            "name": "user",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user address (from or to)",
+              "title": "User"
+            },
+            "description": "Filter by user address (from or to)"
+          },
+          {
+            "name": "action_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by action type (withdraw3, usdSend, spotSend, sendAsset, agentSendAsset, usdClassTransfer, subAccountTransfer, vaultTransfer, hip3LiquidatorTransfer)",
+              "title": "Action Type"
+            },
+            "description": "Filter by action type (withdraw3, usdSend, spotSend, sendAsset, agentSendAsset, usdClassTransfer, subAccountTransfer, vaultTransfer, hip3LiquidatorTransfer)"
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by token (partial match)",
+              "title": "Token"
+            },
+            "description": "Filter by token (partial match)"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/bridge/events": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "List bridge events (deposits/withdrawals)",
+        "operationId": "get_bridge_events_evm_bridge_events_get",
+        "parameters": [
+          {
+            "name": "user_addr",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user address",
+              "title": "User Addr"
+            },
+            "description": "Filter by user address"
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by event type (deposit_vote, withdrawal_finalized, withdrawal_sign, withdraw3)",
+              "title": "Event Type"
+            },
+            "description": "Filter by event type (deposit_vote, withdrawal_finalized, withdrawal_sign, withdraw3)"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/user/{address}/ledger-events": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Non-funding ledger events for a user (deposits, withdrawals, transfers)",
+        "description": "Unified non-funding ledger history for a user.\n\nCombines data from:\n- **ledger_transfers**: usdSend, spotSend, sendAsset, agentSendAsset,\n  withdraw3, usdClassTransfer, subAccountTransfer, vaultTransfer\n- **evm_bridge_events**: deposit_vote, withdrawal_finalized\n\nEvent types:\n- `deposit` — bridge deposit into Hyperliquid\n- `withdrawal` — withdraw3 or bridge withdrawal finalized\n- `transfer_in` — received via usdSend/spotSend/sendAsset\n- `transfer_out` — sent via usdSend/spotSend/sendAsset\n- `class_transfer` — perp ↔ spot USDC transfer\n- `sub_account` — sub-account transfer\n- `vault` — vault deposit/withdrawal\n- `agent_send` — agent moving collateral between HIP-3 dexs for the same user\n                (`source_dex` / `destination_dex` populated)",
+        "operationId": "get_user_ledger_events_evm_user__address__ledger_events_get",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "User address (0x...)",
+              "title": "Address"
+            },
+            "description": "User address (0x...)"
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LedgerEventType"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by event type(s)",
+              "title": "Event Type"
+            },
+            "description": "Filter by event type(s)"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/user/{address}/ledger-summary": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Aggregated ledger summary per action type for a user",
+        "description": "Count + total amount per action type across all ledger transfers involving this user.",
+        "operationId": "get_user_ledger_summary_evm_user__address__ledger_summary_get",
+        "parameters": [
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "User address (0x...)",
+              "title": "Address"
+            },
+            "description": "User address (0x...)"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/hip3/backstop/transfers": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Deployer principal deposits/withdrawals on the backstop",
+        "description": "Raw list of deployer principal transfers (the L1 `hip3LiquidatorTransfer`\naction). Each row = a deployer moving principal into or out of a HIP-3\ndex's backstop. `ntl` is the raw integer in micro-USDC (1e-6); `ntl_usdc`\nis the human-readable amount. `is_deposit=1` for deposits, `0` for\nwithdrawals.",
+        "operationId": "get_hip3_backstop_transfers_evm_hip3_backstop_transfers_get",
+        "parameters": [
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by dex name (e.g. 'xyz')",
+              "title": "Dex"
+            },
+            "description": "Filter by dex name (e.g. 'xyz')"
+          },
+          {
+            "name": "signer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by deployer address",
+              "title": "Signer"
+            },
+            "description": "Filter by deployer address"
+          },
+          {
+            "name": "is_deposit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "True = deposits only, False = withdrawals only",
+              "title": "Is Deposit"
+            },
+            "description": "True = deposits only, False = withdrawals only"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/hip3/backstop/transfers-summary": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Per-dex aggregate of backstop principal flows",
+        "description": "Aggregate by dex over the requested window:\n\n- `total_deposited_usdc` / `total_withdrawn_usdc`: principal flows\n- `net_principal_usdc`: deposited − withdrawn (current principal balance,\n  since PnL is not withdrawable per protocol)\n- `unique_signers`: number of distinct deployer addresses depositing/withdrawing",
+        "operationId": "get_hip3_backstop_transfers_summary_evm_hip3_backstop_transfers_summary_get",
+        "parameters": [
+          {
+            "name": "dex",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by dex name",
+              "title": "Dex"
+            },
+            "description": "Filter by dex name"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/hip3/backstop/health": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "HIP-3 backstop health overview across all dexs",
+        "description": "One row per dex with a discovered backstop liquidator address. Includes\nprincipal flows (deployer deposits/withdrawals) and on-chain activity\n(fills absorbed, fees paid, last fill, coins touched). Sorted by fill\ncount.",
+        "operationId": "get_hip3_backstop_overview_evm_hip3_backstop_health_get",
+        "parameters": [
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/hip3/backstop/{dex}/health": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "HIP-3 backstop health for a single dex",
+        "description": "Combined backstop snapshot for one dex: principal in/out (deployer\nactions) + on-chain fill activity (notional, fees, last fill, coins\nactive). Returns 404 if no backstop address has been observed for this\ndex yet.",
+        "operationId": "get_hip3_backstop_health_evm_hip3_backstop__dex__health_get",
+        "parameters": [
+          {
+            "name": "dex",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "dex_id (e.g. 'km', 'xyz', 'cash')",
+              "title": "Dex"
+            },
+            "description": "dex_id (e.g. 'km', 'xyz', 'cash')"
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evm/hip3/backstop/{dex}/fills": {
+      "get": {
+        "tags": [
+          "EVM"
+        ],
+        "summary": "Fills absorbed by a HIP-3 backstop liquidator",
+        "description": "Raw fill stream for the backstop address of a given HIP-3 dex. These are\nthe positions the backstop absorbed from liquidations. Returns an empty\nlist if the dex has no observed backstop address yet.",
+        "operationId": "get_hip3_backstop_fills_evm_hip3_backstop__dex__fills_get",
+        "parameters": [
+          {
+            "name": "dex",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "dex_id (e.g. 'km', 'xyz', 'cash')",
+              "title": "Dex"
+            },
+            "description": "dex_id (e.g. 'km', 'xyz', 'cash')"
+          },
+          {
+            "name": "coin",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by coin (e.g. 'km:BTC')",
+              "title": "Coin"
+            },
+            "description": "Filter by coin (e.g. 'km:BTC')"
+          },
+          {
+            "name": "side",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "'B' = buy, 'A' = sell",
+              "title": "Side"
+            },
+            "description": "'B' = buy, 'A' = sell"
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Start time (UTC)",
+              "title": "Start Time"
+            },
+            "description": "Start time (UTC)"
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "End time (UTC)",
+              "title": "End Time"
+            },
+            "description": "End time (UTC)"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "X-API-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/APIResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -13127,6 +14920,20 @@
           "type"
         ],
         "title": "VolumeHistory10dRequest"
+      },
+      "LedgerEventType": {
+        "type": "string",
+        "enum": [
+          "deposit",
+          "withdrawal",
+          "transfer_in",
+          "transfer_out",
+          "class_transfer",
+          "sub_account",
+          "vault",
+          "agent_send"
+        ],
+        "title": "LedgerEventType"
       }
     }
   }

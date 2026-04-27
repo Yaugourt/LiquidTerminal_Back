@@ -40,7 +40,16 @@ export function unwrapHypeDexerApiPayload(body: unknown): unknown {
   }
 
   if (isHypeDexerApiEnvelope(o)) {
-    return unwrapHypeDexerApiPayload(o.data);
+    const inner = o.data;
+    // List endpoints expose `data` as an array; do not unwrap further or callers lose the
+    // APIResponse shape (execution_time_ms, total_count, etc.) and `response.data` becomes undefined.
+    if (inner === null || inner === undefined || Array.isArray(inner)) {
+      return o;
+    }
+    if (typeof inner === 'object' && isHypeDexerApiEnvelope(inner as Record<string, unknown>)) {
+      return unwrapHypeDexerApiPayload(inner);
+    }
+    return o;
   }
 
   return body;

@@ -19,7 +19,7 @@ const REDIS_CONFIG = {
 
 // Subscriber instance (for pub/sub - cannot do normal commands while subscribed)
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', REDIS_CONFIG);
-redis.setMaxListeners(20);
+redis.setMaxListeners(50);
 
 // Normal operations instance (GET, SET, pipeline, etc.)
 const redisNormal = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', REDIS_CONFIG);
@@ -53,15 +53,55 @@ redis.on('error', (err) => {
   });
 });
 
-// Test de connexion au démarrage
-redis.ping().then(() => {
-  logDeduplicator.info('Redis PING successful');
-}).catch((err) => {
-  logDeduplicator.error('Redis PING failed', {
-    error: err instanceof Error ? err.message : String(err),
-    stack: err instanceof Error ? err.stack : undefined
+/**
+ * With enableOfflineQueue: false, ioredis rejects commands until the TCP stream is writable.
+ * Many services call subscribe() from constructors during module load; we must wait for "ready".
+ */
+function waitUntilRedisSubscriberReady(): Promise<void> {
+  if (redis.status === 'ready') {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const timeoutMs = REDIS_CONFIG.connectTimeout + 5000;
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Redis subscriber did not become ready within ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      redis.removeListener('ready', onReady);
+      redis.removeListener('end', onEnd);
+    };
+
+    const onReady = (): void => {
+      cleanup();
+      resolve();
+    };
+
+    const onEnd = (): void => {
+      cleanup();
+      reject(new Error('Redis subscriber connection ended before ready'));
+    };
+
+    redis.once('ready', onReady);
+    redis.once('end', onEnd);
   });
-});
+}
+
+// Smoke test after subscriber connection is usable (avoids race with module import / subscribe burst)
+void (async (): Promise<void> => {
+  try {
+    await waitUntilRedisSubscriberReady();
+    await redis.ping();
+    logDeduplicator.info('Redis PING successful');
+  } catch (err) {
+    logDeduplicator.error('Redis PING failed', {
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined
+    });
+  }
+})();
 
 // Service wrapper simple
 export class RedisService {
@@ -149,6 +189,7 @@ export class RedisService {
 
   public async subscribe(channel: string, callback: (message: string) => void): Promise<void> {
     try {
+      await waitUntilRedisSubscriberReady();
       await redis.subscribe(channel);
       redis.on('message', (receivedChannel, message) => {
         if (receivedChannel === channel) {
@@ -166,6 +207,7 @@ export class RedisService {
 
   public async unsubscribe(channel: string): Promise<void> {
     try {
+      await waitUntilRedisSubscriberReady();
       await redis.unsubscribe(channel);
     } catch (error) {
       logDeduplicator.error('Redis unsubscribe error', {
