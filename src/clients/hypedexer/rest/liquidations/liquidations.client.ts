@@ -1,9 +1,10 @@
 import { redisService } from '../../../../core/redis.service';
-import { LiquidationResponse, LiquidationQueryParams } from '../../../../types/liquidations.types';
+import { Liquidation, LiquidationResponse, LiquidationQueryParams } from '../../../../types/liquidations.types';
 import { AnalyticsLiquidationStatsResponse, AnalyticsLiquidationStatsParams } from '../../../../types/analytics-liquidations.types';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
+import { coerceHypedexerListApiResponse } from '../../../../utils/hypedexer-api-response.util';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
@@ -41,6 +42,14 @@ export class HLIndexerLiquidationsClient extends HypeDexerBaseClient {
       HLIndexerLiquidationsClient.instance = new HLIndexerLiquidationsClient();
     }
     return HLIndexerLiquidationsClient.instance;
+  }
+
+  private liquidationsFromUnwrapped(raw: unknown): LiquidationResponse {
+    const r = coerceHypedexerListApiResponse<Liquidation>(raw);
+    return {
+      ...r,
+      has_more: r.has_more ?? false,
+    };
   }
 
   /**
@@ -85,7 +94,7 @@ export class HLIndexerLiquidationsClient extends HypeDexerBaseClient {
         params,
       });
 
-      const response = await this.getUnwrapped<LiquidationResponse>(endpoint);
+      const response = this.liquidationsFromUnwrapped(await this.getUnwrapped<unknown>(endpoint));
 
       logDeduplicator.info('Successfully fetched liquidations', {
         count: response.data?.length || 0,
@@ -176,7 +185,7 @@ export class HLIndexerLiquidationsClient extends HypeDexerBaseClient {
         const queryString = this.buildQueryString(params);
         const endpoint = `/liquidations/recent${queryString}`;
         logDeduplicator.info('Fetching recent liquidations from HypeDexer', { endpoint, params });
-        const response = await this.getUnwrapped<LiquidationResponse>(endpoint);
+        const response = this.liquidationsFromUnwrapped(await this.getUnwrapped<unknown>(endpoint));
         logDeduplicator.info('Successfully fetched recent liquidations', {
           count: response.data?.length || 0,
           hasMore: response.has_more,

@@ -1,9 +1,10 @@
-import { BuildersApiResponse } from '../../../../types/builders.types';
+import { Builder, BuildersApiResponse } from '../../../../types/builders.types';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../../../core/redis.service';
 import { withDistributedLock } from '../../../../utils/distributedLock';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
+import { coerceHypedexerListApiResponse } from '../../../../utils/hypedexer-api-response.util';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
@@ -89,9 +90,12 @@ export class HLIndexerBuildersClient extends HypeDexerBaseClient {
   }
 
   private async fetchAllBuilders(): Promise<BuildersApiResponse> {
-    return this.circuitBreaker.execute(() =>
-      this.getUnwrapped<BuildersApiResponse>('/builders/list?limit=1000&offset=0&sort=volume_usd&order=DESC')
-    );
+    return this.circuitBreaker.execute(async () => {
+      const raw = await this.getUnwrapped<unknown>(
+        '/builders/list?limit=1000&offset=0&sort=volume_usd&order=DESC'
+      );
+      return coerceHypedexerListApiResponse<Builder>(raw) as BuildersApiResponse;
+    });
   }
 
   /**

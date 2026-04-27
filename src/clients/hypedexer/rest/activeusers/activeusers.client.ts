@@ -1,4 +1,5 @@
 import {
+  ActiveUser,
   ActiveUsersApiResponse,
   ActiveUsersQueryParams,
 } from '../../../../types/activeusers.types';
@@ -7,6 +8,7 @@ import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.ser
 import { redisService } from '../../../../core/redis.service';
 import { withDistributedLock } from '../../../../utils/distributedLock';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
+import { coerceHypedexerListApiResponse } from '../../../../utils/hypedexer-api-response.util';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
@@ -109,7 +111,8 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
 
   private async fetchRaw(params: ActiveUsersQueryParams): Promise<ActiveUsersApiResponse> {
     const queryString = this.buildQueryString({ hours: params.hours || 24, limit: params.limit || 100 });
-    return this.getUnwrapped<ActiveUsersApiResponse>(`/users/active${queryString}`);
+    const raw = await this.getUnwrapped<unknown>(`/users/active${queryString}`);
+    return coerceHypedexerListApiResponse<ActiveUser>(raw) as ActiveUsersApiResponse;
   }
 
   /**

@@ -40,17 +40,51 @@ export function unwrapHypeDexerApiPayload(body: unknown): unknown {
   }
 
   if (isHypeDexerApiEnvelope(o)) {
-    const inner = o.data;
-    // List endpoints expose `data` as an array; do not unwrap further or callers lose the
-    // APIResponse shape (execution_time_ms, total_count, etc.) and `response.data` becomes undefined.
-    if (inner === null || inner === undefined || Array.isArray(inner)) {
-      return o;
-    }
-    if (typeof inner === 'object' && isHypeDexerApiEnvelope(inner as Record<string, unknown>)) {
-      return unwrapHypeDexerApiPayload(inner);
-    }
-    return o;
+    return unwrapHypeDexerApiPayload(o.data);
   }
 
   return body;
+}
+
+/**
+ * After {@link unwrapHypeDexerApiPayload}, list endpoints often resolve to a bare `T[]`.
+ * Services expect the OpenAPI `APIResponse` shape with a `data` array. Re-wrap arrays only.
+ */
+export function coerceHypedexerListApiResponse<T>(raw: unknown): {
+  success: boolean;
+  message: string;
+  data: T[];
+  total_count: number | null;
+  execution_time_ms: number;
+  next_cursor: string | null;
+  has_more: boolean | null;
+} {
+  if (Array.isArray(raw)) {
+    return {
+      success: true,
+      message: '',
+      data: raw,
+      total_count: raw.length,
+      execution_time_ms: 0,
+      next_cursor: null,
+      has_more: null,
+    };
+  }
+  if (
+    raw !== null &&
+    typeof raw === 'object' &&
+    'data' in raw &&
+    Array.isArray((raw as { data: unknown }).data)
+  ) {
+    return raw as {
+      success: boolean;
+      message: string;
+      data: T[];
+      total_count: number | null;
+      execution_time_ms: number;
+      next_cursor: string | null;
+      has_more: boolean | null;
+    };
+  }
+  throw new Error('Invalid HypeDexer list response: expected array or envelope with data[]');
 }

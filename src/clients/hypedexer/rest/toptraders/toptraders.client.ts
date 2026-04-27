@@ -1,4 +1,5 @@
 import {
+  TopTrader,
   TopTradersApiResponse,
   TopTradersQueryParams,
   TopTradersSortType,
@@ -8,6 +9,7 @@ import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.ser
 import { redisService } from '../../../../core/redis.service';
 import { withDistributedLock } from '../../../../utils/distributedLock';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
+import { coerceHypedexerListApiResponse } from '../../../../utils/hypedexer-api-response.util';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
@@ -99,9 +101,10 @@ export class HLIndexerTopTradersClient extends HypeDexerBaseClient {
 
   private async fetchTopTraders(sort: TopTradersSortType, limit: number): Promise<TopTradersApiResponse> {
     const queryString = `?sort=${sort}&limit=${limit}`;
-    return this.circuitBreaker.execute(() =>
-      this.getUnwrapped<TopTradersApiResponse>(`/overview/top-traders-24h${queryString}`)
-    );
+    return this.circuitBreaker.execute(async () => {
+      const raw = await this.getUnwrapped<unknown>(`/overview/top-traders-24h${queryString}`);
+      return coerceHypedexerListApiResponse<TopTrader>(raw) as TopTradersApiResponse;
+    });
   }
 
   private buildQueryString(params: TopTradersQueryParams): string {
