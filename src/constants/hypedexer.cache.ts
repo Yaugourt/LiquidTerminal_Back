@@ -36,6 +36,12 @@ export const HYPEDEXER_TTL = {
   buildersAllTimeframes:  55,   // 55s — très lent chez HypeDexer
   buildersStats:          30,   // 30s — données actives
   buildersTop:            30,   // 30s — données actives
+  evmStats:               30,   // EVM global stats
+  evmStatsDaily:         300,   // EVM daily stats (slow-changing)
+  evmBlocks:               5,   // EVM blocks (fast-changing)
+  evmTransactions:         5,   // EVM transactions (fast-changing)
+  evmBridgeEvents:        30,   // EVM bridge events
+  evmLedgerTransfers:     30,   // EVM ledger transfers
 } as const;
 
 /** Clés de cache pour les endpoints globaux (identiques pour tous les users) */
@@ -58,6 +64,13 @@ export const HYPEDEXER_CACHE_KEYS = {
   // HIP4 — endpoints enrichis exposés au front
   hip4MarketsEnriched:       'hypedexer:hip4:markets-enriched',
   hip4QuestionsWithOutcomes: 'hypedexer:hip4:questions-with-outcomes',
+  // EVM
+  evmStats:             'hypedexer:evm:stats',
+  evmStatsDaily:        'hypedexer:evm:stats:daily',
+  evmBlocks:            'hypedexer:evm:blocks',
+  evmTransactions:      'hypedexer:evm:transactions',
+  evmBridgeEvents:      'hypedexer:evm:bridge:events',
+  evmLedgerTransfers:   'hypedexer:evm:ledger:transfers',
 } as const;
 
 /** Clés de cache pour les endpoints builders — combinaisons timeframe/sort */
