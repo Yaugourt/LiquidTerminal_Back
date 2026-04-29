@@ -28,6 +28,40 @@ export class LinkPreviewFetcherService {
   }
 
   /**
+   * Erreurs réseau/DNS permanentes : inutile de retenter 3× (même résultat, logs bruyants).
+   */
+  private isRetryablePreviewError(error: unknown): boolean {
+    if (!axios.isAxiosError(error)) {
+      return false;
+    }
+    if (error.response) {
+      const status = error.response.status;
+      if (status === 429) return true;
+      if (status >= 500 && status < 600) return true;
+      return false;
+    }
+    const code = error.code;
+    if (
+      code === 'ENOTFOUND' ||
+      code === 'EHOSTUNREACH' ||
+      code === 'ENETUNREACH' ||
+      code === 'ECONNREFUSED'
+    ) {
+      return false;
+    }
+    if (
+      code === 'ETIMEDOUT' ||
+      code === 'ECONNABORTED' ||
+      code === 'ECONNRESET' ||
+      code === 'EPIPE' ||
+      code === 'EAI_AGAIN'
+    ) {
+      return true;
+    }
+    return true;
+  }
+
+  /**
    * Méthode avec retry pour les requêtes HTTP
    */
   private async fetchWithRetry(url: string): Promise<any> {
@@ -56,6 +90,9 @@ export class LinkPreviewFetcherService {
         lastError = error;
         logDeduplicator.warn('Preview fetch attempt failed', { url, attempt, error: error instanceof Error ? error.message : String(error) });
         
+        if (!this.isRetryablePreviewError(error)) {
+          throw lastError;
+        }
         if (attempt < this.MAX_RETRIES) {
           await this.delay(this.RETRY_DELAY);
         }
@@ -140,7 +177,8 @@ export class LinkPreviewFetcherService {
       };
 
     } catch (error: unknown) {
-      logDeduplicator.error('Error fetching preview data:', { url, error });
+      // Aperçu best-effort : DNS down / 404 / timeout sont des cas d’exploitation courants, pas des incidents serveur
+      logDeduplicator.warn('Preview fetch failed (URL unreachable or bad response)', { url, error: error instanceof Error ? error.message : String(error) });
       
       if (axios.isAxiosError(error)) {
         if (error.code === 'ECONNABORTED' || (error.message && error.message.includes('timeout'))) {

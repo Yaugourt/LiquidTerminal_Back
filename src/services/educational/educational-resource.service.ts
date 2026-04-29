@@ -216,6 +216,9 @@ export class EducationalResourceService extends BaseService<
           url: data.url
         });
         throw error;
+      } finally {
+        // Obligatoire : le client `tx` est refermé après le callback — sinon le singleton garde une transaction commitée (P2028)
+        this.repository.resetPrismaClient();
       }
     });
   }
@@ -329,6 +332,8 @@ export class EducationalResourceService extends BaseService<
           resourceId: id
         });
         throw error;
+      } finally {
+        this.repository.resetPrismaClient();
       }
     });
   }

@@ -7,8 +7,10 @@ import { EducationalError } from '../../errors/educational.errors';
 
 interface CsvRow {
   Link?: string;
+  Lien?: string;
   Category?: string;
   link?: string;
+  lien?: string;
   category?: string;
 }
 
@@ -258,7 +260,9 @@ export class CsvResourceService {
    */
   private normalizeRow(row: CsvRow): { link: string; category: string } {
     // Gérer les deux cas : majuscules et minuscules
-    const link = (row.Link || row.link || '').trim();
+    const link = (
+      row.Link || row.link || row.Lien || row.lien || ''
+    ).trim();
     const category = (row.Category || row.category || '').trim();
     
     return { link, category };

@@ -12,6 +12,9 @@ build/
 # Uploads (now on Cloudflare R2, local files not needed)
 /uploads/
 
+# Database dumps (local restore / backup — large, sensitive)
+*.dump
+
 # Environment variables
 .env
 .env.local

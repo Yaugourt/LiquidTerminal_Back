@@ -101,7 +101,7 @@ export class LinkPreviewService extends BaseService<
       return savedPreview;
 
     } catch (error) {
-      logDeduplicator.error('Error generating preview for', { url, error: error instanceof Error ? error.message : String(error) });
+      logDeduplicator.warn('Link preview not generated (fetch or parse failed)', { url, error: error instanceof Error ? error.message : String(error) });
       
       if (error instanceof LinkPreviewFetchError || error instanceof LinkPreviewTimeoutError) {
         throw error;
