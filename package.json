@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "npx prisma migrate deploy && npx prisma generate && npx prisma migrate deploy --schema ./prisma-historical/schema.prisma --config ./prisma-historical/prisma.config.ts && npx prisma generate --schema ./prisma-historical/schema.prisma && node dist/app.js",
+    "start": "node scripts/recover-failed-migration.cjs && npx prisma migrate deploy && npx prisma generate && npx prisma migrate deploy --schema ./prisma-historical/schema.prisma --config ./prisma-historical/prisma.config.ts && npx prisma generate --schema ./prisma-historical/schema.prisma && node dist/app.js",
     "start:dev": "tsx watch src/app.ts",
     "dev": "tsx watch src/app.ts",
     "start:prod": "NODE_ENV=production node dist/app.js",
