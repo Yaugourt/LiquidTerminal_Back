@@ -517,7 +517,13 @@ model TelegramUser {
   hip4SentAlerts      TelegramHip4SentAlert[]
 
   /** Set when the one-time HIP-4 feature intro was sent via /start (Telegram bot). */
-  hip4IntroShownAt DateTime? @map("hip4_intro_shown_at") @db.Timestamp(6)
+  hip4IntroShownAt       DateTime? @map("hip4_intro_shown_at") @db.Timestamp(6)
+
+  /** Set when the one-time doc-watcher feature intro was sent via /start (Telegram bot). */
+  docWatcherIntroShownAt DateTime? @map("doc_watcher_intro_shown_at") @db.Timestamp(6)
+
+  /** Last bot version whose announcement was shown to this user. Used to broadcast changelogs on deploy. */
+  lastSeenBotVersion     String?   @map("last_seen_bot_version") @db.VarChar(20)
 
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamp(6)
   updatedAt    DateTime @updatedAt @map("updated_at")
@@ -606,4 +612,17 @@ model TelegramHip4SentAlert {
   @@index([sentAt])
   @@index([telegramUserId, sentAt])
   @@map("telegram_hip4_sent_alerts")
+}
+
+model HyperliquidDocPage {
+  id              String    @id @default(cuid())
+  pageUrl         String    @unique @db.VarChar(500)
+  relPath         String    @db.VarChar(300)
+  contentHash     String    @db.VarChar(64)
+  lastBroadcastAt DateTime? @map("last_broadcast_at") @db.Timestamp(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([contentHash])
+  @@map("hyperliquid_doc_pages")
 }

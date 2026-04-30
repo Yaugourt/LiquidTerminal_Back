@@ -143,6 +143,8 @@ export class InternalWebSocketServer {
       wallet_event: 0,
       liquidation_alert: 0,
       hip4_event_alert: 0,
+      doc_update_alert: 0,
+      bot_announcement: 0,
     };
 
     for (const client of this.clients.values()) {
@@ -286,12 +288,14 @@ export class InternalWebSocketServer {
       (subType !== 'liquidation' &&
         subType !== 'wallet_event' &&
         subType !== 'liquidation_alert' &&
-        subType !== 'hip4_event_alert')
+        subType !== 'hip4_event_alert' &&
+        subType !== 'doc_update_alert' &&
+        subType !== 'bot_announcement')
     ) {
       this.sendMessage(ws, {
         type: 'error',
         error:
-          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, hip4_event_alert',
+          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, hip4_event_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -334,6 +338,20 @@ export class InternalWebSocketServer {
         { clientId: client.id, ip: client.ip }
       );
     }
+
+    if (subType === 'doc_update_alert') {
+      logDeduplicator.info(
+        'InternalWebSocketServer: [doc_ws] Bot subscribed to doc_update_alert — will receive Hyperliquid docs update fan-out',
+        { clientId: client.id, ip: client.ip }
+      );
+    }
+
+    if (subType === 'bot_announcement') {
+      logDeduplicator.info(
+        'InternalWebSocketServer: [announce_ws] Bot subscribed to bot_announcement — will receive changelog broadcasts',
+        { clientId: client.id, ip: client.ip }
+      );
+    }
   }
 
   /**
@@ -347,12 +365,14 @@ export class InternalWebSocketServer {
       (subType !== 'liquidation' &&
         subType !== 'wallet_event' &&
         subType !== 'liquidation_alert' &&
-        subType !== 'hip4_event_alert')
+        subType !== 'hip4_event_alert' &&
+        subType !== 'doc_update_alert' &&
+        subType !== 'bot_announcement')
     ) {
       this.sendMessage(ws, {
         type: 'error',
         error:
-          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, hip4_event_alert',
+          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, hip4_event_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -533,8 +553,8 @@ export class InternalWebSocketServer {
    * The Telegram bot (1 connected client) receives the event and routes it
    * to the correct Telegram user via telegramId in the payload.
    */
-  public broadcastLiquidationAlert(telegramId: string, message: string): void {
-    if (!this.wss) return;
+  public broadcastLiquidationAlert(telegramId: string, message: string): number {
+    if (!this.wss) return 0;
 
     const serialized = JSON.stringify({
       type: 'liquidation_alert',
@@ -561,6 +581,8 @@ export class InternalWebSocketServer {
         clientCount: sentCount,
       });
     }
+
+    return sentCount;
   }
 
   /**
@@ -596,6 +618,78 @@ export class InternalWebSocketServer {
       });
     } else {
       logDeduplicator.warn('InternalWebSocketServer: [hip4_ws] Broadcast HIP-4 alert to 0 clients (no hip4_event_alert subscriber — Telegram bot disconnected?)', {
+        telegramId,
+      });
+    }
+
+    return sentCount;
+  }
+
+  /**
+   * Broadcast bot changelog announcement to clients subscribed to `bot_announcement` (Telegram bot).
+   * @returns Number of WebSocket clients that received the message.
+   */
+  public broadcastBotAnnouncement(telegramId: string, message: string): number {
+    if (!this.wss) return 0;
+
+    const serialized = JSON.stringify({
+      type: 'bot_announcement',
+      data: { telegramId, message },
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    let sentCount = 0;
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      const client = this.clients.get(clientId);
+      if (!client) continue;
+      if (!client.subscriptions.some((s) => s.type === 'bot_announcement')) continue;
+      this.sendRawMessage(ws, serialized);
+      sentCount++;
+    }
+
+    if (sentCount === 0) {
+      logDeduplicator.warn('InternalWebSocketServer: [announce_ws] Broadcast bot announcement to 0 clients (bot disconnected?)', {
+        telegramId,
+      });
+    }
+
+    return sentCount;
+  }
+
+  /**
+   * Broadcast Hyperliquid doc update alert to clients subscribed to `doc_update_alert` (Telegram bot).
+   * @returns Number of WebSocket clients that received the message.
+   */
+  public broadcastDocUpdateAlert(telegramId: string, message: string): number {
+    if (!this.wss) return 0;
+
+    const serialized = JSON.stringify({
+      type: 'doc_update_alert',
+      data: { telegramId, message },
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    let sentCount = 0;
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      const client = this.clients.get(clientId);
+      if (!client) continue;
+
+      const hasSub = client.subscriptions.some((s) => s.type === 'doc_update_alert');
+      if (!hasSub) continue;
+
+      this.sendRawMessage(ws, serialized);
+      sentCount++;
+    }
+
+    if (sentCount > 0) {
+      logDeduplicator.info('InternalWebSocketServer: Broadcast doc update alert', {
+        telegramId,
+        clientCount: sentCount,
+      });
+    } else {
+      logDeduplicator.warn('InternalWebSocketServer: [doc_ws] Broadcast doc update alert to 0 clients (bot disconnected?)', {
         telegramId,
       });
     }

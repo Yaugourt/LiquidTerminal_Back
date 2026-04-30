@@ -25,6 +25,8 @@ import { LiquidationsBackfillService } from '../services/liquidations/liquidatio
 import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
 import { TelegramLiquidationDispatcherService } from '../services/telegram/telegram.liquidation-dispatcher.service';
 import { TelegramHip4DispatcherService } from '../services/telegram/telegram.hip4-dispatcher.service';
+import { TelegramDocUpdateDispatcherService } from '../services/telegram/telegram.doc-update-dispatcher.service';
+import { BotAnnouncementService } from '../services/telegram/bot-announcement.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export type StartupStatus = 'booting' | 'ready' | 'degraded';
@@ -202,6 +204,14 @@ export class ClientInitializerService {
       this.clients.set('hip4Dispatcher', hip4Dispatcher);
       logDeduplicator.info('Telegram HIP-4 Dispatcher service initialized successfully');
 
+      const docUpdateDispatcher = TelegramDocUpdateDispatcherService.getInstance();
+      this.clients.set('docUpdateDispatcher', docUpdateDispatcher);
+      logDeduplicator.info('Telegram Doc Update Dispatcher service initialized successfully');
+
+      const botAnnouncementService = BotAnnouncementService.getInstance();
+      this.clients.set('botAnnouncementService', botAnnouncementService);
+      logDeduplicator.info('Bot Announcement service initialized successfully');
+
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
@@ -311,6 +321,28 @@ export class ClientInitializerService {
       }
     }
 
+    // 5c. Start Telegram Doc Update Dispatcher (polls Gitbook sitemap every 3h)
+    const docUpdateDispatcher = this.clients.get('docUpdateDispatcher');
+    if (docUpdateDispatcher) {
+      try {
+        docUpdateDispatcher.start();
+        logDeduplicator.info('Started Telegram Doc Update Dispatcher Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Telegram Doc Update Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    // 5d. Start Bot Announcement Service (broadcasts changelog on deploy)
+    const botAnnouncementService = this.clients.get('botAnnouncementService');
+    if (botAnnouncementService) {
+      try {
+        botAnnouncementService.start();
+        logDeduplicator.info('Started Bot Announcement Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Bot Announcement Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     // 6. Start Telegram Liquidation Dispatcher (subscribes to LiquidationsWebSocketService)
     const liquidationDispatcher = this.clients.get('liquidationDispatcher');
     if (liquidationDispatcher) {
@@ -388,6 +420,26 @@ export class ClientInitializerService {
         logDeduplicator.info('Telegram HIP-4 Dispatcher Service stopped');
       } catch (error) {
         logDeduplicator.error('Error stopping Telegram HIP-4 Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    const docUpdateDispatcher = this.clients.get('docUpdateDispatcher');
+    if (docUpdateDispatcher) {
+      try {
+        docUpdateDispatcher.stop();
+        logDeduplicator.info('Telegram Doc Update Dispatcher Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Telegram Doc Update Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    const botAnnouncementService = this.clients.get('botAnnouncementService');
+    if (botAnnouncementService) {
+      try {
+        botAnnouncementService.stop();
+        logDeduplicator.info('Bot Announcement Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Bot Announcement Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 
