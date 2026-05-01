@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { prisma } from '../../core/prisma.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { InternalWebSocketServer } from '../../websocket/ws.server';
-import { formatDocUpdateTelegramMessage } from '../../utils/telegram.doc-update';
+import { formatDocUpdateTelegramMessage, type UpdatedPage } from '../../utils/telegram.doc-update';
 
 const BASE_URL = 'https://hyperliquid.gitbook.io/hyperliquid-docs';
 const SITEMAP_INDEX_URL = `${BASE_URL}/sitemap.xml`;
@@ -94,10 +94,12 @@ export class TelegramDocUpdateDispatcherService {
       return;
     }
 
-    const existingPages = await prisma.hyperliquidDocPage.findMany();
-    const hashMap = new Map(existingPages.map(p => [p.pageUrl, p.contentHash]));
+    const existingPages = await prisma.hyperliquidDocPage.findMany({
+      select: { pageUrl: true, contentHash: true, content: true },
+    });
+    const pageMap = new Map(existingPages.map(p => [p.pageUrl, { hash: p.contentHash, content: p.content }]));
 
-    const updatedPages: Array<{ relPath: string; pageUrl: string }> = [];
+    const updatedPages: UpdatedPage[] = [];
 
     for (const url of urls) {
       if (this.isStopped) {
@@ -109,10 +111,10 @@ export class TelegramDocUpdateDispatcherService {
       if (this.isStopped) return;
 
       const relPath = urlToRelPath(url);
-      let content: string;
+      let newContent: string;
 
       try {
-        content = await fetchPageMarkdown(url);
+        newContent = await fetchPageMarkdown(url);
       } catch (error) {
         logDeduplicator.warn('TelegramDocUpdateDispatcherService: Failed to fetch page, skipping', {
           url,
@@ -121,17 +123,17 @@ export class TelegramDocUpdateDispatcherService {
         continue;
       }
 
-      const newHash = computeHash(content);
-      const oldHash = hashMap.get(url);
+      const newHash = computeHash(newContent);
+      const existing = pageMap.get(url);
 
       await prisma.hyperliquidDocPage.upsert({
         where: { pageUrl: url },
-        create: { pageUrl: url, relPath, contentHash: newHash },
-        update: { relPath, contentHash: newHash },
+        create: { pageUrl: url, relPath, contentHash: newHash, content: newContent },
+        update: { relPath, contentHash: newHash, content: newContent },
       });
 
-      if (oldHash !== undefined && oldHash !== newHash) {
-        updatedPages.push({ relPath, pageUrl: url });
+      if (existing !== undefined && existing.hash !== newHash) {
+        updatedPages.push({ relPath, pageUrl: url, oldContent: existing.content, newContent });
         logDeduplicator.info('TelegramDocUpdateDispatcherService: Page changed', { url, relPath });
       }
     }
@@ -151,7 +153,7 @@ export class TelegramDocUpdateDispatcherService {
     });
   }
 
-  private async broadcastToAllUsers(pages: Array<{ relPath: string; pageUrl: string }>): Promise<void> {
+  private async broadcastToAllUsers(pages: UpdatedPage[]): Promise<void> {
     await this.ensureUserCacheFresh();
     if (this.userCache.length === 0) return;
 

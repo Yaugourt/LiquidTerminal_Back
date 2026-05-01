@@ -619,6 +619,7 @@ model HyperliquidDocPage {
   pageUrl         String    @unique @db.VarChar(500)
   relPath         String    @db.VarChar(300)
   contentHash     String    @db.VarChar(64)
+  content         String?   @db.Text
   lastBroadcastAt DateTime? @map("last_broadcast_at") @db.Timestamp(6)
   createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamp(6)
   updatedAt       DateTime  @updatedAt @map("updated_at")
