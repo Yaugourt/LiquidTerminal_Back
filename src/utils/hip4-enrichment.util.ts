@@ -129,6 +129,28 @@ export interface Hip4SettlementEnriched {
   question_name: string | null;
 }
 
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function formatPriceBinaryTitle(underlying: string, targetPrice: number, expiry: string | null | undefined): string {
+  const priceStr = targetPrice >= 1000
+    ? targetPrice.toLocaleString('en-US', { maximumFractionDigits: 0 })
+    : String(targetPrice);
+  if (expiry) {
+    const m = expiry.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+    if (m) {
+      const month = MONTHS_SHORT[parseInt(m[2]) - 1];
+      const day = parseInt(m[3]);
+      const hh = parseInt(m[4]);
+      const mm = m[5];
+      const ampm = hh < 12 ? 'AM' : 'PM';
+      const h12 = hh === 0 ? 12 : hh > 12 ? hh - 12 : hh;
+      const time = mm === '00' ? `${h12}:00 ${ampm}` : `${h12}:${mm} ${ampm}`;
+      return `${underlying} above ${priceStr} on ${month} ${day} at ${time} UTC?`;
+    }
+  }
+  return `${underlying} above ${priceStr}?`;
+}
+
 /** Parse the stringified JSON in raw market `side_specs` into a typed list of sides. */
 export function parseSideSpecs(raw: string | null | undefined): ParsedSide[] | null {
   if (!raw || typeof raw !== 'string') return null;
@@ -157,11 +179,13 @@ export function normalizeClass(raw: string | null | undefined): string {
 
 /**
  * Pick the best user-facing name from all available sources, in priority order:
- * 1. Named side from parsed side_specs at the market's side index (multi-outcome custom markets)
- * 2. Question name (markets bound to a question)
- * 3. Outcome token spot_name (HIP-4 token registry)
- * 4. Market.name (HypeDexer's own label, often "Recurring")
- * 5. Market.coin as last-resort identifier (e.g. "#50790")
+ * 1. priceBinary fields → human-readable "BTC above 78,213 on May 3 at 6:00 AM UTC?"
+ *    (tokenName is intentionally skipped — spot_name = "USDC" is the quote token, not the market)
+ * 2. Named side from parsed side_specs at the market's side index (multi-outcome custom markets)
+ * 3. Question name (markets bound to a question)
+ * 4. Outcome token spot_name (HIP-4 token registry, for non-priceBinary only)
+ * 5. Market.name (HypeDexer's own label, often "Recurring")
+ * 6. Market.coin as last-resort identifier (e.g. "#50790")
  */
 export function deriveDisplayName(params: {
   parsedSides: ParsedSide[] | null;
@@ -170,9 +194,16 @@ export function deriveDisplayName(params: {
   tokenName: string | null;
   marketName: string | null;
   coin: string | null;
+  cls?: string | null;
+  underlying?: string | null;
+  targetPrice?: number | null;
+  expiry?: string | null;
 }): string {
-  const { parsedSides, side, questionName, tokenName, marketName, coin } = params;
+  const { parsedSides, side, questionName, tokenName, marketName, coin, cls, underlying, targetPrice, expiry } = params;
 
+  if (cls === 'priceBinary' && underlying && targetPrice != null) {
+    return formatPriceBinaryTitle(underlying, targetPrice, expiry);
+  }
   if (parsedSides && side != null && parsedSides[side]?.name) {
     return parsedSides[side].name;
   }
@@ -221,6 +252,10 @@ export function enrichMarkets(
       tokenName,
       marketName: m.name,
       coin: m.coin,
+      cls: m.class,
+      underlying: m.underlying,
+      targetPrice: m.target_price,
+      expiry: m.expiry,
     });
 
     const totalTrades = m.total_trades ?? m.total_fills ?? null;
@@ -309,7 +344,55 @@ export function buildQuestionsWithOutcomes(
     });
   }
 
+  // Group YES (outcome_id % 10 === 0) and NO (outcome_id % 10 === 1) sides of binary markets
+  const binaryBuckets = new Map<number, Hip4MarketEnriched[]>();
+  const trueSingletons: Hip4MarketEnriched[] = [];
+
   for (const m of singletons) {
+    const sideIdx = m.outcome_id % 10;
+    if (sideIdx <= 1) {
+      const baseId = Math.floor(m.outcome_id / 10);
+      const bucket = binaryBuckets.get(baseId);
+      if (bucket) bucket.push(m);
+      else binaryBuckets.set(baseId, [m]);
+    } else {
+      trueSingletons.push(m);
+    }
+  }
+
+  for (const [, pair] of binaryBuckets.entries()) {
+    const yesSide = pair.find(m => m.outcome_id % 10 === 0) ?? pair[0];
+    const noSide = pair.find(m => m.outcome_id % 10 === 1);
+    const allSettled = pair.every(m => m.is_settled);
+    const resolvedAt = pair.map(m => m.settled_at).filter((v): v is string => v != null).sort().pop() ?? null;
+    const totalVolume = pair.reduce((s, m) => s + (m.total_volume ?? 0), 0);
+
+    const makeOutcome = (m: Hip4MarketEnriched, sideLabel: string): Hip4QuestionOutcome => ({
+      ...toQuestionOutcome(m),
+      side_name: m.side_name ?? sideLabel,
+      display_name: m.side_name ?? sideLabel,
+    });
+
+    const outcomes: Hip4QuestionOutcome[] = [makeOutcome(yesSide, 'Yes')];
+    if (noSide) outcomes.push(makeOutcome(noSide, 'No'));
+
+    grouped.push({
+      question_id: null,
+      title: yesSide.display_name,
+      description: yesSide.question_description,
+      class: yesSide.class,
+      underlying: yesSide.underlying,
+      outcome_count: outcomes.length,
+      total_volume: totalVolume,
+      created_at: null,
+      resolved_at: resolvedAt,
+      status: allSettled ? 'settled' : 'live',
+      singleton_outcome_id: outcomes.length === 1 ? yesSide.outcome_id : null,
+      outcomes,
+    });
+  }
+
+  for (const m of trueSingletons) {
     const status: 'live' | 'settled' = m.is_settled ? 'settled' : 'live';
     grouped.push({
       question_id: null,
