@@ -36,16 +36,31 @@ export class IndexerHip4Service {
     return IndexerHip4Service.instance;
   }
 
-  /** Fills — user-specific gets cached per address; everything else is on-demand. */
-  public getFills(p: Parameters<HypeDexerHip4Client['getFills']>[0]): Promise<unknown> {
-    if (p?.user && !p.start && !p.end) {
-      return cacheService.getOrSet(
-        HYPEDEXER_USER_CACHE_KEY.hip4Fills(p.user),
-        () => this.client.getFills(p),
-        HYPEDEXER_TTL.userAddress
-      );
-    }
-    return this.client.getFills(p);
+  /** Fills — transform raw API shape to frontend-ready shape, then cache if user-scoped. */
+  public async getFills(p: Parameters<HypeDexerHip4Client['getFills']>[0]): Promise<unknown> {
+    const raw = (p?.user && !p.start && !p.end)
+      ? await cacheService.getOrSet(
+          HYPEDEXER_USER_CACHE_KEY.hip4Fills(p.user),
+          () => this.client.getFills(p),
+          HYPEDEXER_TTL.userAddress
+        )
+      : await this.client.getFills(p);
+
+    if (!Array.isArray(raw)) return raw;
+    return raw.map((fill) => this.transformFill(fill as Record<string, unknown>));
+  }
+
+  private transformFill(f: Record<string, unknown>): Record<string, unknown> {
+    const timeMs = typeof f.time_ms === 'number' ? f.time_ms : Number(f.time_ms ?? 0);
+    const px = Number(f.px ?? 0);
+    const sz = Number(f.sz ?? 0);
+    const feeUsdc = typeof f.fee_usdc === 'number' ? f.fee_usdc : Number(f.fee_usdc ?? 0);
+    return {
+      ...f,
+      time: new Date(timeMs).toISOString(),
+      notional: Number.isFinite(px * sz) ? px * sz : 0,
+      fee: feeUsdc,
+    };
   }
 
   /**
