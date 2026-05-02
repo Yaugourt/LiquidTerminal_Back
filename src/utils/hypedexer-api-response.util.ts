@@ -11,6 +11,8 @@ const HYPE_DEXER_ENVELOPE_KEYS = new Set([
   'execution_time_ms',
   'next_cursor',
   'has_more',
+  'status',
+  'count',
 ]);
 
 function isHypeDexerApiEnvelope(o: Record<string, unknown>): boolean {
