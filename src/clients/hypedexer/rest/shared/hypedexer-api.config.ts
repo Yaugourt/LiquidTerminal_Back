@@ -10,10 +10,6 @@ function normalizeHypedexerBaseUrl(url: string): string {
 export const HYPEDEXER_API_URL = normalizeHypedexerBaseUrl(
   process.env.HL_INDEXER_API_URL || 'https://api.hypedexer.com'
 );
-/** HIP-4 is on testnet — separate base URL until mainnet launch. */
-export const HYPEDEXER_TESTNET_API_URL = normalizeHypedexerBaseUrl(
-  process.env.HL_INDEXER_TESTNET_API_URL || 'https://api.hypedexer.com/testnet'
-);
 export const HYPEDEXER_API_KEY = process.env.HL_INDEXER_API_KEY || '';
 
 export const hypedexerJsonHeaders: Record<string, string> = {
