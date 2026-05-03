@@ -87,6 +87,7 @@ export interface Hip4MarketEnriched {
   question_name: string | null;
   question_description: string | null;
   display_name: string;
+  short_name: string;
   mid_price: number | null;
   volume_24h: number | null;
   total_volume: number | null;
@@ -123,6 +124,9 @@ export interface Hip4QuestionWithOutcomes {
   resolved_at: string | null;
   status: 'live' | 'settled';
   singleton_outcome_id: number | null;
+  expiry: string | null;
+  period: string | null;
+  target_price: number | null;
   outcomes: Hip4QuestionOutcome[];
 }
 
@@ -291,6 +295,10 @@ export function enrichMarkets(
 
     const totalTrades = m.total_trades ?? m.total_fills ?? null;
 
+    const shortName = effectiveUnderlying && m.side != null
+      ? `${effectiveUnderlying} ${m.side === 0 ? 'YES' : m.side === 1 ? 'NO' : String(m.side)}`
+      : (effectiveUnderlying ?? m.name ?? m.coin ?? '');
+
     return {
       outcome_id: m.outcome_id,
       question_id: m.question_id ?? null,
@@ -306,6 +314,7 @@ export function enrichMarkets(
       question_name: questionName,
       question_description: question?.description ?? null,
       display_name: displayName,
+      short_name: shortName,
       mid_price: liveMidPrice ?? m.mid_price ?? null,
       volume_24h: m.volume_24h ?? null,
       total_volume: m.total_volume ?? null,
@@ -371,6 +380,9 @@ export function buildQuestionsWithOutcomes(
       resolved_at: resolvedAt,
       status,
       singleton_outcome_id: null,
+      expiry: first?.expiry ?? null,
+      period: first?.period ?? null,
+      target_price: first?.target_price ?? null,
       outcomes: outcomes.map(toQuestionOutcome),
     });
   }
@@ -380,6 +392,7 @@ export function buildQuestionsWithOutcomes(
   const trueSingletons: Hip4MarketEnriched[] = [];
 
   for (const m of singletons) {
+    if (m.outcome_id < 10) continue; // skip template/metadata markets
     const sideIdx = m.outcome_id % 10;
     if (sideIdx <= 1) {
       const baseId = Math.floor(m.outcome_id / 10);
@@ -419,6 +432,9 @@ export function buildQuestionsWithOutcomes(
       resolved_at: resolvedAt,
       status: allSettled ? 'settled' : 'live',
       singleton_outcome_id: outcomes.length === 1 ? yesSide.outcome_id : null,
+      expiry: yesSide.expiry,
+      period: yesSide.period,
+      target_price: yesSide.target_price,
       outcomes,
     });
   }
@@ -437,6 +453,9 @@ export function buildQuestionsWithOutcomes(
       resolved_at: m.settled_at,
       status,
       singleton_outcome_id: m.outcome_id,
+      expiry: m.expiry,
+      period: m.period,
+      target_price: m.target_price,
       outcomes: [toQuestionOutcome(m)],
     });
   }
