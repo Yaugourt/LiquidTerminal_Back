@@ -295,8 +295,10 @@ export function enrichMarkets(
 
     const totalTrades = m.total_trades ?? m.total_fills ?? null;
 
-    const shortName = effectiveUnderlying && m.side != null
-      ? `${effectiveUnderlying} ${m.side === 0 ? 'YES' : m.side === 1 ? 'NO' : String(m.side)}`
+    // Derive side from encoding when raw `side` field is absent (outcome_id = 10*base + side_index)
+    const derivedSide = m.side ?? (m.outcome_id >= 10 ? m.outcome_id % 10 : null);
+    const shortName = effectiveUnderlying && derivedSide != null && derivedSide <= 1
+      ? `${effectiveUnderlying} ${derivedSide === 0 ? 'YES' : 'NO'}`
       : (effectiveUnderlying ?? m.name ?? m.coin ?? '');
 
     return {
