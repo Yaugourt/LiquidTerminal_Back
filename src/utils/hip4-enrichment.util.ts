@@ -53,9 +53,17 @@ export interface RawHip4OutcomeToken {
 
 export interface RawHip4Settlement {
   outcome_id: number;
+  // mainnet fields
+  block_time?: string | null;
+  settle_fraction?: number | null;
+  details?: string | null;       // "price:78212.4"
+  block_height?: number | null;
+  nonce?: number | null;
+  broadcaster?: string | null;
+  // legacy/optional fields
   coin?: string | null;
   settled_px?: number | null;
-  settled_at: string;
+  settled_at?: string | null;
   winner_side?: number | null;
   tx_hash?: string | null;
 }
@@ -121,7 +129,8 @@ export interface Hip4QuestionWithOutcomes {
 export interface Hip4SettlementEnriched {
   outcome_id: number;
   coin: string | null;
-  settled_px: number | null;
+  settled_px: number | null;   // underlying asset price at settlement (e.g. 78212.4 for BTC)
+  settle_fraction: number | null; // YES fraction at settlement (0.0 = NO won, 1.0 = YES won)
   settled_at: string;
   winner_side: number | null;
   tx_hash: string | null;
@@ -233,10 +242,20 @@ function indexQuestions(questions: RawHip4Question[]): Map<number, RawHip4Questi
 export function enrichMarkets(
   markets: RawHip4Market[],
   outcomeTokens: RawHip4OutcomeToken[],
-  questions: RawHip4Question[]
+  questions: RawHip4Question[],
+  midPrices?: Map<string, number>
 ): Hip4MarketEnriched[] {
   const tokenIdx = indexOutcomeTokens(outcomeTokens);
   const questionIdx = indexQuestions(questions);
+
+  // Build question-template index: small outcome_ids with metadata act as parent questions.
+  // outcome_id=N with class/description → parent of side coins at outcome_id=10*N, 10*N+1...
+  const questionTemplateIdx = new Map<number, RawHip4Market>();
+  for (const m of markets) {
+    if ((m.class?.trim() || m.description?.trim()) && m.outcome_id < 10) {
+      questionTemplateIdx.set(m.outcome_id, m);
+    }
+  }
 
   return markets.map((m) => {
     const parsedSides = parseSideSpecs(m.side_specs);
@@ -245,6 +264,18 @@ export function enrichMarkets(
     const tokenName = token?.spot_name && token.spot_name.trim() ? token.spot_name : null;
     const questionName = question?.name && question.name.trim() ? question.name : null;
 
+    // Inherit metadata from parent question template when own fields are empty (side coins).
+    const parentQId = m.outcome_id >= 10 ? Math.floor(m.outcome_id / 10) : null;
+    const parentQ = parentQId != null ? questionTemplateIdx.get(parentQId) : null;
+    const effectiveClass = m.class?.trim() ? m.class : (parentQ?.class ?? null);
+    const effectiveUnderlying = m.underlying?.trim() ? m.underlying : (parentQ?.underlying ?? null);
+    const effectiveTargetPrice = m.target_price ?? parentQ?.target_price ?? null;
+    const effectiveExpiry = m.expiry?.trim() ? m.expiry : (parentQ?.expiry ?? null);
+    const effectivePeriod = m.period?.trim() ? m.period : (parentQ?.period ?? null);
+
+    // Inject live mid price from HL allMids if available.
+    const liveMidPrice = m.coin ? (midPrices?.get(m.coin) ?? null) : null;
+
     const displayName = deriveDisplayName({
       parsedSides,
       side: m.side ?? null,
@@ -252,10 +283,10 @@ export function enrichMarkets(
       tokenName,
       marketName: m.name,
       coin: m.coin,
-      cls: m.class,
-      underlying: m.underlying,
-      targetPrice: m.target_price,
-      expiry: m.expiry,
+      cls: effectiveClass,
+      underlying: effectiveUnderlying,
+      targetPrice: effectiveTargetPrice,
+      expiry: effectiveExpiry,
     });
 
     const totalTrades = m.total_trades ?? m.total_fills ?? null;
@@ -264,9 +295,9 @@ export function enrichMarkets(
       outcome_id: m.outcome_id,
       question_id: m.question_id ?? null,
       coin: m.coin ?? null,
-      class: m.class ?? null,
-      class_normalized: normalizeClass(m.class),
-      underlying: m.underlying ?? null,
+      class: effectiveClass,
+      class_normalized: normalizeClass(effectiveClass),
+      underlying: effectiveUnderlying,
       name: m.name ?? null,
       side: m.side ?? null,
       side_name: m.side_name ?? null,
@@ -275,16 +306,16 @@ export function enrichMarkets(
       question_name: questionName,
       question_description: question?.description ?? null,
       display_name: displayName,
-      mid_price: m.mid_price ?? null,
+      mid_price: liveMidPrice ?? m.mid_price ?? null,
       volume_24h: m.volume_24h ?? null,
       total_volume: m.total_volume ?? null,
       total_trades: totalTrades,
       open_interest: m.open_interest ?? null,
-      is_settled: Boolean(m.is_settled),
+      is_settled: Boolean(m.is_settled) || (!m.coin || m.coin.trim() === ''),
       settled_at: m.settled_at ?? null,
-      expiry: m.expiry ?? null,
-      period: m.period ?? null,
-      target_price: m.target_price ?? null,
+      expiry: effectiveExpiry,
+      period: effectivePeriod,
+      target_price: effectiveTargetPrice,
     };
   });
 }
@@ -428,9 +459,25 @@ function toQuestionOutcome(m: Hip4MarketEnriched): Hip4QuestionOutcome {
   };
 }
 
+function parseSettlePrice(details: string | null | undefined): number | null {
+  if (!details) return null;
+  const m = details.match(/price:(\d+\.?\d*)/);
+  return m ? parseFloat(m[1]) : null;
+}
+
+function deriveWinnerSide(fraction: number | null | undefined): number | null {
+  if (fraction == null) return null;
+  // settle_fraction >= 0.5 → YES outcome resolved → winner = YES (side 0)
+  // settle_fraction < 0.5  → NO outcome resolved  → winner = NO  (side 1)
+  return fraction >= 0.5 ? 0 : 1;
+}
+
 /**
  * Enrich settlements with `winner_name` and `question_name` by cross-referencing
  * the enriched markets map (keyed by outcome_id) and the questions map.
+ *
+ * Supports both legacy fields (settled_at, winner_side, settled_px) and
+ * mainnet fields (block_time, settle_fraction, details).
  */
 export function enrichSettlements(
   settlements: RawHip4Settlement[],
@@ -446,6 +493,12 @@ export function enrichSettlements(
     const questionId = market?.question_id ?? null;
     const question = questionId != null ? questionIdx.get(questionId) : undefined;
 
+    // Mainnet: block_time replaces settled_at; settle_fraction replaces winner_side;
+    // details ("price:78212.4") replaces settled_px.
+    const settledAt = s.settled_at ?? s.block_time ?? '';
+    const settledPx = s.settled_px ?? parseSettlePrice(s.details);
+    const winnerSide = s.winner_side ?? deriveWinnerSide(s.settle_fraction);
+
     let winnerName: string | null = null;
 
     const settledNamed = question?.settled_named_outcomes ?? [];
@@ -455,24 +508,29 @@ export function enrichSettlements(
       if (winnerMarket) winnerName = winnerMarket.display_name;
     }
 
-    if (!winnerName && market?.parsed_sides && s.winner_side != null) {
-      winnerName = market.parsed_sides[s.winner_side]?.name ?? null;
+    if (!winnerName && market?.parsed_sides && winnerSide != null) {
+      winnerName = market.parsed_sides[winnerSide]?.name ?? null;
     }
 
-    if (!winnerName && s.winner_side != null) {
-      if (s.winner_side === 0) winnerName = 'Yes';
-      else if (s.winner_side === 1) winnerName = 'No';
+    if (!winnerName && winnerSide != null) {
+      winnerName = winnerSide === 0 ? 'Yes' : 'No';
     }
+
+    const questionName = question?.name?.trim()
+      || market?.question_name
+      || market?.display_name
+      || null;
 
     return {
       outcome_id: s.outcome_id,
       coin: s.coin ?? market?.coin ?? null,
-      settled_px: s.settled_px ?? null,
-      settled_at: s.settled_at,
-      winner_side: s.winner_side ?? null,
+      settled_px: settledPx,
+      settle_fraction: s.settle_fraction ?? null,
+      settled_at: settledAt,
+      winner_side: winnerSide,
       tx_hash: s.tx_hash ?? null,
       winner_name: winnerName,
-      question_name: question?.name ?? market?.question_name ?? null,
+      question_name: questionName,
     };
   });
 }

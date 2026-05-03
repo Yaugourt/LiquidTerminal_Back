@@ -97,12 +97,13 @@ export class IndexerHip4Service {
   } = {}): Promise<Hip4QuestionWithOutcomes[]> {
     const hasFilter = p.question_id != null;
     const compute = async (): Promise<Hip4QuestionWithOutcomes[]> => {
-      const [markets, outcomeTokens, questions] = await Promise.all([
+      const [markets, outcomeTokens, questions, midPrices] = await Promise.all([
         this.fetchRawMarkets(p.question_id != null ? { question_id: p.question_id, limit: p.limit, offset: p.offset } : { limit: p.limit, offset: p.offset }),
         this.fetchRawOutcomeTokens(),
         this.fetchRawQuestions(p.question_id != null ? { question_id: p.question_id } : {}),
+        this.fetchHlMidPrices(),
       ]);
-      const enriched = enrichMarkets(markets, outcomeTokens, questions);
+      const enriched = enrichMarkets(markets, outcomeTokens, questions, midPrices);
       return buildQuestionsWithOutcomes(enriched, questions);
     };
 
@@ -122,14 +123,22 @@ export class IndexerHip4Service {
     limit?: number;
     offset?: number;
   } = {}): Promise<Hip4SettlementEnriched[]> {
-    const [raw, markets, outcomeTokens, questions] = await Promise.all([
+    const [raw, markets, outcomeTokens, questions, midPrices] = await Promise.all([
       this.client.getSettlements<RawHip4Settlement[]>(p),
       this.fetchRawMarkets(),
       this.fetchRawOutcomeTokens(),
       this.fetchRawQuestions(),
+      this.fetchHlMidPrices(),
     ]);
-    const enrichedMarkets = enrichMarkets(markets, outcomeTokens, questions);
-    return enrichSettlements(asArray(raw), enrichedMarkets, questions);
+    const enrichedMarkets = enrichMarkets(markets, outcomeTokens, questions, midPrices);
+    const all = enrichSettlements(asArray(raw), enrichedMarkets, questions);
+    // Deduplicate: multiple broadcaster records per outcome → keep latest (highest block_time).
+    const seen = new Map<number, Hip4SettlementEnriched>();
+    for (const s of all) {
+      const existing = seen.get(s.outcome_id);
+      if (!existing || s.settled_at > existing.settled_at) seen.set(s.outcome_id, s);
+    }
+    return Array.from(seen.values());
   }
 
   /** Shared assembly pipeline used by both enriched endpoints. */
@@ -140,12 +149,35 @@ export class IndexerHip4Service {
     limit?: number;
     offset?: number;
   }): Promise<Hip4MarketEnriched[]> {
-    const [markets, outcomeTokens, questions] = await Promise.all([
+    const [markets, outcomeTokens, questions, midPrices] = await Promise.all([
       this.fetchRawMarkets(p),
       this.fetchRawOutcomeTokens(),
       this.fetchRawQuestions(),
+      this.fetchHlMidPrices(),
     ]);
-    return enrichMarkets(markets, outcomeTokens, questions);
+    return enrichMarkets(markets, outcomeTokens, questions, midPrices);
+  }
+
+  /** Fetch live mid prices for all HIP-4 coins (#N) from HL allMids. */
+  private async fetchHlMidPrices(): Promise<Map<string, number>> {
+    try {
+      const resp = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'allMids' }),
+      });
+      const data = await resp.json() as Record<string, string>;
+      const map = new Map<string, number>();
+      for (const [coin, price] of Object.entries(data)) {
+        if (coin.startsWith('#')) {
+          const px = parseFloat(price);
+          if (Number.isFinite(px)) map.set(coin, px);
+        }
+      }
+      return map;
+    } catch {
+      return new Map();
+    }
   }
 
   private async fetchRawMarkets(p: {
