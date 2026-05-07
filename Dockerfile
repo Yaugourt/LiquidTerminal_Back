@@ -39,4 +39,4 @@ COPY --from=builder /app/scripts ./scripts/
 
 EXPOSE 3002
 
-CMD ["sh", "-c", "node scripts/recover-failed-migration.cjs && node node_modules/.bin/prisma migrate deploy && node node_modules/.bin/prisma migrate deploy --schema ./prisma-historical/schema.prisma --config ./prisma-historical/prisma.config.ts && node dist/app.js"]
+CMD ["node", "dist/app.js"]
