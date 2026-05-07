@@ -24,7 +24,6 @@ import { LiquidationsIngestionService } from '../services/liquidations/liquidati
 import { LiquidationsBackfillService } from '../services/liquidations/liquidations.backfill.service';
 import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
 import { TelegramLiquidationDispatcherService } from '../services/telegram/telegram.liquidation-dispatcher.service';
-import { TelegramHip4DispatcherService } from '../services/telegram/telegram.hip4-dispatcher.service';
 import { TelegramDocUpdateDispatcherService } from '../services/telegram/telegram.doc-update-dispatcher.service';
 import { BotAnnouncementService } from '../services/telegram/bot-announcement.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
@@ -200,10 +199,6 @@ export class ClientInitializerService {
       this.clients.set('liquidationDispatcher', liquidationDispatcher);
       logDeduplicator.info('Telegram Liquidation Dispatcher service initialized successfully');
 
-      const hip4Dispatcher = TelegramHip4DispatcherService.getInstance();
-      this.clients.set('hip4Dispatcher', hip4Dispatcher);
-      logDeduplicator.info('Telegram HIP-4 Dispatcher service initialized successfully');
-
       const docUpdateDispatcher = TelegramDocUpdateDispatcherService.getInstance();
       this.clients.set('docUpdateDispatcher', docUpdateDispatcher);
       logDeduplicator.info('Telegram Doc Update Dispatcher service initialized successfully');
@@ -310,17 +305,6 @@ export class ClientInitializerService {
       }
     }
 
-    // 5b. Start Telegram HIP-4 Dispatcher (connects to HypeDexer hip4_events)
-    const hip4Dispatcher = this.clients.get('hip4Dispatcher');
-    if (hip4Dispatcher) {
-      try {
-        hip4Dispatcher.start();
-        logDeduplicator.info('Started Telegram HIP-4 Dispatcher Service');
-      } catch (error) {
-        logDeduplicator.error('Error starting Telegram HIP-4 Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
-      }
-    }
-
     // 5c. Start Telegram Doc Update Dispatcher (polls Gitbook sitemap every 3h)
     const docUpdateDispatcher = this.clients.get('docUpdateDispatcher');
     if (docUpdateDispatcher) {
@@ -410,16 +394,6 @@ export class ClientInitializerService {
         logDeduplicator.info('Telegram Wallet Dispatcher Service stopped');
       } catch (error) {
         logDeduplicator.error('Error stopping Telegram Wallet Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
-      }
-    }
-
-    const hip4Dispatcher = this.clients.get('hip4Dispatcher');
-    if (hip4Dispatcher) {
-      try {
-        hip4Dispatcher.stop();
-        logDeduplicator.info('Telegram HIP-4 Dispatcher Service stopped');
-      } catch (error) {
-        logDeduplicator.error('Error stopping Telegram HIP-4 Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 

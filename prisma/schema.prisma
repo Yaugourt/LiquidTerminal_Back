@@ -514,10 +514,6 @@ model TelegramUser {
   subscriptions       TelegramSubscription[]
   sentAlerts          TelegramSentAlert[]
   walletSubscriptions TelegramWalletSubscription[]
-  hip4SentAlerts      TelegramHip4SentAlert[]
-
-  /** Set when the one-time HIP-4 feature intro was sent via /start (Telegram bot). */
-  hip4IntroShownAt       DateTime? @map("hip4_intro_shown_at") @db.Timestamp(6)
 
   /** Set when the one-time doc-watcher feature intro was sent via /start (Telegram bot). */
   docWatcherIntroShownAt DateTime? @map("doc_watcher_intro_shown_at") @db.Timestamp(6)
@@ -603,19 +599,6 @@ model TelegramWalletSentAlert {
   @@map("telegram_wallet_sent_alerts")
 }
 
-model TelegramHip4SentAlert {
-  id             String       @id @default(cuid())
-  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
-  telegramUserId String       @map("telegram_user_id")
-  eventDedupeKey String       @map("event_dedupe_key") @db.VarChar(64)
-  sentAt         DateTime     @default(now()) @map("sent_at") @db.Timestamp(6)
-
-  @@unique([telegramUserId, eventDedupeKey])
-  @@index([eventDedupeKey])
-  @@index([sentAt])
-  @@index([telegramUserId, sentAt])
-  @@map("telegram_hip4_sent_alerts")
-}
 
 model HyperliquidDocPage {
   id              String    @id @default(cuid())

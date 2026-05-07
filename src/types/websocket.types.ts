@@ -146,7 +146,6 @@ export type WSInternalSubscriptionType =
   | 'liquidation'
   | 'wallet_event'
   | 'liquidation_alert'
-  | 'hip4_event_alert'
   | 'doc_update_alert'
   | 'bot_announcement';
 
@@ -193,7 +192,6 @@ export type WSEventType =
   | 'liquidation'
   | 'wallet_event'
   | 'liquidation_alert'
-  | 'hip4_event_alert'
   | 'doc_update_alert'
   | 'bot_announcement'
   | 'heartbeat'
@@ -245,17 +243,6 @@ export interface WSLiquidationEvent extends WSServerMessage {
  */
 export interface WSLiquidationAlertEvent extends WSServerMessage {
   type: 'liquidation_alert';
-  data: {
-    telegramId: string;
-    message: string;
-  };
-}
-
-/**
- * HIP-4 alert to Telegram bot (same shape as liquidation_alert).
- */
-export interface WSHip4EventAlertEvent extends WSServerMessage {
-  type: 'hip4_event_alert';
   data: {
     telegramId: string;
     message: string;
