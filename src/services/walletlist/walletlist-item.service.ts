@@ -119,7 +119,7 @@ export class WalletListItemService extends BaseService<
       await this.validateCreateData(data);
 
       // Si aucun ordre n'est spécifié, utiliser le prochain ordre disponible
-      let finalData = { ...data };
+      const finalData = { ...data };
       if (finalData.order === undefined && finalData.walletListId) {
         finalData.order = await this.repository.getNextOrder(finalData.walletListId);
       }

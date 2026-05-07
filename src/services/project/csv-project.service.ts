@@ -265,7 +265,7 @@ export class CsvProjectService {
 
     // Vérifier que le nom ne contient pas de caractères dangereux
     // Autorise lettres, chiffres, points, tirets, underscores, et quelques symboles courants
-    const safePattern = /^[a-zA-Z0-9._\-$@#%&()\[\]{}!+=~]+$/;
+    const safePattern = /^[a-zA-Z0-9._\-$@#%&()[\]{}!+=~]+$/;
     return safePattern.test(filename) && filename.length <= 100;
   }
 

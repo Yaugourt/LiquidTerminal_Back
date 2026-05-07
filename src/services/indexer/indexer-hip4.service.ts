@@ -1,6 +1,11 @@
 import { HypeDexerHip4Client } from '../../clients/hypedexer/rest/hip4/hip4.client';
 import { cacheService } from '../../core/cache.service';
-import { HYPEDEXER_CACHE_KEYS, HYPEDEXER_TTL, HYPEDEXER_USER_CACHE_KEY } from '../../constants/hypedexer.cache';
+import {
+  HYPEDEXER_CACHE_KEYS,
+  HYPEDEXER_HIP4_CACHE_KEY,
+  HYPEDEXER_TTL,
+  HYPEDEXER_USER_CACHE_KEY,
+} from '../../constants/hypedexer.cache';
 import {
   enrichMarkets,
   enrichSettlements,
@@ -139,6 +144,37 @@ export class IndexerHip4Service {
       if (!existing || s.settled_at > existing.settled_at) seen.set(s.outcome_id, s);
     }
     return Array.from(seen.values());
+  }
+
+  /**
+   * Time-bucketed analytics — volume, fills, fees and unique traders.
+   *
+   * Caching strategy:
+   *   - Unfiltered calls (no coin, no outcome_id, no date range) are cached per
+   *     interval bucket so the most common dashboard requests hit Redis.
+   *   - Filtered calls (coin comparison, outcome splits, custom date ranges) are
+   *     served fresh — the upstream materialized view is already constant-time.
+   */
+  public async getAnalytics(p: {
+    interval?: string;
+    coin?: string;
+    outcome_id?: number;
+    start?: string;
+    end?: string;
+    limit?: number;
+  } = {}): Promise<unknown> {
+    const interval = p.interval ?? '1h';
+    const hasFilter = p.coin != null || p.outcome_id != null || p.start != null || p.end != null;
+
+    if (hasFilter) {
+      return this.client.getAnalytics({ ...p, interval });
+    }
+
+    return cacheService.getOrSet(
+      HYPEDEXER_HIP4_CACHE_KEY.analytics(interval),
+      () => this.client.getAnalytics({ ...p, interval }),
+      HYPEDEXER_TTL.hip4Analytics,
+    );
   }
 
   /** Shared assembly pipeline used by both enriched endpoints. */

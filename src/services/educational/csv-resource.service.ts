@@ -170,7 +170,7 @@ export class CsvResourceService {
       // Trouver ou créer la catégorie
       logDeduplicator.info('About to find/create category', { categoryName: normalizedRow.category, userId });
       
-      let category = await this.findOrCreateCategory(normalizedRow.category, userId);
+      const category = await this.findOrCreateCategory(normalizedRow.category, userId);
       logDeduplicator.info('Category found/created', { categoryId: category?.id, categoryName: normalizedRow.category });
       
       if (!category) {

@@ -6,6 +6,7 @@ import {
   hip4SettlementsQuerySchema,
   hip4MarketsEnrichedQuerySchema,
   hip4QuestionsWithOutcomesQuerySchema,
+  hip4AnalyticsQuerySchema,
 } from '../../schemas/indexer/hip4.schema';
 import { IndexerHip4Service } from '../../services/indexer/indexer-hip4.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -120,6 +121,30 @@ router.get(
       });
     } catch (e) {
       send502(res, 'INDEXER_HIP4_QUESTIONS_WITH_OUTCOMES_ERROR', e);
+    }
+  }) as RequestHandler
+);
+
+router.get(
+  '/analytics',
+  marketRateLimiter,
+  validateGetRequest(hip4AnalyticsQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const q = req.query;
+      res.json({
+        success: true,
+        data: await svc.getAnalytics({
+          interval: str(q.interval),
+          coin: str(q.coin),
+          outcome_id: num(q.outcome_id),
+          start: str(q.start),
+          end: str(q.end),
+          limit: num(q.limit),
+        }),
+      });
+    } catch (e) {
+      send502(res, 'INDEXER_HIP4_ANALYTICS_ERROR', e);
     }
   }) as RequestHandler
 );

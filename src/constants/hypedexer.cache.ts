@@ -36,6 +36,7 @@ export const HYPEDEXER_TTL = {
   buildersAllTimeframes:  55,   // 55s — très lent chez HypeDexer
   buildersStats:          30,   // 30s — données actives
   buildersTop:            30,   // 30s — données actives
+  hip4Analytics:          60,   // analytics bucketed — 1h buckets change every hour
   evmStats:               30,   // EVM global stats
   evmStatsDaily:         300,   // EVM daily stats (slow-changing)
   evmBlocks:               5,   // EVM blocks (fast-changing)
@@ -78,6 +79,12 @@ export const HYPEDEXER_BUILDERS_CACHE_KEY = {
   statsAllTimeframes: 'hypedexer:builders:stats:all-timeframes',
   stats: (timeframe: string) => `hypedexer:builders:stats:${timeframe}`,
   top:   (timeframe: string, sort: string) => `hypedexer:builders:top:${timeframe}:${sort}`,
+} as const;
+
+/** Clés de cache HIP4 paramétrées — fonctions génératrices */
+export const HYPEDEXER_HIP4_CACHE_KEY = {
+  /** Analytics bucketed — one Redis entry per interval when no coin/date filter. */
+  analytics: (interval: string) => `hypedexer:hip4:analytics:${interval}`,
 } as const;
 
 /** Clés de cache par adresse utilisateur — fonctions génératrices */

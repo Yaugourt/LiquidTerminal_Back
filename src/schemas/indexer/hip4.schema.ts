@@ -55,3 +55,15 @@ export const hip4QuestionsWithOutcomesQuerySchema = z.object({
   }),
   params: z.object({}),
 });
+
+/** GET /hip4/analytics */
+export const hip4AnalyticsQuerySchema = z.object({
+  query: z.object({
+    interval: z.enum(['1h', '4h', '1d']).optional(),
+    coin: optionalString,
+    outcome_id: optionalOutcomeId,
+    ...dateRangeShape,
+    limit: z.coerce.number().int().min(1).max(2000).optional(),
+  }),
+  params: z.object({}),
+});

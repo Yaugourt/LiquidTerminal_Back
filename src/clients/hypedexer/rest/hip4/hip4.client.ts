@@ -106,4 +106,21 @@ export class HypeDexerHip4Client extends HypeDexerBaseClient {
   } = {}): Promise<T> {
     return this.getUpstream(`/hip4/outcome-tokens${buildQuery(params)}`) as Promise<T>;
   }
+
+  /**
+   * Time-bucketed analytics (volume, fills, fees, unique traders).
+   * Backed by a pre-aggregated materialized view — constant-time performance.
+   * When filtering by multiple coins or by outcome_id, the response includes a
+   * per-bucket `coin` field so YES vs NO sides come back as separate rows.
+   */
+  public getAnalytics<T = unknown>(params: {
+    interval?: string;
+    coin?: string;
+    outcome_id?: number;
+    start?: string;
+    end?: string;
+    limit?: number;
+  } = {}): Promise<T> {
+    return this.getUpstream(`/hip4/analytics${buildQuery(params)}`) as Promise<T>;
+  }
 }
