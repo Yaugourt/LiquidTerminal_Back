@@ -180,6 +180,7 @@ export class TelegramDocUpdateDispatcherService {
 
     try {
       const users = await prisma.telegramUser.findMany({
+        where: { docAlertsEnabled: true },
         select: { id: true, telegramId: true },
       });
       this.userCache = users.map(u => ({

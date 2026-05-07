@@ -525,6 +525,9 @@ model TelegramUser {
   /** Last bot version whose announcement was shown to this user. Used to broadcast changelogs on deploy. */
   lastSeenBotVersion     String?   @map("last_seen_bot_version") @db.VarChar(20)
 
+  /** Whether the user wants to receive Hyperliquid documentation update alerts. Defaults to true; set to false via /docs toggle. */
+  docAlertsEnabled       Boolean   @default(true) @map("doc_alerts_enabled")
+
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamp(6)
   updatedAt    DateTime @updatedAt @map("updated_at")
 
