@@ -1,5 +1,8 @@
 import { createHash } from 'crypto';
-import { prisma } from '../../core/prisma.service';
+// Hybrid dispatcher: HyperliquidDocPage lives in Content DB, TelegramUser in Telegram DB.
+// We hold both clients and never mix them in a single transaction (none is needed here).
+import { prismaContent } from '../../core/prisma.content.service';
+import { prismaTelegram } from '../../core/prisma.telegram.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { InternalWebSocketServer } from '../../websocket/ws.server';
 import { formatDocUpdateTelegramMessage, type UpdatedPage } from '../../utils/telegram.doc-update';
@@ -94,7 +97,7 @@ export class TelegramDocUpdateDispatcherService {
       return;
     }
 
-    const existingPages = await prisma.hyperliquidDocPage.findMany({
+    const existingPages = await prismaContent.hyperliquidDocPage.findMany({
       select: { pageUrl: true, contentHash: true, content: true },
     });
     const pageMap = new Map(existingPages.map(p => [p.pageUrl, { hash: p.contentHash, content: p.content }]));
@@ -126,7 +129,7 @@ export class TelegramDocUpdateDispatcherService {
       const newHash = computeHash(newContent);
       const existing = pageMap.get(url);
 
-      await prisma.hyperliquidDocPage.upsert({
+      await prismaContent.hyperliquidDocPage.upsert({
         where: { pageUrl: url },
         create: { pageUrl: url, relPath, contentHash: newHash, content: newContent },
         update: { relPath, contentHash: newHash, content: newContent },
@@ -147,7 +150,7 @@ export class TelegramDocUpdateDispatcherService {
 
     await this.broadcastToAllUsers(updatedPages);
 
-    await prisma.hyperliquidDocPage.updateMany({
+    await prismaContent.hyperliquidDocPage.updateMany({
       where: { pageUrl: { in: updatedPages.map(p => p.pageUrl) } },
       data: { lastBroadcastAt: new Date() },
     });
@@ -179,7 +182,7 @@ export class TelegramDocUpdateDispatcherService {
     if (Date.now() - this.cacheLoadedAt < TelegramDocUpdateDispatcherService.CACHE_TTL_MS) return;
 
     try {
-      const users = await prisma.telegramUser.findMany({
+      const users = await prismaTelegram.telegramUser.findMany({
         where: { docAlertsEnabled: true },
         select: { id: true, telegramId: true },
       });

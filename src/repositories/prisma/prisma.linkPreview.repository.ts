@@ -6,8 +6,15 @@ import {
 } from '../../types/linkPreview.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
+import { prismaContent } from '../../core/prisma.content.service';
 
 export class PrismaLinkPreviewRepository extends BasePrismaRepository implements LinkPreviewRepository {
+  constructor() {
+    super();
+    // LinkPreview lives in the Content DB after the multi-DB split.
+    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient);
+  }
+
   async findAll(params: {
     page?: number;
     limit?: number;

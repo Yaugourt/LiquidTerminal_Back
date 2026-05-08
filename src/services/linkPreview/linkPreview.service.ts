@@ -201,7 +201,7 @@ export class LinkPreviewService extends BaseService<
    */
   async isUsedByOtherResources(linkPreviewId: string, excludeResourceId?: number): Promise<boolean> {
     try {
-      const { prisma } = await import('../../core/prisma.service');
+      const { prismaContent } = await import('../../core/prisma.content.service');
       
       const whereClause: any = {
         linkPreviewId: linkPreviewId
@@ -211,7 +211,7 @@ export class LinkPreviewService extends BaseService<
         whereClause.id = { not: excludeResourceId };
       }
       
-      const count = await prisma.educationalResource.count({
+      const count = await prismaContent.educationalResource.count({
         where: whereClause
       });
       

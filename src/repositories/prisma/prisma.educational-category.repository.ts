@@ -6,14 +6,16 @@ import {
 } from '../../types/educational.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
+import { prismaContent } from '../../core/prisma.content.service';
+import { attachCreator, attachCreatorOne } from '../../utils/cross-db-enrich';
 
 export class PrismaEducationalCategoryRepository extends BasePrismaRepository implements EducationalCategoryRepository {
-  // Helper pour les includes répétitifs
-  private readonly includeConfig = {
-    creator: {
-      select: BasePrismaRepository.UserSelect
-    }
-  };
+  constructor() {
+    super();
+    // EducationalCategory lives in the Content DB; User remains in Core,
+    // so creator info must be attached via cross-db enrichment helpers.
+    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient);
+  }
 
   async findAll(params: {
     page?: number;
@@ -56,12 +58,13 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
         where,
         skip,
         take,
-        orderBy,
-        include: this.includeConfig
+        orderBy
       });
 
+      const enriched = await attachCreator(categories as Array<Record<string, unknown>>, 'createdBy');
+
       return {
-        data: categories,
+        data: enriched as unknown as EducationalCategoryResponse[],
         pagination: this.buildPagination(total, page, limit)
       };
     }, 'finding all educational categories', { page: params.page, limit: params.limit, sort: params.sort, order: params.order, search: params.search, createdBy: params.createdBy });
@@ -70,10 +73,11 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
   async findById(id: number): Promise<EducationalCategoryResponse | null> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalCategory.findUnique({
-          where: { id },
-          include: this.includeConfig
+        const row = await this.prismaClient.educationalCategory.findUnique({
+          where: { id }
         });
+        const enriched = await attachCreatorOne(row as Record<string, unknown> | null, 'createdBy');
+        return enriched as unknown as EducationalCategoryResponse | null;
       },
       'finding educational category by ID',
       { id }
@@ -83,16 +87,15 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
   async create(data: EducationalCategoryCreateInput): Promise<EducationalCategoryResponse> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalCategory.create({
+        const row = await this.prismaClient.educationalCategory.create({
           data: {
             name: data.name,
             description: data.description,
-            creator: {
-              connect: { id: data.createdBy }
-            }
-          },
-          include: this.includeConfig
+            createdBy: data.createdBy
+          }
         });
+        const enriched = await attachCreatorOne(row as Record<string, unknown>, 'createdBy');
+        return enriched as unknown as EducationalCategoryResponse;
       },
       'creating educational category',
       { name: data.name, createdBy: data.createdBy }
@@ -102,11 +105,12 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
   async update(id: number, data: EducationalCategoryUpdateInput): Promise<EducationalCategoryResponse> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalCategory.update({
+        const row = await this.prismaClient.educationalCategory.update({
           where: { id },
-          data,
-          include: this.includeConfig
+          data
         });
+        const enriched = await attachCreatorOne(row as Record<string, unknown>, 'createdBy');
+        return enriched as unknown as EducationalCategoryResponse;
       },
       'updating educational category',
       { id, ...data }
@@ -141,11 +145,12 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
   async findByCreator(createdBy: number): Promise<EducationalCategoryResponse[]> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalCategory.findMany({
+        const rows = await this.prismaClient.educationalCategory.findMany({
           where: { createdBy },
-          include: this.includeConfig,
           orderBy: { createdAt: 'desc' }
         });
+        const enriched = await attachCreator(rows as Array<Record<string, unknown>>, 'createdBy');
+        return enriched as unknown as EducationalCategoryResponse[];
       },
       'finding educational categories by creator',
       { createdBy }
@@ -155,10 +160,11 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
   async findByName(name: string): Promise<EducationalCategoryResponse | null> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalCategory.findFirst({
-          where: { name },
-          include: this.includeConfig
+        const row = await this.prismaClient.educationalCategory.findFirst({
+          where: { name }
         });
+        const enriched = await attachCreatorOne(row as Record<string, unknown> | null, 'createdBy');
+        return enriched as unknown as EducationalCategoryResponse | null;
       },
       'finding educational category by name',
       { name }
@@ -171,17 +177,12 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
         const resourceCategories = await this.prismaClient.educationalResourceCategory.findMany({
           where: { categoryId },
           include: {
-            resource: {
-              include: {
-                creator: {
-                  select: BasePrismaRepository.UserSelect
-                }
-              }
-            }
+            resource: true
           }
         });
 
-        return resourceCategories.map((rc: any) => rc.resource);
+        const resources = resourceCategories.map((rc: any) => rc.resource);
+        return await attachCreator(resources as Array<Record<string, unknown>>, 'addedBy');
       },
       'finding resources by educational category',
       { categoryId }

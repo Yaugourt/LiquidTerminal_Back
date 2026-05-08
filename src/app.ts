@@ -13,6 +13,10 @@ import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import { ClientInitializerService } from './core/client.initializer.service';
 import { prisma } from './core/prisma.service';
 import { PrismaHistoricalService } from './core/prisma.historical.service';
+// Eagerly instantiate Content/Telegram Prisma singletons so connection errors
+// surface at boot rather than at the first request.
+import { PrismaContentService } from './core/prisma.content.service';
+import { PrismaTelegramService } from './core/prisma.telegram.service';
 import { FileCleanupService } from './utils/fileCleanup';
 import { InternalWebSocketServer } from './websocket';
 import { redisService } from './core/redis.service';
@@ -189,6 +193,8 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
     // 4. Disconnect databases
     await prisma.$disconnect();
     await PrismaHistoricalService.disconnect();
+    await PrismaContentService.disconnect();
+    await PrismaTelegramService.disconnect();
 
     // 5. Disconnect Redis
     await redisService.disconnect();

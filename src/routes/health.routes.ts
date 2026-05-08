@@ -1,10 +1,15 @@
 import { Router } from 'express';
 import { prisma } from '../core/prisma.service';
+import { prismaContent } from '../core/prisma.content.service';
+import { prismaTelegram } from '../core/prisma.telegram.service';
+import { prismaHistorical } from '../core/prisma.historical.service';
 import { redisService } from '../core/redis.service';
 import { ClientInitializerService } from '../core/client.initializer.service';
 
 const router = Router();
 const clientInitializer = ClientInitializerService.getInstance();
+
+type DbCheck = { status: 'up' | 'down'; latencyMs?: number; error?: string };
 
 interface HealthStatus {
   status: 'healthy' | 'degraded' | 'unhealthy';
@@ -14,8 +19,11 @@ interface HealthStatus {
     status: 'booting' | 'ready' | 'degraded';
   };
   checks: {
-    database: { status: 'up' | 'down'; latencyMs?: number; error?: string };
-    redis: { status: 'up' | 'down'; latencyMs?: number; error?: string };
+    database: DbCheck;
+    contentDatabase: DbCheck;
+    telegramDatabase: DbCheck;
+    historicalDatabase: DbCheck;
+    redis: DbCheck;
   };
   memory: {
     rss: string;
@@ -26,55 +34,61 @@ interface HealthStatus {
 }
 
 interface DependencyChecks {
-  database: HealthStatus['checks']['database'];
-  redis: HealthStatus['checks']['redis'];
+  database: DbCheck;
+  contentDatabase: DbCheck;
+  telegramDatabase: DbCheck;
+  historicalDatabase: DbCheck;
+  redis: DbCheck;
+}
+
+async function pingPrisma(client: { $queryRaw: (q: TemplateStringsArray) => Promise<unknown> }): Promise<DbCheck> {
+  try {
+    const start = Date.now();
+    await client.$queryRaw`SELECT 1`;
+    return { status: 'up', latencyMs: Date.now() - start };
+  } catch (error) {
+    return {
+      status: 'down',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
 }
 
 async function getDependencyChecks(): Promise<DependencyChecks> {
-  const checks: DependencyChecks = {
-    database: { status: 'down' },
-    redis: { status: 'down' },
-  };
+  const [database, contentDatabase, telegramDatabase, historicalDatabase] = await Promise.all([
+    pingPrisma(prisma),
+    pingPrisma(prismaContent),
+    pingPrisma(prismaTelegram),
+    pingPrisma(prismaHistorical),
+  ]);
 
+  let redis: DbCheck;
   try {
-    const dbStart = Date.now();
-    await prisma.$queryRaw`SELECT 1`;
-    checks.database = { status: 'up', latencyMs: Date.now() - dbStart };
+    const start = Date.now();
+    await redisService.getClient().ping();
+    redis = { status: 'up', latencyMs: Date.now() - start };
   } catch (error) {
-    checks.database = {
+    redis = {
       status: 'down',
       error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 
-  try {
-    const redisStart = Date.now();
-    const redis = redisService.getClient();
-    await redis.ping();
-    checks.redis = { status: 'up', latencyMs: Date.now() - redisStart };
-  } catch (error) {
-    checks.redis = {
-      status: 'down',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    };
-  }
-
-  return checks;
+  return { database, contentDatabase, telegramDatabase, historicalDatabase, redis };
 }
 
 function computeOverallStatus(checks: DependencyChecks): HealthStatus['status'] {
-  const dbDown = checks.database.status === 'down';
-  const redisDown = checks.redis.status === 'down';
+  const downCount = [
+    checks.database,
+    checks.contentDatabase,
+    checks.telegramDatabase,
+    checks.historicalDatabase,
+    checks.redis,
+  ].filter((c) => c.status === 'down').length;
 
-  if (dbDown && redisDown) {
-    return 'unhealthy';
-  }
-
-  if (dbDown || redisDown) {
-    return 'degraded';
-  }
-
-  return 'healthy';
+  if (downCount === 0) return 'healthy';
+  if (downCount >= 4) return 'unhealthy';
+  return 'degraded';
 }
 
 router.get('/live', (_req, res) => {
@@ -88,6 +102,9 @@ router.get('/live', (_req, res) => {
 router.get('/ready', async (_req, res) => {
   const checks = await getDependencyChecks();
   const startupStatus = clientInitializer.getStartupStatus();
+  // /ready gates traffic on Core DB + Redis; Content/Telegram/Historical surface
+  // in /health for granular observability but don't block readiness because
+  // the app can serve large parts of its surface even if one of them is briefly down.
   const dependenciesHealthy = checks.database.status === 'up' && checks.redis.status === 'up';
   const isReady = startupStatus === 'ready' && dependenciesHealthy;
 

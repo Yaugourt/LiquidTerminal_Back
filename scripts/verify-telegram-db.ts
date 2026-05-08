@@ -1,15 +1,21 @@
 import { Client } from 'pg';
+import dotenv from 'dotenv';
 
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
+dotenv.config();
+
+// Verifies the dedicated Telegram Postgres database (TELEGRAM_DATABASE_URL).
+// Falls back to DATABASE_URL only for legacy environments where the Telegram
+// tables still live in the Core DB; new deployments must set TELEGRAM_DATABASE_URL.
+const CONNECTION_URL = process.env.TELEGRAM_DATABASE_URL || process.env.DATABASE_URL;
+if (!CONNECTION_URL) {
   console.error(
-    'Missing DATABASE_URL. Run: DATABASE_URL="postgresql://user:pass@host:5432/db" npx tsx scripts/verify-telegram-db.ts'
+    'Missing TELEGRAM_DATABASE_URL (or DATABASE_URL fallback). Run: TELEGRAM_DATABASE_URL="postgresql://user:pass@host:5432/db" npx tsx scripts/verify-telegram-db.ts'
   );
   process.exit(1);
 }
 
 async function main() {
-  const client = new Client({ connectionString: DATABASE_URL });
+  const client = new Client({ connectionString: CONNECTION_URL });
   await client.connect();
 
   const findings: Record<string, unknown> = {};

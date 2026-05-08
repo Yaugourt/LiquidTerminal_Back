@@ -4,7 +4,7 @@ import { ProjectCreateInput } from '../../types/project.types';
 import { ProjectService } from './project.service';
 import { CategoryService } from './category.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { transactionService } from '../../core/transaction.service';
+import { prismaContent } from '../../core/prisma.content.service';
 
 type ProjectCSVRow = {
   title: string;
@@ -80,7 +80,7 @@ export class ProjectImportService {
    * @param row Données du projet depuis le CSV
    */
   private async importSingleProject(row: ProjectCSVRow) {
-    return await transactionService.execute(async () => {
+    return await prismaContent.$transaction(async () => {
       // Si une catégorie est spécifiée, la créer ou la récupérer
       let categoryIds: number[] | undefined = undefined;
       if (row.category) {

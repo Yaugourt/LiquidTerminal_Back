@@ -14,7 +14,7 @@ import {
   publicGoodUpdateSchema, 
   publicGoodQuerySchema 
 } from '../../schemas/publicgood.schema';
-import { ProjectStatus } from '@prisma/client';
+import { ProjectStatus } from '../../types/prisma-enums';
 
 export class PublicGoodService extends BaseService<
   PublicGoodResponse, 

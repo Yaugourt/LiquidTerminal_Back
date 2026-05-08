@@ -30,12 +30,12 @@ import {
 import { educationalResourceRepository, educationalCategoryRepository } from '../../repositories';
 import { BaseService } from '../../core/crudBase.service';
 import { cacheService } from '../../core/cache.service';
-import { transactionService } from '../../core/transaction.service';
+import { prismaContent } from '../../core/prisma.content.service';
 import { CACHE_TTL } from '../../constants/cache.constants';
 import { LinkPreviewService } from '../linkPreview/linkPreview.service';
 import { contentFilterService } from './content-filter.service';
 import { xpService } from '../xp/xp.service';
-import { ResourceStatus } from '@prisma/client';
+import { ResourceStatus } from '../../types/prisma-enums';
 import { BasePagination } from '../../types/common.types';
 
 type EducationalResourceQueryParams = {
@@ -108,9 +108,9 @@ export class EducationalResourceService extends BaseService<
     try {
       const validatedData = this.validateInput(data, educationalResourceCategoryCreateSchema);
 
-      return await transactionService.execute(async (tx) => {
-        this.repository.setPrismaClient(tx);
-        educationalCategoryRepository.setPrismaClient(tx);
+      return await prismaContent.$transaction(async (tx) => {
+        this.repository.setPrismaClient(tx as any);
+        educationalCategoryRepository.setPrismaClient(tx as any);
 
         const resource = await this.repository.findById(validatedData.resourceId);
         if (!resource) {
@@ -143,8 +143,8 @@ export class EducationalResourceService extends BaseService<
   async create(data: EducationalResourceCreateInput): Promise<EducationalResourceResponse> {
     await this.validateUrl(data.url);
 
-    return await transactionService.execute(async (tx) => {
-      this.repository.setPrismaClient(tx);
+    return await prismaContent.$transaction(async (tx) => {
+      this.repository.setPrismaClient(tx as any);
 
       try {
         // 1. Créer la ressource éducative
@@ -232,8 +232,8 @@ export class EducationalResourceService extends BaseService<
 
   async removeFromCategory(resourceId: number, categoryId: number): Promise<void> {
     try {
-      return await transactionService.execute(async (tx) => {
-        this.repository.setPrismaClient(tx);
+      return await prismaContent.$transaction(async (tx) => {
+        this.repository.setPrismaClient(tx as any);
 
         const resource = await this.repository.findById(resourceId);
         if (!resource) {
@@ -291,8 +291,8 @@ export class EducationalResourceService extends BaseService<
   }
 
   async delete(id: number): Promise<void> {
-    return await transactionService.execute(async (tx) => {
-      this.repository.setPrismaClient(tx);
+    return await prismaContent.$transaction(async (tx) => {
+      this.repository.setPrismaClient(tx as any);
 
       try {
         // 1. Récupérer la ressource pour avoir le linkPreviewId

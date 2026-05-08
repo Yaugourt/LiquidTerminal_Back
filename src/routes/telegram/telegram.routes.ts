@@ -13,7 +13,7 @@ import {
   walletSubscriptionQuerySchema,
   walletSubscriptionByIdSchema,
 } from '../../schemas/telegram.schema';
-import { WalletEventType } from '@prisma/client';
+import { WalletEventType } from '../../types/prisma-enums';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();

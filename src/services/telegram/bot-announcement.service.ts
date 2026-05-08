@@ -1,4 +1,4 @@
-import { prisma } from '../../core/prisma.service';
+import { prismaTelegram } from '../../core/prisma.telegram.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { InternalWebSocketServer } from '../../websocket/ws.server';
 import { CURRENT_BOT_VERSION, BOT_ANNOUNCEMENT_MESSAGE } from '../../config/bot-changelog';
@@ -43,7 +43,7 @@ export class BotAnnouncementService {
   }
 
   private async broadcastIfNeeded(): Promise<void> {
-    const users = await prisma.telegramUser.findMany({
+    const users = await prismaTelegram.telegramUser.findMany({
       where: {
         OR: [
           { lastSeenBotVersion: null },
@@ -78,7 +78,7 @@ export class BotAnnouncementService {
       const sent = wsServer.broadcastBotAnnouncement(telegramId, BOT_ANNOUNCEMENT_MESSAGE);
 
       if (sent > 0) {
-        await prisma.telegramUser.update({
+        await prismaTelegram.telegramUser.update({
           where: { telegramId: user.telegramId },
           data: { lastSeenBotVersion: CURRENT_BOT_VERSION },
         });

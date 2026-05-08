@@ -2,26 +2,28 @@ import { PublicGoodRepository } from '../interfaces/publicgood.repository.interf
 import { PublicGoodResponse, PublicGoodCreateInput, PublicGoodUpdateInput } from '../../types/publicgood.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
-import { ProjectStatus } from '@prisma/client';
+import { ProjectStatus } from '../../types/prisma-enums';
+import { prismaContent } from '../../core/prisma.content.service';
+import {
+  attachSubmitter,
+  attachReviewedBy,
+  attachSubmitterAndReviewerOne
+} from '../../utils/cross-db-enrich';
 
 export class PrismaPublicGoodRepository extends BasePrismaRepository implements PublicGoodRepository {
-  // Helper pour les includes répétitifs
-  private readonly includeConfig = {
-    submittedBy: {
-      select: {
-        id: true,
-        name: true,
-        email: true
-      }
-    },
-    reviewedBy: {
-      select: {
-        id: true,
-        name: true,
-        email: true
-      }
-    }
-  };
+  constructor() {
+    super();
+    // PublicGood lives in the Content DB. User remains in Core DB,
+    // so submittedBy/reviewedBy nested objects are produced via cross-db enrichment.
+    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient);
+  }
+
+  /** Enrich an array of public good rows with submittedBy + reviewedBy user objects. */
+  private async enrichList<T extends Record<string, unknown>>(rows: T[]): Promise<Array<T & { submittedBy: unknown; reviewedBy: unknown }>> {
+    const withSubmitter = await attachSubmitter(rows, 'submitterId');
+    const withReviewer = await attachReviewedBy(withSubmitter, 'reviewerId');
+    return withReviewer as unknown as Array<T & { submittedBy: unknown; reviewedBy: unknown }>;
+  }
 
   async findAll(params: {
     page?: number;
@@ -84,12 +86,12 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
         where,
         skip,
         take,
-        orderBy,
-        include: this.includeConfig
+        orderBy
       });
 
+      const enriched = await this.enrichList(publicGoods as Array<Record<string, unknown>>);
       return {
-        data: publicGoods as PublicGoodResponse[],
+        data: enriched as unknown as PublicGoodResponse[],
         pagination: this.buildPagination(total, page, limit)
       };
     }, 'finding all public goods', params);
@@ -99,11 +101,14 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
     return this.executeWithErrorHandling(
       async () => {
         const publicGood = await this.prismaClient.publicGood.findUnique({
-          where: { id },
-          include: this.includeConfig
+          where: { id }
         });
-
-        return publicGood as PublicGoodResponse | null;
+        const enriched = await attachSubmitterAndReviewerOne(
+          publicGood as Record<string, unknown> | null,
+          'submitterId',
+          'reviewerId'
+        );
+        return enriched as unknown as PublicGoodResponse | null;
       },
       'finding public good by ID',
       { id }
@@ -118,11 +123,15 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
             ...data,
             submitterId: data.submitterId!,
             status: 'PENDING' as ProjectStatus
-          },
-          include: this.includeConfig
+          }
         });
 
-        return publicGood as PublicGoodResponse;
+        const enriched = await attachSubmitterAndReviewerOne(
+          publicGood as Record<string, unknown>,
+          'submitterId',
+          'reviewerId'
+        );
+        return enriched as unknown as PublicGoodResponse;
       },
       'creating public good',
       { name: data.name }
@@ -134,11 +143,15 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
       async () => {
         const publicGood = await this.prismaClient.publicGood.update({
           where: { id },
-          data,
-          include: this.includeConfig
+          data
         });
 
-        return publicGood as PublicGoodResponse;
+        const enriched = await attachSubmitterAndReviewerOne(
+          publicGood as Record<string, unknown>,
+          'submitterId',
+          'reviewerId'
+        );
+        return enriched as unknown as PublicGoodResponse;
       },
       'updating public good',
       { id, ...data }
@@ -197,12 +210,12 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
         where,
         skip,
         take,
-        orderBy,
-        include: this.includeConfig
+        orderBy
       });
 
+      const enriched = await this.enrichList(publicGoods as Array<Record<string, unknown>>);
       return {
-        data: publicGoods as PublicGoodResponse[],
+        data: enriched as unknown as PublicGoodResponse[],
         pagination: this.buildPagination(total, page, limit)
       };
     }, 'finding public goods by submitter', { submitterId, ...params });
@@ -235,12 +248,12 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
         where,
         skip,
         take,
-        orderBy,
-        include: this.includeConfig
+        orderBy
       });
 
+      const enriched = await this.enrichList(publicGoods as Array<Record<string, unknown>>);
       return {
-        data: publicGoods as PublicGoodResponse[],
+        data: enriched as unknown as PublicGoodResponse[],
         pagination: this.buildPagination(total, page, limit)
       };
     }, 'finding pending public goods', params);
@@ -260,11 +273,15 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
             reviewerId: reviewData.reviewerId,
             reviewedAt: new Date(),
             reviewNotes: reviewData.reviewNotes
-          },
-          include: this.includeConfig
+          }
         });
 
-        return publicGood as PublicGoodResponse;
+        const enriched = await attachSubmitterAndReviewerOne(
+          publicGood as Record<string, unknown>,
+          'submitterId',
+          'reviewerId'
+        );
+        return enriched as unknown as PublicGoodResponse;
       },
       'reviewing public good',
       { id, ...reviewData }
