@@ -1,0 +1,129 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==================== TELEGRAM BOT ====================
+
+enum WalletEventType {
+  TRADE
+  ORDER
+  TRANSFER
+  POSITION
+  STAKING
+}
+
+model TelegramUser {
+  id           String  @id @default(cuid())
+  telegramId   BigInt  @unique @map("telegram_id")
+  username     String? @db.VarChar(255)
+  firstName    String? @map("first_name") @db.VarChar(255)
+  /// FK applicative → User.id (Core DB). Pas de @relation cross-DB.
+  linkedUserId Int?    @unique @map("linked_user_id")
+
+  subscriptions       TelegramSubscription[]
+  sentAlerts          TelegramSentAlert[]
+  walletSubscriptions TelegramWalletSubscription[]
+  hip4SentAlerts      TelegramHip4SentAlert[]
+
+  /// Set when the one-time HIP-4 feature intro was sent via /start (Telegram bot).
+  hip4IntroShownAt DateTime? @map("hip4_intro_shown_at") @db.Timestamp(6)
+
+  /// Set when the one-time doc-watcher feature intro was sent via /start (Telegram bot).
+  docWatcherIntroShownAt DateTime? @map("doc_watcher_intro_shown_at") @db.Timestamp(6)
+
+  /// Last bot version whose announcement was shown to this user. Used to broadcast changelogs on deploy.
+  lastSeenBotVersion String? @map("last_seen_bot_version") @db.VarChar(20)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("telegram_users")
+}
+
+model TelegramSubscription {
+  id               String       @id @default(cuid())
+  telegramUser     TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  name             String       @db.VarChar(100)
+  telegramUserId   String       @map("telegram_user_id")
+  isActive         Boolean      @default(true) @map("is_active")
+  subscriptionType String       @map("subscription_type") @db.VarChar(20)
+  filterCoins      String[]     @default([]) @map("filter_coins")
+  filterMinUsd     Decimal      @default(0) @map("filter_min_usd") @db.Decimal(20, 2)
+  filterWallets    String[]     @default([]) @map("filter_wallets")
+  useLinkedWallets Boolean      @default(false) @map("use_linked_wallets")
+  createdAt        DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@map("telegram_subscriptions")
+}
+
+model TelegramSentAlert {
+  id             String       @id @default(cuid())
+  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String       @map("telegram_user_id")
+  liquidationId  String       @map("liquidation_id") @db.VarChar(255)
+  sentAt         DateTime     @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([telegramUserId, liquidationId])
+  @@index([liquidationId])
+  @@index([sentAt])
+  @@index([telegramUserId, sentAt])
+  @@map("telegram_sent_alerts")
+}
+
+model TelegramWalletSubscription {
+  id             String       @id @default(cuid())
+  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String       @map("telegram_user_id")
+  name           String       @db.VarChar(100)
+  isActive       Boolean      @default(true) @map("is_active")
+
+  walletAddresses  String[] @default([]) @map("wallet_addresses")
+  useLinkedWallets Boolean  @default(false) @map("use_linked_wallets")
+
+  eventTypes   WalletEventType[] @default([]) @map("event_types")
+  minAmountUsd Decimal           @default(0) @map("min_amount_usd") @db.Decimal(20, 2)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sentAlerts TelegramWalletSentAlert[]
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@map("telegram_wallet_subscriptions")
+}
+
+model TelegramWalletSentAlert {
+  id             String                     @id @default(cuid())
+  subscription   TelegramWalletSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionId String                     @map("subscription_id")
+  eventId        String                     @map("event_id") @db.VarChar(255)
+  sentAt         DateTime                   @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([subscriptionId, eventId])
+  @@index([eventId])
+  @@index([sentAt])
+  @@map("telegram_wallet_sent_alerts")
+}
+
+model TelegramHip4SentAlert {
+  id             String       @id @default(cuid())
+  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String       @map("telegram_user_id")
+  eventDedupeKey String       @map("event_dedupe_key") @db.VarChar(64)
+  sentAt         DateTime     @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([telegramUserId, eventDedupeKey])
+  @@index([eventDedupeKey])
+  @@index([sentAt])
+  @@index([telegramUserId, sentAt])
+  @@map("telegram_hip4_sent_alerts")
+}

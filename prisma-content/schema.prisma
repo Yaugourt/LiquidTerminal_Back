@@ -1,0 +1,264 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==================== ECOSYSTEM ENUMS ====================
+
+enum ProjectStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ResourceStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum DevelopmentStatus {
+  IDEA
+  DEVELOPMENT
+  BETA
+  PRODUCTION
+}
+
+enum TeamSize {
+  SOLO
+  SMALL
+  LARGE
+}
+
+enum ExperienceLevel {
+  BEGINNER
+  INTERMEDIATE
+  EXPERT
+}
+
+enum SupportType {
+  PROMOTION
+  SERVICES
+  FUNDING
+  CONTRIBUTOR
+}
+
+enum ContributorType {
+  DEVELOPERS
+  DESIGNERS
+  MARKETING_COMMUNITY
+  TECHNICAL_WRITERS
+  QA_TESTERS
+}
+
+enum BudgetRange {
+  RANGE_0_5K
+  RANGE_5_15K
+  RANGE_15_30K
+  RANGE_30_50K
+  RANGE_50K_PLUS
+}
+
+// ==================== PROJECTS / CATEGORIES ====================
+
+model Category {
+  id          Int               @id @default(autoincrement())
+  name        String            @unique @db.VarChar(100)
+  description String?           @db.VarChar(255)
+  createdAt   DateTime          @default(now()) @db.Timestamp(6)
+  updatedAt   DateTime          @updatedAt
+  projects    ProjectCategory[]
+}
+
+model Project {
+  id         Int               @id @default(autoincrement())
+  createdAt  DateTime          @default(now()) @db.Timestamp(6)
+  updatedAt  DateTime          @updatedAt
+  title      String            @unique @db.VarChar(255)
+  desc       String            @db.VarChar(255)
+  logo       String            @db.VarChar(255)
+  banner     String?           @db.VarChar(255)
+  token      String?           @db.VarChar(255)
+  twitter    String?           @db.VarChar(255)
+  discord    String?           @db.VarChar(255)
+  telegram   String?           @db.VarChar(255)
+  website    String?           @db.VarChar(255)
+  categories ProjectCategory[]
+}
+
+model ProjectCategory {
+  id         Int      @id @default(autoincrement())
+  projectId  Int
+  categoryId Int
+  assignedAt DateTime @default(now()) @db.Timestamp(6)
+
+  project  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, categoryId])
+}
+
+// ==================== EDUCATIONAL ====================
+
+model EducationalCategory {
+  id          Int                           @id @default(autoincrement())
+  name        String                        @unique @db.VarChar(100)
+  description String?                       @db.VarChar(255)
+  createdAt   DateTime                      @default(now()) @db.Timestamp(6)
+  /// FK applicative → User.id (Core DB). Pas de @relation cross-DB.
+  createdBy   Int
+  resources   EducationalResourceCategory[]
+}
+
+model EducationalResource {
+  id            Int     @id @default(autoincrement())
+  url           String  @db.VarChar(500)
+  createdAt     DateTime @default(now()) @db.Timestamp(6)
+  /// FK applicative → User.id (Core DB).
+  addedBy       Int
+  linkPreviewId String?
+
+  // Moderation fields
+  status      ResourceStatus @default(PENDING)
+  reviewedAt  DateTime?      @db.Timestamp(6)
+  /// FK applicative → User.id (Core DB).
+  reviewedBy  Int?
+  reviewNotes String?        @db.VarChar(500)
+
+  // Relations (intra-Content seulement)
+  linkPreview LinkPreview?                  @relation(fields: [linkPreviewId], references: [id])
+  categories  EducationalResourceCategory[]
+  reports     ResourceReport[]
+
+  @@index([status])
+  @@index([addedBy])
+  @@index([status, createdAt])
+}
+
+model EducationalResourceCategory {
+  id         Int      @id @default(autoincrement())
+  resourceId Int
+  categoryId Int
+  assignedAt DateTime @default(now()) @db.Timestamp(6)
+  /// FK applicative → User.id (Core DB).
+  assignedBy Int?
+
+  resource EducationalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  category EducationalCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([resourceId, categoryId])
+}
+
+model LinkPreview {
+  id          String   @id @default(cuid())
+  url         String   @unique @db.VarChar(500)
+  title       String?  @db.VarChar(255)
+  description String?  @db.VarChar(500)
+  image       String?  @db.VarChar(500)
+  siteName    String?  @db.VarChar(100)
+  favicon     String?  @db.VarChar(500)
+  createdAt   DateTime @default(now()) @db.Timestamp(6)
+  updatedAt   DateTime @updatedAt
+
+  resources EducationalResource[]
+
+  @@map("link_previews")
+}
+
+// ==================== RESOURCE REPORTS ====================
+
+model ResourceReport {
+  id         Int      @id @default(autoincrement())
+  resourceId Int
+  /// FK applicative → User.id (Core DB).
+  reportedBy Int
+  reason     String   @db.VarChar(500)
+  createdAt  DateTime @default(now()) @db.Timestamp(6)
+
+  resource EducationalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@unique([resourceId, reportedBy])
+  @@index([resourceId])
+  @@index([reportedBy])
+  @@map("resource_reports")
+}
+
+// ==================== PUBLIC GOODS ====================
+
+model PublicGood {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Section 1: Le projet
+  name            String
+  description     String  @db.Text
+  githubUrl       String
+  demoUrl         String?
+  websiteUrl      String?
+  category        String
+  discordContact  String?
+  telegramContact String?
+
+  // Visuels
+  logo        String?
+  banner      String?
+  screenshots String[]
+
+  // Section 2: Impact HyperLiquid
+  problemSolved     String            @db.Text
+  targetUsers       String[]
+  hlIntegration     String            @db.Text
+  developmentStatus DevelopmentStatus
+
+  // Section 3: Équipe & Technique
+  leadDeveloperName    String
+  leadDeveloperContact String
+  teamSize             TeamSize
+  experienceLevel      ExperienceLevel
+  technologies         String[]
+
+  // Section 4: Soutien demandé (optionnel)
+  supportTypes     SupportType[]
+  contributorTypes ContributorType[]
+  budgetRange      BudgetRange?
+
+  // Métadonnées
+  status      ProjectStatus @default(PENDING)
+  submittedAt DateTime      @default(now())
+  reviewedAt  DateTime?
+  /// FK applicative → User.id (Core DB).
+  reviewerId  Int?
+  reviewNotes String?       @db.Text
+
+  /// FK applicative → User.id (Core DB).
+  submitterId Int
+
+  @@index([status])
+  @@index([category])
+  @@index([submitterId])
+  @@index([developmentStatus])
+  @@index([status, submittedAt])
+  @@index([category, status])
+  @@map("public_goods")
+}
+
+// ==================== HYPERLIQUID DOC WATCHER ====================
+
+model HyperliquidDocPage {
+  id              String    @id @default(cuid())
+  pageUrl         String    @unique @db.VarChar(500)
+  relPath         String    @db.VarChar(300)
+  contentHash     String    @db.VarChar(64)
+  content         String?   @db.Text
+  lastBroadcastAt DateTime? @map("last_broadcast_at") @db.Timestamp(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  @@index([contentHash])
+  @@map("hyperliquid_doc_pages")
+}

@@ -13,8 +13,13 @@ RUN npm ci
 # Schémas Prisma — layer séparé pour ne régénérer que si les schémas changent
 COPY prisma ./prisma/
 COPY prisma-historical ./prisma-historical/
+COPY prisma-content ./prisma-content/
+COPY prisma-telegram ./prisma-telegram/
 COPY prisma.config.ts ./
-RUN npx prisma generate && npx prisma generate --schema ./prisma-historical/schema.prisma
+RUN npx prisma generate \
+ && npx prisma generate --schema ./prisma-historical/schema.prisma \
+ && npx prisma generate --schema ./prisma-content/schema.prisma \
+ && npx prisma generate --schema ./prisma-telegram/schema.prisma
 
 # Code source + build TypeScript
 COPY . .
@@ -32,6 +37,8 @@ WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/prisma ./prisma/
 COPY --from=builder /app/prisma-historical ./prisma-historical/
+COPY --from=builder /app/prisma-content ./prisma-content/
+COPY --from=builder /app/prisma-telegram ./prisma-telegram/
 COPY --from=builder /app/prisma.config.ts ./
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./
