@@ -15,7 +15,7 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
     super();
     // PublicGood lives in the Content DB. User remains in Core DB,
     // so submittedBy/reviewedBy nested objects are produced via cross-db enrichment.
-    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient);
+    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient, true);
   }
 
   /** Enrich an array of public good rows with submittedBy + reviewedBy user objects. */

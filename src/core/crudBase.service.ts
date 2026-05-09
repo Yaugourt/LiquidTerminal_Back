@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import { transactionService } from './transaction.service';
+import { prisma } from './prisma.service';
 import { cacheService } from './cache.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { CACHE_TTL } from '../constants/cache.constants';
@@ -9,6 +9,17 @@ import { CACHE_TTL } from '../constants/cache.constants';
  * Type for Prisma transaction clients (PrismaClient without connection/transaction methods)
  */
 type PrismaTransactionClient = Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
+
+/**
+ * Minimal structural type for any Prisma client (Core / Content / Telegram / Historical).
+ * BaseService.create/update/delete open a $transaction on this client. Subclasses backed
+ * by a non-Core DB must override `transactionClient` with their dedicated PrismaClient
+ * (e.g. prismaContent), otherwise the TX opens on Core while the repository writes to
+ * the other DB → FK violations and orphan rows. See refactor/db-split-core-content-telegram.
+ */
+export interface AnyPrismaClient {
+  $transaction<R>(fn: (tx: unknown) => Promise<R>, opts?: { timeout?: number }): Promise<R>;
+}
 
 /**
  * Interface pour les paramètres de requête de base.
@@ -52,6 +63,15 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
    * Les services dont le repository ne satisfait pas CrudRepository doivent surcharger ces méthodes.
    */
   protected abstract repository: BaseServiceRepository;
+
+  /**
+   * Client Prisma utilisé par les méthodes create/update/delete pour ouvrir une `$transaction`.
+   * Défaut : `prisma` (Core). Les services Content / Telegram doivent override ce champ
+   * avec leur client respectif (`prismaContent`, `prismaTelegram`) pour éviter d'ouvrir
+   * une TX sur Core qui ne peut pas vérifier les FK ni voir les writes du repository
+   * sur l'autre DB.
+   */
+  protected transactionClient: AnyPrismaClient = prisma as unknown as AnyPrismaClient;
 
   /**
    * Préfixe pour les clés de cache
@@ -204,9 +224,9 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
       const validatedData = this.validateInput(data, this.validationSchemas.create);
 
       // Utiliser le service de transaction pour la création
-      const entity = await transactionService.execute(async (tx) => {
+      const entity = await this.transactionClient.$transaction(async (tx) => {
         // Configurer le repository pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
+        this.repository.setPrismaClient(tx as PrismaTransactionClient);
         
         // Vérifier si une entité avec le même identifiant existe déjà
         const existingEntity = await this.checkExists(validatedData);
@@ -258,9 +278,9 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
       const validatedData = this.validateInput(data, this.validationSchemas.update);
 
       // Utiliser le service de transaction pour la mise à jour
-      const updatedEntity = await transactionService.execute(async (tx) => {
+      const updatedEntity = await this.transactionClient.$transaction(async (tx) => {
         // Configurer le repository pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
+        this.repository.setPrismaClient(tx as PrismaTransactionClient);
         
         // Vérifier si l'entité existe
         const entity = await this.crudRepo.findById(id);
@@ -312,10 +332,10 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
   async delete(id: number) {
     try {
       // Utiliser le service de transaction pour la suppression
-      await transactionService.execute(async (tx) => {
+      await this.transactionClient.$transaction(async (tx) => {
         // Configurer le repository pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
-        
+        this.repository.setPrismaClient(tx as PrismaTransactionClient);
+
         // Vérifier si l'entité existe
         const entity = await this.crudRepo.findById(id);
         if (!entity) {

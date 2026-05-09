@@ -37,6 +37,14 @@ export type ExecuteWithErrorHandlingOptions = {
 
 export abstract class BasePrismaRepository {
   protected prismaClient: PrismaClient | PrismaTransactionClient = prisma;
+  /**
+   * The repository's persistent default client. Set by Content/Telegram repos in their
+   * constructor (via setPrismaClient). `resetPrismaClient()` returns the live client
+   * here, NOT to the Core `prisma` singleton — otherwise after a transactional create
+   * the repo would silently switch from Content to Core and subsequent reads would
+   * miss freshly inserted rows. Initial value is `prisma` so Core repos behave as before.
+   */
+  protected defaultPrismaClient: PrismaClient | PrismaTransactionClient = prisma;
 
   // Constantes communes pour les sélections
   protected static readonly UserSelect = {
@@ -49,13 +57,21 @@ export abstract class BasePrismaRepository {
     creator: { select: BasePrismaRepository.UserSelect }
   } as const;
 
-  setPrismaClient(prismaClient: PrismaClient | PrismaTransactionClient): void {
+  /**
+   * Updates the live client. If `markAsDefault` is true (used by Content/Telegram
+   * repo constructors and never by transactional code paths), also updates the
+   * persistent default that `resetPrismaClient` returns to.
+   */
+  setPrismaClient(prismaClient: PrismaClient | PrismaTransactionClient, markAsDefault = false): void {
     this.prismaClient = prismaClient;
+    if (markAsDefault) {
+      this.defaultPrismaClient = prismaClient;
+    }
     logDeduplicator.info(`Prisma client updated in ${this.constructor.name}`);
   }
 
   resetPrismaClient(): void {
-    this.prismaClient = prisma;
+    this.prismaClient = this.defaultPrismaClient;
     logDeduplicator.info(`Prisma client reset to default in ${this.constructor.name}`);
   }
 

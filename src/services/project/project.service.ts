@@ -4,7 +4,7 @@ import { categoryRepository } from '../../repositories';
 import { prismaContent } from '../../core/prisma.content.service';
 import { CACHE_PREFIX } from '../../constants/cache.constants';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { BaseService } from '../../core/crudBase.service';
+import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
 import { 
   ProjectNotFoundError, 
   ProjectAlreadyExistsError, 
@@ -29,6 +29,7 @@ type ProjectQueryParams = {
 
 export class ProjectService extends BaseService<ProjectResponse, ProjectCreateInput, ProjectUpdateInput, ProjectQueryParams> {
   protected repository = projectRepository;
+  protected transactionClient = prismaContent as unknown as AnyPrismaClient;
   protected cacheKeyPrefix = CACHE_PREFIX.PROJECT;
   protected validationSchemas = {
     create: createProjectSchema as any,

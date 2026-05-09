@@ -28,7 +28,7 @@ import {
   educationalResourceCategoryCreateSchema
 } from '../../schemas/educational.schema';
 import { educationalResourceRepository, educationalCategoryRepository } from '../../repositories';
-import { BaseService } from '../../core/crudBase.service';
+import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
 import { cacheService } from '../../core/cache.service';
 import { prismaContent } from '../../core/prisma.content.service';
 import { CACHE_TTL } from '../../constants/cache.constants';
@@ -53,6 +53,7 @@ export class EducationalResourceService extends BaseService<
   EducationalResourceQueryParams
 > {
   protected repository = educationalResourceRepository;
+  protected transactionClient = prismaContent as unknown as AnyPrismaClient;
   protected cacheKeyPrefix = CACHE_PREFIX.EDUCATIONAL_RESOURCE;
   protected validationSchemas = {
     create: educationalResourceServiceCreateSchema,

@@ -12,7 +12,8 @@ import {
   categoryQuerySchema 
 } from '../../schemas/category.schema';
 import { categoryRepository, projectRepository } from '../../repositories';
-import { BaseService } from '../../core/crudBase.service';
+import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
+import { prismaContent } from '../../core/prisma.content.service';
 
 // Type pour les paramètres de requête
 type CategoryQueryParams = {
@@ -25,6 +26,7 @@ type CategoryQueryParams = {
 
 export class CategoryService extends BaseService<CategoryResponse, CategoryCreateInput, CategoryUpdateInput, CategoryQueryParams> {
   protected repository = categoryRepository;
+  protected transactionClient = prismaContent as unknown as AnyPrismaClient;
   protected cacheKeyPrefix = CACHE_PREFIX.CATEGORY;
   protected validationSchemas = {
     create: categoryCreateSchema,

@@ -21,7 +21,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
     super();
     // EducationalResource lives in the Content DB. User remains in Core DB,
     // so creator/reviewer/assigner are attached via cross-db enrichment.
-    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient);
+    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient, true);
   }
 
   // Helper pour les includes répétitifs (intra-Content uniquement)
