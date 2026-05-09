@@ -8,20 +8,24 @@ import {
 } from '../../types/educational.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
-import { ResourceStatus } from '@prisma/client';
+import { ResourceStatus } from '../../types/prisma-enums';
+import { prismaContent } from '../../core/prisma.content.service';
+import {
+  attachCreator,
+  attachReviewer,
+  attachAssigner
+} from '../../utils/cross-db-enrich';
 
 export class PrismaEducationalResourceRepository extends BasePrismaRepository implements EducationalResourceRepository {
-  // Helper pour les includes répétitifs
+  constructor() {
+    super();
+    // EducationalResource lives in the Content DB. User remains in Core DB,
+    // so creator/reviewer/assigner are attached via cross-db enrichment.
+    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient, true);
+  }
+
+  // Helper pour les includes répétitifs (intra-Content uniquement)
   private readonly includeConfig = {
-    creator: {
-      select: BasePrismaRepository.UserSelect
-    },
-    reviewer: {
-      select: {
-        id: true,
-        name: true
-      }
-    },
     linkPreview: {
       select: {
         id: true,
@@ -40,13 +44,37 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
             name: true,
             description: true
           }
-        },
-        assigner: {
-          select: BasePrismaRepository.UserSelect
         }
       }
     }
   };
+
+  /**
+   * Apply cross-db user enrichment to an array of educational resources.
+   * Attaches `creator`, `reviewer`, and (per-row) `categories[].assigner`.
+   */
+  private async enrichResources<T extends { categories?: Array<Record<string, unknown>> }>(
+    rows: T[]
+  ): Promise<Array<T & { creator: unknown; reviewer: unknown }>> {
+    const withCreator = await attachCreator(rows as Array<Record<string, unknown>>, 'addedBy');
+    const withReviewer = await attachReviewer(withCreator, 'reviewedBy');
+    for (const row of withReviewer) {
+      const cats = (row as unknown as { categories?: Array<Record<string, unknown>> }).categories;
+      if (Array.isArray(cats) && cats.length > 0) {
+        const enrichedCats = await attachAssigner(cats, 'assignedBy');
+        (row as unknown as { categories: unknown }).categories = enrichedCats;
+      }
+    }
+    return withReviewer as unknown as Array<T & { creator: unknown; reviewer: unknown }>;
+  }
+
+  private async enrichResourceOne<T extends { categories?: Array<Record<string, unknown>> }>(
+    row: T | null
+  ): Promise<(T & { creator: unknown; reviewer: unknown }) | null> {
+    if (!row) return null;
+    const [enriched] = await this.enrichResources([row]);
+    return enriched;
+  }
 
   async findAll(params: {
     page?: number;
@@ -102,8 +130,9 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         include: this.includeConfig
       });
 
+      const enriched = await this.enrichResources(resources as Array<Record<string, unknown>>);
       return {
-        data: resources as unknown as EducationalResourceResponse[],
+        data: enriched as unknown as EducationalResourceResponse[],
         pagination: this.buildPagination(total, page, limit)
       };
     }, 'finding all educational resources', { page: params.page, limit: params.limit, sort: params.sort, order: params.order, search: params.search, addedBy: params.addedBy, categoryId: params.categoryId });
@@ -112,10 +141,12 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   async findById(id: number): Promise<EducationalResourceResponse | null> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResource.findUnique({
+        const row = await this.prismaClient.educationalResource.findUnique({
           where: { id },
           include: this.includeConfig
-        }) as EducationalResourceResponse | null;
+        });
+        const enriched = await this.enrichResourceOne(row as Record<string, unknown> | null);
+        return enriched as unknown as EducationalResourceResponse | null;
       },
       'finding educational resource by ID',
       { id }
@@ -127,7 +158,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
       async () => {
         const { categoryIds, ...resourceData } = data;
 
-        return await this.prismaClient.educationalResource.create({
+        const row = await this.prismaClient.educationalResource.create({
           data: {
             ...resourceData,
             ...(categoryIds && categoryIds.length > 0 ? {
@@ -140,7 +171,9 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
             } : {})
           },
           include: this.includeConfig
-        }) as EducationalResourceResponse;
+        });
+        const enriched = await this.enrichResourceOne(row as Record<string, unknown>);
+        return enriched as unknown as EducationalResourceResponse;
       },
       'creating educational resource',
       { url: data.url, addedBy: data.addedBy }
@@ -150,11 +183,13 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   async update(id: number, data: EducationalResourceUpdateInput): Promise<EducationalResourceResponse> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResource.update({
+        const row = await this.prismaClient.educationalResource.update({
           where: { id },
           data,
           include: this.includeConfig
-        }) as EducationalResourceResponse;
+        });
+        const enriched = await this.enrichResourceOne(row as Record<string, unknown>);
+        return enriched as unknown as EducationalResourceResponse;
       },
       'updating educational resource',
       { id, ...data }
@@ -189,11 +224,13 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   async findByCreator(userId: number): Promise<EducationalResourceResponse[]> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResource.findMany({
+        const rows = await this.prismaClient.educationalResource.findMany({
           where: { addedBy: userId },
           include: this.includeConfig,
           orderBy: { createdAt: 'desc' }
-        }) as EducationalResourceResponse[];
+        });
+        const enriched = await this.enrichResources(rows as Array<Record<string, unknown>>);
+        return enriched as unknown as EducationalResourceResponse[];
       },
       'finding educational resources by creator',
       { userId }
@@ -212,7 +249,9 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
           }
         });
 
-        return resourceCategories.map((rc: any) => rc.resource);
+        const resources = resourceCategories.map((rc: any) => rc.resource);
+        const enriched = await this.enrichResources(resources as Array<Record<string, unknown>>);
+        return enriched as unknown as EducationalResourceResponse[];
       },
       'finding educational resources by category',
       { categoryId }
@@ -222,7 +261,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   async assignToCategory(data: EducationalResourceCategoryCreateInput): Promise<EducationalResourceCategoryResponse> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResourceCategory.create({
+        const row = await this.prismaClient.educationalResourceCategory.create({
           data,
           include: {
             category: {
@@ -231,12 +270,11 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
                 name: true,
                 description: true
               }
-            },
-            assigner: {
-              select: BasePrismaRepository.UserSelect
             }
           }
         });
+        const [enriched] = await attachAssigner([row as Record<string, unknown>], 'assignedBy');
+        return enriched as unknown as EducationalResourceCategoryResponse;
       },
       'assigning resource to category',
       { resourceId: data.resourceId, categoryId: data.categoryId, assignedBy: data.assignedBy }
@@ -277,7 +315,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   async getResourceAssignments(resourceId: number): Promise<EducationalResourceCategoryResponse[]> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResourceCategory.findMany({
+        const rows = await this.prismaClient.educationalResourceCategory.findMany({
           where: { resourceId },
           include: {
             category: {
@@ -286,12 +324,11 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
                 name: true,
                 description: true
               }
-            },
-            assigner: {
-              select: BasePrismaRepository.UserSelect
             }
           }
         });
+        const enriched = await attachAssigner(rows as Array<Record<string, unknown>>, 'assignedBy');
+        return enriched as unknown as EducationalResourceCategoryResponse[];
       },
       'getting resource assignments',
       { resourceId }
@@ -301,10 +338,12 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   async findByUrl(url: string): Promise<EducationalResourceResponse | null> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResource.findFirst({
+        const row = await this.prismaClient.educationalResource.findFirst({
           where: { url },
           include: this.includeConfig
-        }) as EducationalResourceResponse | null;
+        });
+        const enriched = await this.enrichResourceOne(row as Record<string, unknown> | null);
+        return enriched as unknown as EducationalResourceResponse | null;
       },
       'finding resource by URL',
       { url }
@@ -368,7 +407,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   ): Promise<EducationalResourceResponse> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResource.update({
+        const row = await this.prismaClient.educationalResource.update({
           where: { id },
           data: {
             status,
@@ -377,7 +416,9 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
             reviewNotes: notes
           },
           include: this.includeConfig
-        }) as EducationalResourceResponse;
+        });
+        const enriched = await this.enrichResourceOne(row as Record<string, unknown>);
+        return enriched as unknown as EducationalResourceResponse;
       },
       'updating resource review status',
       { id, status, reviewerId }
@@ -387,11 +428,13 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
   async findByStatus(status: ResourceStatus): Promise<EducationalResourceResponse[]> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.educationalResource.findMany({
+        const rows = await this.prismaClient.educationalResource.findMany({
           where: { status },
           include: this.includeConfig,
           orderBy: { createdAt: 'desc' }
-        }) as EducationalResourceResponse[];
+        });
+        const enriched = await this.enrichResources(rows as Array<Record<string, unknown>>);
+        return enriched as unknown as EducationalResourceResponse[];
       },
       'finding resources by status',
       { status }

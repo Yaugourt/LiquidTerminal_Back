@@ -40,6 +40,8 @@ yarn-error.log*
 
 # Prisma generated clients
 prisma-historical/generated/
+prisma-content/generated/
+prisma-telegram/generated/
 
 # TypeScript cache
 *.tsbuildinfo

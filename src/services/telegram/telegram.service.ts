@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { prisma } from '../../core/prisma.service';
+import { prismaTelegram } from '../../core/prisma.telegram.service';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { WalletService } from '../wallet/wallet.service';
@@ -46,7 +47,7 @@ export class TelegramService {
    * @throws TelegramAccountNotLinkedError if no linked account
    */
   private async resolveUserId(telegramId: bigint): Promise<number> {
-    const telegramUser = await prisma.telegramUser.findUnique({
+    const telegramUser = await prismaTelegram.telegramUser.findUnique({
       where: { telegramId },
       select: { linkedUserId: true },
     });
@@ -70,27 +71,32 @@ export class TelegramService {
    */
   public async getLinkedAccount(telegramId: bigint): Promise<LinkedAccountResponse> {
     try {
-      const telegramUser = await prisma.telegramUser.findUnique({
+      const telegramUser = await prismaTelegram.telegramUser.findUnique({
         where: { telegramId },
-        include: {
-          linkedUser: {
-            include: {
-              _count: {
-                select: { UserWallets: true },
-              },
-            },
-          },
-        },
       });
 
-      if (!telegramUser || !telegramUser.linkedUser) {
+      if (!telegramUser || !telegramUser.linkedUserId) {
         return {
           linked: false,
           walletCount: 0,
         };
       }
 
-      const user = telegramUser.linkedUser;
+      const user = await prisma.user.findUnique({
+        where: { id: telegramUser.linkedUserId },
+        include: {
+          _count: {
+            select: { UserWallets: true },
+          },
+        },
+      });
+
+      if (!user) {
+        return {
+          linked: false,
+          walletCount: 0,
+        };
+      }
 
       return {
         linked: true,
@@ -206,7 +212,7 @@ export class TelegramService {
   public async generateLinkCode(userId: number): Promise<{ code: string; deepLink: string }> {
     try {
       // Check if user already has a linked telegram
-      const existingLink = await prisma.telegramUser.findFirst({
+      const existingLink = await prismaTelegram.telegramUser.findFirst({
         where: { linkedUserId: userId },
       });
 
@@ -265,7 +271,7 @@ export class TelegramService {
       const { userId } = JSON.parse(stored) as { userId: number };
 
       // Check if this telegramId is already linked to another user
-      const existing = await prisma.telegramUser.findUnique({
+      const existing = await prismaTelegram.telegramUser.findUnique({
         where: { telegramId },
       });
 
@@ -275,7 +281,7 @@ export class TelegramService {
 
       // Link the account
       if (existing) {
-        await prisma.telegramUser.update({
+        await prismaTelegram.telegramUser.update({
           where: { telegramId },
           data: {
             linkedUserId: userId,
@@ -284,7 +290,7 @@ export class TelegramService {
           },
         });
       } else {
-        await prisma.telegramUser.create({
+        await prismaTelegram.telegramUser.create({
           data: {
             telegramId,
             linkedUserId: userId,
@@ -324,7 +330,7 @@ export class TelegramService {
   public async getLinkStatus(code: string, userId: number): Promise<{ linked: boolean; telegramUsername?: string }> {
     try {
       // Check if user now has a linked telegram
-      const telegramUser = await prisma.telegramUser.findFirst({
+      const telegramUser = await prismaTelegram.telegramUser.findFirst({
         where: { linkedUserId: userId },
       });
 
@@ -359,7 +365,7 @@ export class TelegramService {
    */
   public async unlinkAccount(userId: number): Promise<void> {
     try {
-      const telegramUser = await prisma.telegramUser.findFirst({
+      const telegramUser = await prismaTelegram.telegramUser.findFirst({
         where: { linkedUserId: userId },
       });
 
@@ -367,7 +373,7 @@ export class TelegramService {
         throw new TelegramAccountNotLinkedError();
       }
 
-      await prisma.telegramUser.update({
+      await prismaTelegram.telegramUser.update({
         where: { id: telegramUser.id },
         data: { linkedUserId: null },
       });

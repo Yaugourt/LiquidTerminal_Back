@@ -97,41 +97,39 @@ export class ReadListItemService extends BaseService<
    * @throws Erreur si pas d'accès ou ressource/read list non trouvée
    */
   async addResourceToReadList(data: ReadListItemCreateInput, userId: number): Promise<ReadListItemResponse> {
+    if (!data.readListId) {
+      throw new ReadListItemValidationError('readListId is required');
+    }
+
+    // Cross-DB pre-validation: EducationalResource lives in Content DB and cannot
+    // participate in the Core $transaction below. Read it first; a tiny race
+    // window exists where the resource could be deleted between this check and
+    // the insert, but the worst case is an orphan ReadListItem (which the
+    // application tolerates since reads do an attachCreator-style fan-out).
+    const resource = await educationalResourceRepository.findById(data.resourceId);
+    if (!resource) {
+      throw new ReadListResourceNotFoundError();
+    }
+
     try {
       return await transactionService.execute(async (tx) => {
         this.repository.setPrismaClient(tx);
         readListRepository.setPrismaClient(tx);
-        educationalResourceRepository.setPrismaClient(tx);
 
-        // Vérifier que la read list existe et que l'utilisateur y a accès
-        if (!data.readListId) {
-          throw new ReadListItemValidationError('readListId is required');
-        }
-
-        const readList = await readListRepository.findById(data.readListId);
+        const readList = await readListRepository.findById(data.readListId!);
         if (!readList) {
           throw new ReadListNotFoundError();
         }
 
-        if (!await readListRepository.hasAccess(data.readListId, userId)) {
+        if (!await readListRepository.hasAccess(data.readListId!, userId)) {
           throw new ReadListPermissionError();
         }
 
-        // Vérifier que la ressource éducative existe
-        const resource = await educationalResourceRepository.findById(data.resourceId);
-        if (!resource) {
-          throw new ReadListResourceNotFoundError();
-        }
-
-        // Créer l'item
         return await this.create(data);
       });
-    } catch (error) {
-      throw error;
     } finally {
       this.repository.resetPrismaClient();
       readListRepository.resetPrismaClient();
-      educationalResourceRepository.resetPrismaClient();
     }
   }
 

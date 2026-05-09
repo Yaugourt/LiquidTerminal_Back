@@ -1,4 +1,5 @@
-import { prisma } from '../../core/prisma.service';
+import { prismaContent } from '../../core/prisma.content.service';
+import { attachReporter } from '../../utils/cross-db-enrich';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import {
     ResourceReportInput,
@@ -11,7 +12,9 @@ import {
 } from '../../errors/educational.errors';
 
 /**
- * Service pour gérer les signalements de ressources éducatives
+ * Service pour gérer les signalements de ressources éducatives.
+ * Tables ResourceReport et EducationalResource vivent dans la Content DB.
+ * Le `reporter` (User) vient de la Core DB et est attaché en fan-out applicatif.
  */
 export class ResourceReportService {
     private static instance: ResourceReportService;
@@ -30,7 +33,7 @@ export class ResourceReportService {
      */
     async createReport(input: ResourceReportInput): Promise<ResourceReportResponse> {
         // Vérifier que la ressource existe
-        const resource = await prisma.educationalResource.findUnique({
+        const resource = await prismaContent.educationalResource.findUnique({
             where: { id: input.resourceId }
         });
 
@@ -39,7 +42,7 @@ export class ResourceReportService {
         }
 
         // Vérifier si l'utilisateur a déjà signalé cette ressource
-        const existingReport = await prisma.resourceReport.findUnique({
+        const existingReport = await prismaContent.resourceReport.findUnique({
             where: {
                 resourceId_reportedBy: {
                     resourceId: input.resourceId,
@@ -52,20 +55,14 @@ export class ResourceReportService {
             throw new DuplicateReportError();
         }
 
-        // Créer le signalement
-        const report = await prisma.resourceReport.create({
+        // Créer le signalement (Content), puis fan-out reporter + resource shape
+        const report = await prismaContent.resourceReport.create({
             data: {
                 resourceId: input.resourceId,
                 reportedBy: input.reportedBy,
                 reason: input.reason
             },
             include: {
-                reporter: {
-                    select: {
-                        id: true,
-                        name: true
-                    }
-                },
                 resource: {
                     select: {
                         id: true,
@@ -76,13 +73,15 @@ export class ResourceReportService {
             }
         });
 
+        const [enriched] = await attachReporter([report], 'reportedBy');
+
         logDeduplicator.info('Resource report created', {
             reportId: report.id,
             resourceId: input.resourceId,
             reportedBy: input.reportedBy
         });
 
-        return report;
+        return enriched as ResourceReportResponse;
     }
 
     /**
@@ -102,18 +101,12 @@ export class ResourceReportService {
         const where = resourceId ? { resourceId } : {};
 
         const [reports, total] = await Promise.all([
-            prisma.resourceReport.findMany({
+            prismaContent.resourceReport.findMany({
                 where,
                 skip,
                 take: limit,
                 orderBy: { createdAt: 'desc' },
                 include: {
-                    reporter: {
-                        select: {
-                            id: true,
-                            name: true
-                        }
-                    },
                     resource: {
                         select: {
                             id: true,
@@ -123,13 +116,14 @@ export class ResourceReportService {
                     }
                 }
             }),
-            prisma.resourceReport.count({ where })
+            prismaContent.resourceReport.count({ where })
         ]);
 
+        const enriched = await attachReporter(reports, 'reportedBy');
         const totalPages = Math.ceil(total / limit);
 
         return {
-            data: reports,
+            data: enriched as ResourceReportResponse[],
             pagination: {
                 page,
                 limit,
@@ -145,25 +139,19 @@ export class ResourceReportService {
      * Récupère les signalements pour une ressource spécifique
      */
     async getReportsForResource(resourceId: number): Promise<ResourceReportResponse[]> {
-        return prisma.resourceReport.findMany({
+        const reports = await prismaContent.resourceReport.findMany({
             where: { resourceId },
-            orderBy: { createdAt: 'desc' },
-            include: {
-                reporter: {
-                    select: {
-                        id: true,
-                        name: true
-                    }
-                }
-            }
+            orderBy: { createdAt: 'desc' }
         });
+        const enriched = await attachReporter(reports, 'reportedBy');
+        return enriched as ResourceReportResponse[];
     }
 
     /**
      * Compte le nombre de signalements pour une ressource
      */
     async countReportsForResource(resourceId: number): Promise<number> {
-        return prisma.resourceReport.count({
+        return prismaContent.resourceReport.count({
             where: { resourceId }
         });
     }
@@ -172,7 +160,7 @@ export class ResourceReportService {
      * Supprime un signalement (admin uniquement)
      */
     async deleteReport(id: number): Promise<void> {
-        await prisma.resourceReport.delete({
+        await prismaContent.resourceReport.delete({
             where: { id }
         });
 
@@ -183,7 +171,7 @@ export class ResourceReportService {
      * Supprime tous les signalements d'une ressource (utilisé lors de l'approbation)
      */
     async deleteReportsForResource(resourceId: number): Promise<number> {
-        const result = await prisma.resourceReport.deleteMany({
+        const result = await prismaContent.resourceReport.deleteMany({
             where: { resourceId }
         });
 

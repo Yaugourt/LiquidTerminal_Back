@@ -7,29 +7,58 @@ import {
 } from '../../types/readlist.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
+import { prismaContent } from '../../core/prisma.content.service';
+import { attachCreator } from '../../utils/cross-db-enrich';
 
 export class PrismaReadListRepository extends BasePrismaRepository implements ReadListRepository {
-  // Helper pour les includes répétitifs
+  // ReadList stays on the Core DB; only its items reference Content.educationalResource
+  // (cross-DB), so we drop the nested `resource` include and fan out manually.
   private readonly includeConfig = {
     creator: {
       select: BasePrismaRepository.UserSelect
     },
     items: {
-      include: {
-        resource: {
-          include: {
-            creator: {
-              select: BasePrismaRepository.UserSelect
-            }
-          }
-        }
-      },
       orderBy: [
         { order: 'asc' as const },
         { addedAt: 'asc' as const }
       ]
     }
   };
+
+  /**
+   * After fetching a ReadList with `items` (each carrying `resourceId`),
+   * batch-load the matching EducationalResource rows from the Content DB,
+   * enrich them with their `creator` (Core DB), and attach to each item
+   * under the `resource` field expected by the frontend:
+   *   items[].resource = { id, url, createdAt, creator: { id, name, email } }.
+   */
+  private async attachResourcesToItems(
+    items: Array<{ resourceId: number } & Record<string, unknown>>
+  ): Promise<void> {
+    if (!Array.isArray(items) || items.length === 0) return;
+    const resourceIds = Array.from(
+      new Set(items.map((it) => it.resourceId).filter((id): id is number => typeof id === 'number'))
+    );
+    if (resourceIds.length === 0) return;
+
+    const resources = await prismaContent.educationalResource.findMany({
+      where: { id: { in: resourceIds } },
+      select: { id: true, url: true, createdAt: true, addedBy: true }
+    });
+    const enrichedResources = await attachCreator(
+      resources as Array<Record<string, unknown>>,
+      'addedBy'
+    );
+    const byId = new Map<number, Record<string, unknown>>();
+    for (const r of enrichedResources) {
+      const row = r as unknown as Record<string, unknown> & { id: number };
+      const { addedBy: _ignored, ...rest } = row as Record<string, unknown> & { addedBy?: unknown; id: number };
+      byId.set(row.id, rest);
+    }
+    for (const item of items) {
+      (item as Record<string, unknown>).resource = byId.get(item.resourceId) ?? null;
+    }
+  }
 
   private readonly summaryIncludeConfig = {
     creator: {
@@ -95,10 +124,15 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
   async findById(id: number): Promise<ReadListResponse | null> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.readList.findUnique({
+        const readList = await this.prismaClient.readList.findUnique({
           where: { id },
           include: this.includeConfig
         });
+        if (!readList) return null;
+        await this.attachResourcesToItems(
+          (readList as { items?: Array<{ resourceId: number } & Record<string, unknown>> }).items ?? []
+        );
+        return readList as ReadListResponse;
       },
       'finding read list by ID',
       { id }
@@ -129,7 +163,7 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
   async create(data: ReadListCreateInput): Promise<ReadListResponse> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.readList.create({
+        const readList = await this.prismaClient.readList.create({
           data: {
             name: data.name,
             description: data.description,
@@ -140,6 +174,10 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
           },
           include: this.includeConfig
         });
+        await this.attachResourcesToItems(
+          (readList as { items?: Array<{ resourceId: number } & Record<string, unknown>> }).items ?? []
+        );
+        return readList as ReadListResponse;
       },
       'creating read list',
       { name: data.name, userId: data.userId }
@@ -149,11 +187,15 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
   async update(id: number, data: ReadListUpdateInput): Promise<ReadListResponse> {
     return this.executeWithErrorHandling(
       async () => {
-        return await this.prismaClient.readList.update({
+        const readList = await this.prismaClient.readList.update({
           where: { id },
           data,
           include: this.includeConfig
         });
+        await this.attachResourcesToItems(
+          (readList as { items?: Array<{ resourceId: number } & Record<string, unknown>> }).items ?? []
+        );
+        return readList as ReadListResponse;
       },
       'updating read list',
       { id, ...data }

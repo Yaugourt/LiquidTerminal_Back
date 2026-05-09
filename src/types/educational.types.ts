@@ -1,5 +1,5 @@
 import { BaseResponse, BasePagination } from './common.types';
-import { ResourceStatus } from '@prisma/client';
+import { ResourceStatus } from './prisma-enums';
 
 // Types de base pour les catégories éducatives
 export interface EducationalCategoryResponse {

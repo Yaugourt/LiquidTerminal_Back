@@ -1,5 +1,6 @@
-import { WalletEventType } from '@prisma/client';
+import { WalletEventType } from '../../types/prisma-enums';
 import { prisma } from '../../core/prisma.service';
+import { prismaTelegram } from '../../core/prisma.telegram.service';
 import {
   TelegramUserNotFoundError,
   WalletSubscriptionNotFoundError,
@@ -61,7 +62,7 @@ export class TelegramWalletSubscriptionService {
 
   /** Resolve TelegramUser.id (cuid) from telegramId (BigInt), throws if not found. */
   private async resolveTelegramUserId(telegramId: bigint): Promise<string> {
-    const user = await prisma.telegramUser.findUnique({
+    const user = await prismaTelegram.telegramUser.findUnique({
       where: { telegramId },
       select: { id: true },
     });
@@ -75,7 +76,7 @@ export class TelegramWalletSubscriptionService {
   async list(telegramId: bigint) {
     const telegramUserId = await this.resolveTelegramUserId(telegramId);
 
-    const subscriptions: SubscriptionRow[] = await prisma.telegramWalletSubscription.findMany({
+    const subscriptions: SubscriptionRow[] = await prismaTelegram.telegramWalletSubscription.findMany({
       where: { telegramUserId },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -109,14 +110,14 @@ export class TelegramWalletSubscriptionService {
   async create(input: CreateWalletSubscriptionInput) {
     const telegramUserId = await this.resolveTelegramUserId(input.telegramId);
 
-    const existingCount = await prisma.telegramWalletSubscription.count({
+    const existingCount = await prismaTelegram.telegramWalletSubscription.count({
       where: { telegramUserId },
     });
     if (existingCount >= MAX_SUBSCRIPTIONS_PER_USER) {
       throw new WalletSubscriptionLimitError();
     }
 
-    const subscription = await prisma.telegramWalletSubscription.create({
+    const subscription = await prismaTelegram.telegramWalletSubscription.create({
       data: {
         telegramUserId,
         name: input.name,
@@ -153,7 +154,7 @@ export class TelegramWalletSubscriptionService {
   async update(input: UpdateWalletSubscriptionInput) {
     const telegramUserId = await this.resolveTelegramUserId(input.telegramId);
 
-    const existing = await prisma.telegramWalletSubscription.findUnique({
+    const existing = await prismaTelegram.telegramWalletSubscription.findUnique({
       where: { id: input.subscriptionId },
       select: { telegramUserId: true },
     });
@@ -161,7 +162,7 @@ export class TelegramWalletSubscriptionService {
     if (!existing) throw new WalletSubscriptionNotFoundError();
     if (existing.telegramUserId !== telegramUserId) throw new WalletSubscriptionNotFoundError();
 
-    const updated = await prisma.telegramWalletSubscription.update({
+    const updated = await prismaTelegram.telegramWalletSubscription.update({
       where: { id: input.subscriptionId },
       data: {
         ...(input.name !== undefined && { name: input.name }),
@@ -198,7 +199,7 @@ export class TelegramWalletSubscriptionService {
   async delete(telegramId: bigint, subscriptionId: string): Promise<void> {
     const telegramUserId = await this.resolveTelegramUserId(telegramId);
 
-    const existing = await prisma.telegramWalletSubscription.findUnique({
+    const existing = await prismaTelegram.telegramWalletSubscription.findUnique({
       where: { id: subscriptionId },
       select: { telegramUserId: true },
     });
@@ -206,7 +207,7 @@ export class TelegramWalletSubscriptionService {
     if (!existing) throw new WalletSubscriptionNotFoundError();
     if (existing.telegramUserId !== telegramUserId) throw new WalletSubscriptionNotFoundError();
 
-    await prisma.telegramWalletSubscription.delete({
+    await prismaTelegram.telegramWalletSubscription.delete({
       where: { id: subscriptionId },
     });
 
@@ -222,29 +223,56 @@ export class TelegramWalletSubscriptionService {
    * including linked wallets from the user's LT account if useLinkedWallets is true.
    */
   async getActiveSubscriptions() {
-    const subscriptions = await prisma.telegramWalletSubscription.findMany({
+    const subscriptions = await prismaTelegram.telegramWalletSubscription.findMany({
       where: { isActive: true },
       include: {
         telegramUser: {
           select: {
             telegramId: true,
-            linkedUser: {
-              select: {
-                UserWallets: {
-                  include: { Wallet: { select: { address: true } } },
-                },
-              },
-            },
+            linkedUserId: true,
           },
         },
       },
     });
 
+    // Cross-DB lookup: fetch UserWallets for all linked users from Core DB.
+    const linkedUserIds = Array.from(
+      new Set(
+        subscriptions
+          .map((sub) => sub.telegramUser.linkedUserId)
+          .filter((id): id is number => id !== null && id !== undefined)
+      )
+    );
+
+    const userWalletsByUserId = new Map<number, { Wallet: { address: string } }[]>();
+
+    if (linkedUserIds.length > 0) {
+      const users = await prisma.user.findMany({
+        where: { id: { in: linkedUserIds } },
+        select: {
+          id: true,
+          UserWallets: {
+            include: { Wallet: { select: { address: true } } },
+          },
+        },
+      });
+
+      for (const u of users) {
+        userWalletsByUserId.set(u.id, u.UserWallets);
+      }
+    }
+
     return subscriptions.map((sub) => {
+      const linkedUserId = sub.telegramUser.linkedUserId;
+      const userWallets =
+        linkedUserId !== null && linkedUserId !== undefined
+          ? (userWalletsByUserId.get(linkedUserId) ?? [])
+          : [];
+
       const linkedAddresses = sub.useLinkedWallets
-        ? (sub.telegramUser.linkedUser?.UserWallets.map(
+        ? userWallets.map(
             (uw: { Wallet: { address: string } }) => uw.Wallet.address
-          ) ?? [])
+          )
         : [];
 
       const allAddresses = [...new Set([...sub.walletAddresses, ...linkedAddresses])];

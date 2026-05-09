@@ -16,7 +16,8 @@ import {
   educationalCategoryQuerySchema 
 } from '../../schemas/educational.schema';
 import { educationalCategoryRepository } from '../../repositories';
-import { BaseService } from '../../core/crudBase.service';
+import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
+import { prismaContent } from '../../core/prisma.content.service';
 import { cacheService } from '../../core/cache.service';
 import { CACHE_TTL } from '../../constants/cache.constants';
 
@@ -36,6 +37,7 @@ export class EducationalCategoryService extends BaseService<
   EducationalCategoryQueryParams
 > {
   protected repository = educationalCategoryRepository;
+  protected transactionClient = prismaContent as unknown as AnyPrismaClient;
   protected cacheKeyPrefix = CACHE_PREFIX.EDUCATIONAL_CATEGORY;
   protected validationSchemas = {
     create: educationalCategoryCreateSchema,

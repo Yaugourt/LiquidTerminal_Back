@@ -1,7 +1,7 @@
 import { PublicGoodResponse, PublicGoodCreateInput, PublicGoodUpdateInput } from '../../types/publicgood.types';
 import { BaseRepository } from './base.repository.interface';
 import { BasePagination } from '../../types/common.types';
-import { ProjectStatus } from '@prisma/client';
+import { ProjectStatus } from '../../types/prisma-enums';
 
 export interface PublicGoodRepository extends BaseRepository {
   /**

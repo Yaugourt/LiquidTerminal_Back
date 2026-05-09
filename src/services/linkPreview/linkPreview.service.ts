@@ -20,7 +20,8 @@ import {
   linkPreviewQuerySchema 
 } from '../../schemas/linkPreview.schema';
 import { linkPreviewRepository } from '../../repositories';
-import { BaseService } from '../../core/crudBase.service';
+import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
+import { prismaContent } from '../../core/prisma.content.service';
 import { cacheService } from '../../core/cache.service';
 import { LinkPreviewFetcherService } from './linkPreviewFetcher.service';
 
@@ -32,6 +33,7 @@ export class LinkPreviewService extends BaseService<
 > {
   private static instance: LinkPreviewService;
   protected repository = linkPreviewRepository;
+  protected transactionClient = prismaContent as unknown as AnyPrismaClient;
   protected cacheKeyPrefix = CACHE_PREFIX.LINK_PREVIEW;
   protected validationSchemas = {
     create: linkPreviewCreateSchema,
@@ -201,7 +203,7 @@ export class LinkPreviewService extends BaseService<
    */
   async isUsedByOtherResources(linkPreviewId: string, excludeResourceId?: number): Promise<boolean> {
     try {
-      const { prisma } = await import('../../core/prisma.service');
+      const { prismaContent } = await import('../../core/prisma.content.service');
       
       const whereClause: any = {
         linkPreviewId: linkPreviewId
@@ -211,7 +213,7 @@ export class LinkPreviewService extends BaseService<
         whereClause.id = { not: excludeResourceId };
       }
       
-      const count = await prisma.educationalResource.count({
+      const count = await prismaContent.educationalResource.count({
         where: whereClause
       });
       

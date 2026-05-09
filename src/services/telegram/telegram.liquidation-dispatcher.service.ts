@@ -1,4 +1,4 @@
-import { prisma } from '../../core/prisma.service';
+import { prismaTelegram } from '../../core/prisma.telegram.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { LiquidationsWebSocketService } from '../liquidations/liquidations.ws.service';
 import { InternalWebSocketServer } from '../../websocket/ws.server';
@@ -98,7 +98,7 @@ export class TelegramLiquidationDispatcherService {
     if (Date.now() - this.cacheLoadedAt < TelegramLiquidationDispatcherService.CACHE_TTL_MS) return;
 
     try {
-      const subs = await prisma.telegramSubscription.findMany({
+      const subs = await prismaTelegram.telegramSubscription.findMany({
         where: { isActive: true },
         include: { telegramUser: { select: { telegramId: true } } },
       });
@@ -240,7 +240,7 @@ export class TelegramLiquidationDispatcherService {
    */
   private async markSent(telegramUserId: string, liquidationId: string): Promise<boolean> {
     try {
-      await prisma.telegramSentAlert.create({
+      await prismaTelegram.telegramSentAlert.create({
         data: { telegramUserId, liquidationId },
       });
       return false; // Successfully inserted — not a duplicate

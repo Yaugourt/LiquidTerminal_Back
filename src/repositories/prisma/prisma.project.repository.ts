@@ -1,10 +1,17 @@
-import { Prisma } from '@prisma/client';
+import { Prisma } from '../../../prisma-content/generated/client';
 import { ProjectRepository } from '../interfaces/project.repository.interface';
 import { Project, ProjectCreateInput, ProjectUpdateInput } from '../../types/project.types';
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
+import { prismaContent } from '../../core/prisma.content.service';
 
 export class PrismaProjectRepository extends BasePrismaRepository implements ProjectRepository {
+  constructor() {
+    super();
+    // Project lives in the Content DB after the multi-DB split.
+    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient, true);
+  }
+
   // Helper pour les includes répétitifs
   private readonly includeConfig = {
     categories: {

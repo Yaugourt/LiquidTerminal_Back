@@ -1,13 +1,13 @@
 import { BaseResponse, BasePagination } from './common.types';
-import { 
-  ProjectStatus, 
-  DevelopmentStatus, 
-  TeamSize, 
-  ExperienceLevel, 
-  SupportType, 
+import {
+  ProjectStatus,
+  DevelopmentStatus,
+  TeamSize,
+  ExperienceLevel,
+  SupportType,
   BudgetRange,
   ContributorType
-} from '@prisma/client';
+} from './prisma-enums';
 
 // Type de base pour PublicGood
 export interface PublicGood {

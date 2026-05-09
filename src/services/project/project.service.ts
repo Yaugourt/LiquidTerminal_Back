@@ -1,10 +1,10 @@
 import { ProjectResponse, ProjectCreateInput, ProjectUpdateInput } from '../../types/project.types';
 import { projectRepository } from '../../repositories';
 import { categoryRepository } from '../../repositories';
-import { transactionService } from '../../core/transaction.service';
+import { prismaContent } from '../../core/prisma.content.service';
 import { CACHE_PREFIX } from '../../constants/cache.constants';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { BaseService } from '../../core/crudBase.service';
+import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
 import { 
   ProjectNotFoundError, 
   ProjectAlreadyExistsError, 
@@ -29,6 +29,7 @@ type ProjectQueryParams = {
 
 export class ProjectService extends BaseService<ProjectResponse, ProjectCreateInput, ProjectUpdateInput, ProjectQueryParams> {
   protected repository = projectRepository;
+  protected transactionClient = prismaContent as unknown as AnyPrismaClient;
   protected cacheKeyPrefix = CACHE_PREFIX.PROJECT;
   protected validationSchemas = {
     create: createProjectSchema as any,
@@ -78,7 +79,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
       }
 
       // Utiliser le service de transaction pour l'assignation des catégories
-      await transactionService.execute(async (tx) => {
+      await prismaContent.$transaction(async (tx) => {
         // Vérifier si le projet existe
         const project = await this.repository.findById(projectId);
         if (!project) {
@@ -138,7 +139,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
       }
 
       // Utiliser le service de transaction pour le retrait des catégories
-      await transactionService.execute(async (tx) => {
+      await prismaContent.$transaction(async (tx) => {
         // Vérifier si le projet existe
         const project = await this.repository.findById(projectId);
         if (!project) {

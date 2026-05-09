@@ -11,6 +11,8 @@ export default tseslint.config(
       '**/dist/**',
       '**/coverage/**',
       'prisma-historical/generated/**',
+      'prisma-content/generated/**',
+      'prisma-telegram/generated/**',
       '.agents/**',
       '*.mjs',
       'jest.config.js',

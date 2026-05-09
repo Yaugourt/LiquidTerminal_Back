@@ -1,4 +1,4 @@
-import { prisma } from '../../core/prisma.service';
+import { prismaTelegram } from '../../core/prisma.telegram.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { HypeDexerCompletedTradesWSClient } from '../../clients/hypedexer/websocket/completed-trades.ws.client';
 import { TelegramWalletSubscriptionService } from './telegram.wallet-subscription.service';
@@ -161,7 +161,7 @@ export class TelegramWalletDispatcherService {
    */
   private async markSent(subscriptionId: string, eventId: string): Promise<boolean> {
     try {
-      await prisma.telegramWalletSentAlert.create({
+      await prismaTelegram.telegramWalletSentAlert.create({
         data: { subscriptionId, eventId },
       });
       return false; // Successfully inserted — not a duplicate

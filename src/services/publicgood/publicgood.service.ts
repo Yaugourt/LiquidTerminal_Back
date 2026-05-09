@@ -2,7 +2,8 @@ import { PublicGoodResponse, PublicGoodCreateInput, PublicGoodUpdateInput, Publi
 import { publicGoodRepository } from '../../repositories';
 import { CACHE_PREFIX } from '../../constants/cache.constants';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { BaseService } from '../../core/crudBase.service';
+import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
+import { prismaContent } from '../../core/prisma.content.service';
 import { 
   PublicGoodNotFoundError, 
   PublicGoodAlreadyExistsError, 
@@ -14,7 +15,7 @@ import {
   publicGoodUpdateSchema, 
   publicGoodQuerySchema 
 } from '../../schemas/publicgood.schema';
-import { ProjectStatus } from '@prisma/client';
+import { ProjectStatus } from '../../types/prisma-enums';
 
 export class PublicGoodService extends BaseService<
   PublicGoodResponse, 
@@ -23,6 +24,7 @@ export class PublicGoodService extends BaseService<
   PublicGoodQueryParams
 > {
   protected repository = publicGoodRepository;
+  protected transactionClient = prismaContent as unknown as AnyPrismaClient;
   protected cacheKeyPrefix = CACHE_PREFIX.PUBLIC_GOOD || 'publicgood';
   protected validationSchemas = {
     create: publicGoodCreateSchema.shape.body as any,
