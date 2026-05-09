@@ -120,18 +120,32 @@ export class LinkPreviewFetcherService {
       const $ = cheerio.load(html);
 
       // Extraire les données
-      const title = this.getMetaContent($, [
+      let title = this.getMetaContent($, [
         'meta[property="og:title"]',
         'meta[name="twitter:title"]',
         'meta[name="title"]',
         'title'
       ]);
 
-      const description = this.getMetaContent($, [
+      let description = this.getMetaContent($, [
         'meta[property="og:description"]',
         'meta[name="twitter:description"]',
         'meta[name="description"]'
       ]);
+
+      // Twitter/X met l'auteur (`<Name> (@<handle>) on X`) dans og:title et le
+      // texte effectif du tweet dans og:description, à l'envers de la convention.
+      // On swap pour que le card affiche le contenu du tweet en titre.
+      const isTwitter =
+        urlObj.hostname === 'x.com' ||
+        urlObj.hostname === 'twitter.com' ||
+        urlObj.hostname.endsWith('.x.com') ||
+        urlObj.hostname.endsWith('.twitter.com');
+      if (isTwitter && title && description) {
+        const tweetText = description;
+        description = title;
+        title = tweetText;
+      }
 
       let image = this.getMetaContent($, [
         'meta[property="og:image"]',
