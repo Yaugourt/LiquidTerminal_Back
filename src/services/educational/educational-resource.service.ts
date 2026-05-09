@@ -31,6 +31,7 @@ import { educationalResourceRepository, educationalCategoryRepository } from '..
 import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
 import { cacheService } from '../../core/cache.service';
 import { prismaContent } from '../../core/prisma.content.service';
+import { prisma } from '../../core/prisma.service';
 import { CACHE_TTL } from '../../constants/cache.constants';
 import { LinkPreviewService } from '../linkPreview/linkPreview.service';
 import { contentFilterService } from './content-filter.service';
@@ -366,11 +367,33 @@ export class EducationalResourceService extends BaseService<
   // ==================== MODERATION METHODS ====================
 
   /**
-   * Soumet une ressource (utilisateur) - va dans la queue de modération
+   * Soumet une ressource. Comportement :
+   * - USER          → status PENDING, en attente de modération.
+   * - MODERATOR/ADMIN → auto-approuvée immédiatement (skip la queue).
+   *
+   * On crée d'abord la ressource (status PENDING par défaut côté repo) puis on
+   * la passe en APPROVED via le flow d'approbation existant si le submitter a
+   * les droits — ça garde la cohérence du log d'approbation et du grant XP
+   * (EDUCATIONAL_RESOURCE_APPROVED).
    */
   async submitResource(data: ResourceSubmitInput): Promise<EducationalResourceResponse> {
-    // La ressource sera créée avec status PENDING par défaut
-    return this.create(data);
+    const created = await this.create(data);
+
+    // User lives in Core DB — fetch role via the default `prisma` client.
+    const submitter = await prisma.user.findUnique({
+      where: { id: data.addedBy },
+      select: { role: true },
+    });
+
+    if (submitter && (submitter.role === 'ADMIN' || submitter.role === 'MODERATOR')) {
+      return await this.approveResource(
+        created.id,
+        data.addedBy,
+        'Auto-approved (submitter is admin or moderator)'
+      );
+    }
+
+    return created;
   }
 
   /**
