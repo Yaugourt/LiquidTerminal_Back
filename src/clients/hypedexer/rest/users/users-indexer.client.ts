@@ -3,6 +3,9 @@ import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.ser
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
+import { buildHypedexerCacheKey, withRedisCache } from '../shared/hypedexer-cache.helper';
+
+const TTL_LEADERBOARD = 60;
 
 export interface IndexerUsersLeaderboardQuery {
   by?: 'volume' | 'pnl' | 'trades' | 'priority_fees';
@@ -42,15 +45,23 @@ export class HypeDexerUsersIndexerClient extends HypeDexerBaseClient {
   }
 
   public async getLeaderboard(q: IndexerUsersLeaderboardQuery = {}): Promise<unknown> {
-    return this.circuitBreaker.execute(async () => {
-      const sp = new URLSearchParams();
-      sp.append('by', q.by ?? 'volume');
-      sp.append('hours', String(q.hours ?? 24));
-      sp.append('limit', String(q.limit ?? 20));
-      const endpoint = `/users/leaderboard?${sp.toString()}`;
-      logDeduplicator.info('HypeDexerUsersIndexerClient.getLeaderboard', { endpoint });
-      return this.getUnwrapped<unknown>(endpoint);
-    });
+    const by = q.by ?? 'volume';
+    const hours = q.hours ?? 24;
+    const limit = q.limit ?? 20;
+    return withRedisCache(
+      buildHypedexerCacheKey('users', 'leaderboard', { by, hours, limit }),
+      TTL_LEADERBOARD,
+      () =>
+        this.circuitBreaker.execute(async () => {
+          const sp = new URLSearchParams();
+          sp.append('by', by);
+          sp.append('hours', String(hours));
+          sp.append('limit', String(limit));
+          const endpoint = `/users/leaderboard?${sp.toString()}`;
+          logDeduplicator.info('HypeDexerUsersIndexerClient.getLeaderboard', { endpoint });
+          return this.getUnwrapped<unknown>(endpoint);
+        }),
+    );
   }
 
   public async getUserCoins(

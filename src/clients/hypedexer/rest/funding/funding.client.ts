@@ -3,6 +3,9 @@ import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.ser
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
+import { buildHypedexerCacheKey, withRedisCache } from '../shared/hypedexer-cache.helper';
+
+const TTL_PREDICTED_FUNDINGS = 30;
 
 export interface IndexerFundingHistoryQuery {
   coin: string;
@@ -79,10 +82,15 @@ export class HypeDexerFundingClient extends HypeDexerBaseClient {
   }
 
   public async getPredictedFundings(): Promise<unknown> {
-    return this.circuitBreaker.execute(async () => {
-      logDeduplicator.info('HypeDexerFundingClient.getPredictedFundings');
-      return this.getUnwrapped<unknown>('/funding/predictedFundings');
-    });
+    return withRedisCache(
+      buildHypedexerCacheKey('funding', 'predictedFundings'),
+      TTL_PREDICTED_FUNDINGS,
+      () =>
+        this.circuitBreaker.execute(async () => {
+          logDeduplicator.info('HypeDexerFundingClient.getPredictedFundings');
+          return this.getUnwrapped<unknown>('/funding/predictedFundings');
+        }),
+    );
   }
 
   public async getUserFunding(params: IndexerUserFundingQuery): Promise<unknown> {

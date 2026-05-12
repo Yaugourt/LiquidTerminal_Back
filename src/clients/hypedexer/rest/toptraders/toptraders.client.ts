@@ -31,7 +31,9 @@ export class HLIndexerTopTradersClient extends HypeDexerBaseClient {
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
-  private pollingInterval: NodeJS.Timeout | null = null;
+  private pollingTimeout: NodeJS.Timeout | null = null;
+  private pollingStopped = true;
+  private consecutiveFailures = 0;
 
   private constructor() {
     super(HYPEDEXER_API_URL, hypedexerJsonHeaders);
@@ -51,34 +53,46 @@ export class HLIndexerTopTradersClient extends HypeDexerBaseClient {
   }
 
   public startPolling(): void {
-    if (this.pollingInterval) {
+    if (!this.pollingStopped) {
       logDeduplicator.warn('Top Traders polling already started');
       return;
     }
+    this.pollingStopped = false;
     logDeduplicator.info('Starting Top Traders polling');
-    this.updateTopTradersData().catch((err) =>
-      logDeduplicator.error('Error in initial Top Traders update:', {
-        error: err instanceof Error ? err.message : String(err),
-      })
-    );
-    this.pollingInterval = setInterval(() => {
-      this.updateTopTradersData().catch((err) =>
-        logDeduplicator.error('Error in Top Traders polling:', {
-          error: err instanceof Error ? err.message : String(err),
-        })
-      );
-    }, UPDATE_INTERVAL);
+    void this.tickTopTradersPolling();
   }
 
   public stopPolling(): void {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
+    this.pollingStopped = true;
+    if (this.pollingTimeout) {
+      clearTimeout(this.pollingTimeout);
+      this.pollingTimeout = null;
       logDeduplicator.info('Top Traders polling stopped');
     }
   }
 
+  private async tickTopTradersPolling(): Promise<void> {
+    if (this.pollingStopped) return;
+    try {
+      await this.updateTopTradersData();
+      this.consecutiveFailures = 0;
+    } catch (err) {
+      this.consecutiveFailures += 1;
+      logDeduplicator.error('Error in Top Traders polling:', {
+        error: err instanceof Error ? err.message : String(err),
+        consecutiveFailures: this.consecutiveFailures,
+      });
+    }
+    if (this.pollingStopped) return;
+    const multiplier = Math.min(Math.pow(2, this.consecutiveFailures), 10);
+    const delay = UPDATE_INTERVAL * multiplier;
+    this.pollingTimeout = setTimeout(() => {
+      void this.tickTopTradersPolling();
+    }, delay);
+  }
+
   private async updateTopTradersData(): Promise<void> {
+    let allRejected = false;
     const executed = await withDistributedLock('poll:toptraders', 90, async () => {
       const results = await Promise.allSettled(
         SORT_TYPES.map(async (sort) => {
@@ -97,9 +111,14 @@ export class HLIndexerTopTradersClient extends HypeDexerBaseClient {
         }
       });
       await redisService.publish(UPDATE_CHANNEL, JSON.stringify({ type: 'DATA_UPDATED', timestamp: Date.now() }));
+      allRejected = results.every((r) => r.status === 'rejected');
     });
     if (!executed) {
       logDeduplicator.info('Top Traders refresh skipped - another instance holds the lock');
+      return;
+    }
+    if (allRejected) {
+      throw new Error('All top traders fetches failed');
     }
   }
 
@@ -140,7 +159,13 @@ export class HLIndexerTopTradersClient extends HypeDexerBaseClient {
       return response;
     }
 
-    await this.updateTopTradersData();
+    try {
+      await this.updateTopTradersData();
+    } catch (err) {
+      logDeduplicator.warn('On-demand top traders refresh failed; falling back to passthrough', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     const reRead = await redisService.get(key);
     if (reRead) {
       const response: TopTradersApiResponse = JSON.parse(reRead);

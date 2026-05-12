@@ -30,7 +30,9 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
-  private pollingInterval: NodeJS.Timeout | null = null;
+  private pollingTimeout: NodeJS.Timeout | null = null;
+  private pollingStopped = true;
+  private consecutiveFailures = 0;
 
   private constructor() {
     super(HYPEDEXER_API_URL, hypedexerJsonHeaders);
@@ -50,34 +52,53 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
   }
 
   public startPolling(): void {
-    if (this.pollingInterval) {
+    if (!this.pollingStopped) {
       logDeduplicator.warn('Active users polling already started');
       return;
     }
+    this.pollingStopped = false;
     logDeduplicator.info('Starting active users polling');
-    this.updateActiveUsersData().catch((err) =>
-      logDeduplicator.error('Error in initial active users update:', {
-        error: err instanceof Error ? err.message : String(err),
-      })
-    );
-    this.pollingInterval = setInterval(() => {
-      this.updateActiveUsersData().catch((err) =>
-        logDeduplicator.error('Error in active users polling:', {
-          error: err instanceof Error ? err.message : String(err),
-        })
-      );
-    }, UPDATE_INTERVAL);
+    void this.tickActiveUsersPolling(true);
   }
 
   public stopPolling(): void {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
+    this.pollingStopped = true;
+    if (this.pollingTimeout) {
+      clearTimeout(this.pollingTimeout);
+      this.pollingTimeout = null;
       logDeduplicator.info('Active users polling stopped');
     }
   }
 
+  /**
+   * Recursive tick with adaptive backoff on consecutive failures.
+   * Effective delay = UPDATE_INTERVAL * min(2^failures, 10).
+   */
+  private async tickActiveUsersPolling(isInitial: boolean): Promise<void> {
+    if (this.pollingStopped) return;
+    if (!isInitial) {
+      // schedule already used to enter this tick
+    }
+    try {
+      await this.updateActiveUsersData();
+      this.consecutiveFailures = 0;
+    } catch (err) {
+      this.consecutiveFailures += 1;
+      logDeduplicator.error('Error in active users polling:', {
+        error: err instanceof Error ? err.message : String(err),
+        consecutiveFailures: this.consecutiveFailures,
+      });
+    }
+    if (this.pollingStopped) return;
+    const multiplier = Math.min(Math.pow(2, this.consecutiveFailures), 10);
+    const delay = UPDATE_INTERVAL * multiplier;
+    this.pollingTimeout = setTimeout(() => {
+      void this.tickActiveUsersPolling(false);
+    }, delay);
+  }
+
   private async updateActiveUsersData(): Promise<void> {
+    let allRejected = false;
     const executed = await withDistributedLock('poll:activeusers', 90, async () => {
       const results = await Promise.allSettled(
         HOURS_TO_CACHE.map(async (hours) => {
@@ -99,9 +120,14 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
           });
         }
       });
+      allRejected = results.every((r) => r.status === 'rejected');
     });
     if (!executed) {
       logDeduplicator.info('Active users refresh skipped - another instance holds the lock');
+      return;
+    }
+    if (allRejected) {
+      throw new Error('All active users fetches failed');
     }
   }
 
@@ -139,7 +165,13 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
         }
         return parsed;
       }
-      await this.updateActiveUsersData();
+      try {
+        await this.updateActiveUsersData();
+      } catch (err) {
+        logDeduplicator.warn('On-demand active users refresh failed; falling back to passthrough', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       const reRead = await redisService.get(cacheKey);
       if (reRead) {
         const parsed: ActiveUsersApiResponse = JSON.parse(reRead);

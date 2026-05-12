@@ -25,7 +25,9 @@ export class HLIndexerBuildersClient extends HypeDexerBaseClient {
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
-  private pollingInterval: NodeJS.Timeout | null = null;
+  private pollingTimeout: NodeJS.Timeout | null = null;
+  private pollingStopped = true;
+  private consecutiveFailures = 0;
 
   private constructor() {
     super(HYPEDEXER_API_URL, hypedexerJsonHeaders);
@@ -45,40 +47,53 @@ export class HLIndexerBuildersClient extends HypeDexerBaseClient {
   }
 
   public startPolling(): void {
-    if (this.pollingInterval) {
+    if (!this.pollingStopped) {
       logDeduplicator.warn('Builders polling already started');
       return;
     }
+    this.pollingStopped = false;
     logDeduplicator.info('Starting Builders polling');
-    this.updateBuildersData().catch((err) =>
-      logDeduplicator.error('Error in initial Builders update:', {
-        error: err instanceof Error ? err.message : String(err),
-      })
-    );
-    this.pollingInterval = setInterval(() => {
-      this.updateBuildersData().catch((err) =>
-        logDeduplicator.error('Error in Builders polling:', {
-          error: err instanceof Error ? err.message : String(err),
-        })
-      );
-    }, UPDATE_INTERVAL);
+    void this.tickBuildersPolling();
   }
 
   public stopPolling(): void {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
+    this.pollingStopped = true;
+    if (this.pollingTimeout) {
+      clearTimeout(this.pollingTimeout);
+      this.pollingTimeout = null;
       logDeduplicator.info('Builders polling stopped');
     }
   }
 
+  private async tickBuildersPolling(): Promise<void> {
+    if (this.pollingStopped) return;
+    try {
+      await this.updateBuildersData();
+      this.consecutiveFailures = 0;
+    } catch (err) {
+      this.consecutiveFailures += 1;
+      logDeduplicator.error('Error in Builders polling:', {
+        error: err instanceof Error ? err.message : String(err),
+        consecutiveFailures: this.consecutiveFailures,
+      });
+    }
+    if (this.pollingStopped) return;
+    const multiplier = Math.min(Math.pow(2, this.consecutiveFailures), 10);
+    const delay = UPDATE_INTERVAL * multiplier;
+    this.pollingTimeout = setTimeout(() => {
+      void this.tickBuildersPolling();
+    }, delay);
+  }
+
   private async updateBuildersData(): Promise<void> {
+    let fetchError: unknown = null;
     const executed = await withDistributedLock('poll:builders', 90, async () => {
       try {
         const response = await this.fetchAllBuilders();
         await redisService.set(CACHE_KEY, JSON.stringify(response), CACHE_TTL);
         await redisService.publish(UPDATE_CHANNEL, JSON.stringify({ type: 'DATA_UPDATED', timestamp: Date.now() }));
       } catch (error) {
+        fetchError = error;
         logDeduplicator.error('Failed to fetch builders', {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -86,6 +101,10 @@ export class HLIndexerBuildersClient extends HypeDexerBaseClient {
     });
     if (!executed) {
       logDeduplicator.info('Builders refresh skipped - another instance holds the lock');
+      return;
+    }
+    if (fetchError) {
+      throw fetchError instanceof Error ? fetchError : new Error(String(fetchError));
     }
   }
 
@@ -107,7 +126,13 @@ export class HLIndexerBuildersClient extends HypeDexerBaseClient {
       return JSON.parse(cached);
     }
 
-    await this.updateBuildersData();
+    try {
+      await this.updateBuildersData();
+    } catch (err) {
+      logDeduplicator.warn('On-demand builders refresh failed; falling back to direct fetch', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     const reRead = await redisService.get(CACHE_KEY);
     if (reRead) {
       return JSON.parse(reRead);

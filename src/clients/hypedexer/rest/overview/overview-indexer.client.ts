@@ -3,6 +3,7 @@ import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.ser
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
+import { buildHypedexerCacheKey, withRedisCache } from '../shared/hypedexer-cache.helper';
 
 function buildQuery(record: Record<string, string | number | boolean | undefined | null>): string {
   const sp = new URLSearchParams();
@@ -13,6 +14,12 @@ function buildQuery(record: Record<string, string | number | boolean | undefined
   const s = sp.toString();
   return s ? `?${s}` : '';
 }
+
+// TTLs for overview snapshots. 60s for most routes (active-traders, daily-pnl,
+// daily-volume, total-fees, total-fills, trading-volume); coin-distribution
+// is user-scoped + heavier upstream, cached longer.
+const TTL_OVERVIEW_DEFAULT = 60;
+const TTL_COIN_DISTRIBUTION = 300;
 
 /**
  * HypeDexer REST — Overview analytics snapshots (GET-only, no path params).
@@ -53,30 +60,58 @@ export class HypeDexerOverviewIndexerClient extends HypeDexerBaseClient {
   }
 
   public getActiveTraders24h(): Promise<unknown> {
-    return this.getPath('/overview/active-traders-24h');
+    return withRedisCache(
+      buildHypedexerCacheKey('overview', 'active-traders-24h'),
+      TTL_OVERVIEW_DEFAULT,
+      () => this.getPath('/overview/active-traders-24h'),
+    );
   }
 
   public getCoinDistribution(params: { user: string }): Promise<unknown> {
-    return this.getPath(`/overview/coin-distribution${buildQuery(params)}`);
+    return withRedisCache(
+      buildHypedexerCacheKey('overview', 'coin-distribution', params),
+      TTL_COIN_DISTRIBUTION,
+      () => this.getPath(`/overview/coin-distribution${buildQuery(params)}`),
+    );
   }
 
   public getDailyPnl10d(): Promise<unknown> {
-    return this.getPath('/overview/daily-pnl-10d');
+    return withRedisCache(
+      buildHypedexerCacheKey('overview', 'daily-pnl-10d'),
+      TTL_OVERVIEW_DEFAULT,
+      () => this.getPath('/overview/daily-pnl-10d'),
+    );
   }
 
   public getDailyVolume10d(): Promise<unknown> {
-    return this.getPath('/overview/daily-volume-10d');
+    return withRedisCache(
+      buildHypedexerCacheKey('overview', 'daily-volume-10d'),
+      TTL_OVERVIEW_DEFAULT,
+      () => this.getPath('/overview/daily-volume-10d'),
+    );
   }
 
   public getTotalFees24h(): Promise<unknown> {
-    return this.getPath('/overview/total-fees-24h');
+    return withRedisCache(
+      buildHypedexerCacheKey('overview', 'total-fees-24h'),
+      TTL_OVERVIEW_DEFAULT,
+      () => this.getPath('/overview/total-fees-24h'),
+    );
   }
 
   public getTotalFills24h(): Promise<unknown> {
-    return this.getPath('/overview/total-fills-24h');
+    return withRedisCache(
+      buildHypedexerCacheKey('overview', 'total-fills-24h'),
+      TTL_OVERVIEW_DEFAULT,
+      () => this.getPath('/overview/total-fills-24h'),
+    );
   }
 
   public getTradingVolume24h(): Promise<unknown> {
-    return this.getPath('/overview/trading-volume-24h');
+    return withRedisCache(
+      buildHypedexerCacheKey('overview', 'trading-volume-24h'),
+      TTL_OVERVIEW_DEFAULT,
+      () => this.getPath('/overview/trading-volume-24h'),
+    );
   }
 }

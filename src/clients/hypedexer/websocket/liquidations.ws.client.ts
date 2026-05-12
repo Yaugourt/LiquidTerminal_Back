@@ -50,12 +50,19 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
         reconnect: true,
         reconnectInterval: 5000,
         reconnectMaxInterval: 60000,
-        reconnectMaxAttempts: 20, // ~10 min with backoff 5s->60s
+        // 0 = infinite reconnect attempts; exponential backoff capped at reconnectMaxInterval (60s).
+        reconnectMaxAttempts: 0,
         pingInterval: 30000,
         pingTimeout: 10000,
       },
       {
         onStateChange: (state: WSConnectionState) => this.handleStateChange(state),
+        onReconnect: (attempt: number) => {
+          // Emit one degraded-signal error log when consecutive failures cross 10.
+          if (attempt === 10) {
+            logDeduplicator.error('HypeDexerLiquidationsWSClient: degraded — 10 consecutive reconnect attempts; continuing with exponential backoff');
+          }
+        },
       }
     );
 

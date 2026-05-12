@@ -25,7 +25,9 @@ export class HLIndexerLiquidationsClient extends HypeDexerBaseClient {
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
-  private pollingInterval: NodeJS.Timeout | null = null;
+  private pollingTimeout: NodeJS.Timeout | null = null;
+  private pollingStopped = true;
+  private consecutiveFailures = 0;
 
   private constructor() {
     super(HYPEDEXER_API_URL, hypedexerJsonHeaders);
@@ -151,27 +153,47 @@ export class HLIndexerLiquidationsClient extends HypeDexerBaseClient {
       logDeduplicator.error('Failed to update recent liquidations cache', {
         error: error instanceof Error ? error.message : String(error),
       });
+      throw error;
     }
   }
 
   public startPolling(): void {
-    if (this.pollingInterval) {
+    if (!this.pollingStopped) {
       logDeduplicator.warn('HLIndexer liquidations polling already started');
       return;
     }
+    this.pollingStopped = false;
     logDeduplicator.info('Starting HLIndexer liquidations polling');
-    void this.updateRecentLiquidations();
-    this.pollingInterval = setInterval(() => {
-      void this.updateRecentLiquidations();
-    }, UPDATE_INTERVAL);
+    void this.tickLiquidationsPolling();
   }
 
   public stopPolling(): void {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
+    this.pollingStopped = true;
+    if (this.pollingTimeout) {
+      clearTimeout(this.pollingTimeout);
+      this.pollingTimeout = null;
       logDeduplicator.info('HLIndexer liquidations polling stopped');
     }
+  }
+
+  private async tickLiquidationsPolling(): Promise<void> {
+    if (this.pollingStopped) return;
+    try {
+      await this.updateRecentLiquidations();
+      this.consecutiveFailures = 0;
+    } catch (err) {
+      this.consecutiveFailures += 1;
+      logDeduplicator.warn('Liquidations polling tick failed; applying backoff', {
+        error: err instanceof Error ? err.message : String(err),
+        consecutiveFailures: this.consecutiveFailures,
+      });
+    }
+    if (this.pollingStopped) return;
+    const multiplier = Math.min(Math.pow(2, this.consecutiveFailures), 10);
+    const delay = UPDATE_INTERVAL * multiplier;
+    this.pollingTimeout = setTimeout(() => {
+      void this.tickLiquidationsPolling();
+    }, delay);
   }
 
   /**
@@ -197,7 +219,13 @@ export class HLIndexerLiquidationsClient extends HypeDexerBaseClient {
 
     let cached = await redisService.get(CACHE_KEY);
     if (!cached) {
-      await this.updateRecentLiquidations();
+      try {
+        await this.updateRecentLiquidations();
+      } catch (err) {
+        logDeduplicator.warn('On-demand recent liquidations refresh failed; falling back', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       cached = await redisService.get(CACHE_KEY);
     }
     if (!cached) {
