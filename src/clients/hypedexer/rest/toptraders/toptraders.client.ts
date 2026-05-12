@@ -80,18 +80,22 @@ export class HLIndexerTopTradersClient extends HypeDexerBaseClient {
 
   private async updateTopTradersData(): Promise<void> {
     const executed = await withDistributedLock('poll:toptraders', 90, async () => {
-      for (const sort of SORT_TYPES) {
-        try {
+      const results = await Promise.allSettled(
+        SORT_TYPES.map(async (sort) => {
           const response = await this.fetchTopTraders(sort, 50);
           const key = `${CACHE_KEY_PREFIX}:${sort}`;
           await redisService.set(key, JSON.stringify(response), CACHE_TTL);
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        } catch (error) {
+          return sort;
+        })
+      );
+      results.forEach((result, idx) => {
+        if (result.status === 'rejected') {
+          const sort = SORT_TYPES[idx];
           logDeduplicator.error(`Failed to fetch top traders for sort=${sort}`, {
-            error: error instanceof Error ? error.message : String(error),
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
           });
         }
-      }
+      });
       await redisService.publish(UPDATE_CHANNEL, JSON.stringify({ type: 'DATA_UPDATED', timestamp: Date.now() }));
     });
     if (!executed) {

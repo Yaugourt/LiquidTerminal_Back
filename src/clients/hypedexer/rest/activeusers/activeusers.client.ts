@@ -79,8 +79,8 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
 
   private async updateActiveUsersData(): Promise<void> {
     const executed = await withDistributedLock('poll:activeusers', 90, async () => {
-      for (const hours of HOURS_TO_CACHE) {
-        try {
+      const results = await Promise.allSettled(
+        HOURS_TO_CACHE.map(async (hours) => {
           const response = await this.circuitBreaker.execute(() => this.fetchRaw({ hours, limit: 100 }));
           const cacheKey = `${CACHE_KEY_PREFIX}:${hours}h`;
           await redisService.set(cacheKey, JSON.stringify(response), CACHE_TTL);
@@ -88,13 +88,17 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
             UPDATE_CHANNEL,
             JSON.stringify({ type: 'DATA_UPDATED', hours, timestamp: Date.now() })
           );
-          await new Promise((r) => setTimeout(r, 200));
-        } catch (error) {
+          return hours;
+        })
+      );
+      results.forEach((result, idx) => {
+        if (result.status === 'rejected') {
+          const hours = HOURS_TO_CACHE[idx];
           logDeduplicator.error(`Failed to fetch active users for hours=${hours}`, {
-            error: error instanceof Error ? error.message : String(error),
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason),
           });
         }
-      }
+      });
     });
     if (!executed) {
       logDeduplicator.info('Active users refresh skipped - another instance holds the lock');
