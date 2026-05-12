@@ -186,26 +186,59 @@ export abstract class BaseWebSocketService {
    * Handle incoming message
    */
   private handleMessage(data: WebSocket.RawData): void {
+    let message: string;
     try {
-      const message = data.toString();
+      message = data.toString();
+    } catch (error) {
+      logDeduplicator.warn(`${this.constructor.name}: non-decodable ws frame dropped`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
 
-      // Check buffer size limit
-      if (message.length > this.config.maxBufferSize) {
-        logDeduplicator.warn(`${this.constructor.name}: Message too large, ignoring`, {
-          size: message.length,
-          maxSize: this.config.maxBufferSize,
-        });
-        return;
-      }
+    // Check buffer size limit
+    if (message.length > this.config.maxBufferSize) {
+      logDeduplicator.warn(`${this.constructor.name}: Message too large, ignoring`, {
+        size: message.length,
+        maxSize: this.config.maxBufferSize,
+      });
+      return;
+    }
 
-      // Parse JSON
-      const parsed = JSON.parse(message);
+    // Parse JSON — Hypedexer may occasionally send non-JSON frames (known upstream bug),
+    // so we warn + drop instead of crashing/erroring.
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(message);
+    } catch (error) {
+      logDeduplicator.warn(`${this.constructor.name}: non-JSON ws message dropped`, {
+        error: error instanceof Error ? error.message : String(error),
+        preview: message.slice(0, 120),
+      });
+      return;
+    }
 
-      // Call custom message handler
+    // Guard: ensure parsed payload is a non-null object before dispatching to handlers.
+    if (typeof parsed !== 'object' || parsed === null) {
+      logDeduplicator.warn(`${this.constructor.name}: non-object ws message dropped`, {
+        type: typeof parsed,
+      });
+      return;
+    }
+
+    // Dispatch to handlers, catching any unexpected exception so the loop never dies.
+    try {
       this.onMessage(parsed);
+    } catch (error) {
+      logDeduplicator.error(`${this.constructor.name}: onMessage handler threw`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
       this.events.onMessage?.(parsed);
     } catch (error) {
-      logDeduplicator.error(`${this.constructor.name}: Message parse error`, {
+      logDeduplicator.error(`${this.constructor.name}: events.onMessage threw`, {
         error: error instanceof Error ? error.message : String(error),
       });
     }

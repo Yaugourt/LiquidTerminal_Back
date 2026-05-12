@@ -165,6 +165,15 @@ export class HypeDexerCompletedTradesWSClient extends BaseWebSocketService {
    * Called when a message is received
    */
   protected onMessage(data: unknown): void {
+    // Defensive guard: base service should already filter non-object payloads,
+    // but Hypedexer occasionally emits non-JSON / malformed frames (known upstream bug).
+    if (typeof data !== 'object' || data === null) {
+      logDeduplicator.warn('HypeDexerCompletedTradesWSClient: non-object ws message dropped', {
+        type: typeof data,
+      });
+      return;
+    }
+
     try {
       const event = data as { type?: string };
 
