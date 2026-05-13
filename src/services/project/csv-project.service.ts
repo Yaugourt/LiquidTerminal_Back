@@ -5,6 +5,9 @@ import { CategoryService } from './category.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { ProjectError } from '../../errors/project.errors';
 import { ProjectCsvRow, CsvProjectProcessingResult } from '../../types/csv-project.types';
+import { assertSafeUploadPath, UnsafePathError } from '../../utils/safe-path';
+
+const CSV_PROJECTS_UPLOAD_DIR = 'uploads/csv-projects';
 
 export class CsvProjectService {
   private projectService: ProjectService;
@@ -27,9 +30,23 @@ export class CsvProjectService {
       createdCategories: []
     };
 
+    let safePath: string;
     try {
-      // Lire le fichier CSV
-      const fileContent = fs.readFileSync(filePath, 'utf-8');
+      safePath = assertSafeUploadPath(filePath, CSV_PROJECTS_UPLOAD_DIR);
+    } catch (err) {
+      if (err instanceof UnsafePathError) {
+        logDeduplicator.warn('Refused to process CSV with unsafe path', {
+          filePath,
+          reason: err.message,
+        });
+        throw new ProjectError(err.message, 400, 'CSV_PATH_UNSAFE');
+      }
+      throw err;
+    }
+
+    try {
+      // Lire le fichier CSV (chemin déjà validé)
+      const fileContent = fs.readFileSync(safePath, 'utf-8');
       
       logDeduplicator.info('Starting CSV project import', {
         filePath,

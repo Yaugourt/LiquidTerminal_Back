@@ -99,37 +99,19 @@ export class AuthService {
   public async verifyToken(token: string): Promise<PrivyPayload> {
     try {
       if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
-        logDeduplicator.error('Invalid token format', { 
-          tokenLength: token?.length,
+        logDeduplicator.error('Invalid token format', {
           tokenType: typeof token,
-          tokenParts: token?.split('.').length 
         });
         throw new TokenValidationError("Invalid token format");
       }
 
-      logDeduplicator.info('Verifying token', { 
-        tokenLength: token.length,
-        tokenPrefix: token.substring(0, 20) + '...'
-      });
-
       const decodedHeader = JSON.parse(Buffer.from(token.split(".")[0], "base64").toString());
-      logDeduplicator.info('Token header decoded', { 
-        kid: decodedHeader.kid,
-        alg: decodedHeader.alg,
-        typ: decodedHeader.typ
-      });
-      
       const signingKey = await this.getSigningKey(decodedHeader);
 
       const jose = await this.loadJose();
       const { payload } = await jose.jwtVerify(token, signingKey, {
         issuer: "privy.io",
         audience: [process.env.NEXT_PUBLIC_PRIVY_AUDIENCE!, "https://auth.privy.io"],
-      });
-
-      logDeduplicator.info('Token verified successfully', {
-        sub: payload.sub,
-        iss: payload.iss
       });
 
       return payload as PrivyPayload;

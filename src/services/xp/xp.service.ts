@@ -1,12 +1,12 @@
-import { XpActionType, User, DailyTaskType, WeeklyChallengeType } from '@prisma/client';
+import { XpActionType, DailyTaskType, WeeklyChallengeType, Prisma } from '@prisma/client';
 import { xpRepository } from '../../repositories/xp.repository';
 import { userRepository } from '../../repositories/user.repository';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { XpDailyCapExceededError, XpUserNotFoundError } from '../../errors/xp.errors';
 import {
   XP_REWARDS,
   calculateLevel,
   calculateLevelProgress,
-  ONE_TIME_ACTIONS,
   DAILY_ACTIONS,
   STREAK_MILESTONES,
   DAILY_CAPS,
@@ -42,16 +42,8 @@ export class XpService {
     const { userId, actionType, referenceId, description, customXpAmount } = input;
 
     try {
-      // Vérifier si c'est une action unique déjà effectuée
-      if (ONE_TIME_ACTIONS.includes(actionType)) {
-        const exists = await xpRepository.transactionExists(userId, actionType, referenceId);
-        if (exists) {
-          logDeduplicator.info('XP action already granted (one-time)', { userId, actionType });
-          return 0;
-        }
-      }
-
-      // Vérifier si c'est une action quotidienne déjà effectuée aujourd'hui
+      // Vérifier si c'est une action quotidienne déjà effectuée aujourd'hui.
+      // (Same-day dedup; the daily cap below provides the harder anti-farm guarantee.)
       if (DAILY_ACTIONS.includes(actionType)) {
         const hasDone = await xpRepository.hasDailyAction(userId, actionType);
         if (hasDone) {
@@ -60,17 +52,21 @@ export class XpService {
         }
       }
 
-      // Vérifier le cap journalier (anti-farm)
+      // Cap journalier atomique : la méthode incrémente le compteur dans une
+      // transaction Prisma et lève `XpDailyCapExceededError` (qui force le
+      // rollback) si la nouvelle valeur dépasse le cap. Élimine la fenêtre de
+      // race entre check et increment qui permettait le double-grant.
       const dailyCap = DAILY_CAPS[actionType];
       if (dailyCap !== undefined) {
-        const today = new Date();
-        const currentCount = await xpRepository.getDailyActionCount(userId, actionType, today);
-        if (currentCount >= dailyCap) {
-          logDeduplicator.info('Daily cap reached for action', { userId, actionType, cap: dailyCap, currentCount });
-          return 0;
+        try {
+          await xpRepository.tryIncrementDailyActionCount(userId, actionType, new Date(), dailyCap);
+        } catch (err) {
+          if (err instanceof XpDailyCapExceededError) {
+            logDeduplicator.info('Daily cap reached for action', { userId, actionType, cap: dailyCap });
+            return 0;
+          }
+          throw err;
         }
-        // Incrémenter le compteur après vérification
-        await xpRepository.incrementDailyActionCount(userId, actionType, today);
       }
 
       // Vérifier le cap hebdomadaire
@@ -89,33 +85,37 @@ export class XpService {
         }
       }
 
-      // Vérifier les doublons pour les actions avec référence
-      if (referenceId) {
-        const exists = await xpRepository.transactionExists(userId, actionType, referenceId);
-        if (exists) {
-          logDeduplicator.info('XP action already granted for this reference', {
-            userId, actionType, referenceId
-          });
-          return 0;
-        }
-      }
-
       // Calculer l'XP à attribuer
       const xpAmount = customXpAmount ?? XP_REWARDS[actionType];
 
-      // Créer la transaction XP
-      await xpRepository.createTransaction({
-        userId,
-        actionType,
-        xpAmount,
-        referenceId,
-        description,
-      });
+      // Créer la transaction XP. La dédup ONE_TIME / referenceId est déléguée
+      // à la contrainte `@@unique([userId, actionType, referenceId])` :
+      // Prisma renvoie P2002 si un doublon existe, ce qui nous évite la
+      // race check-then-insert précédente.
+      try {
+        await xpRepository.createTransaction({
+          userId,
+          actionType,
+          xpAmount,
+          referenceId,
+          description,
+        });
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+          logDeduplicator.info('XP action already granted (P2002 dedup)', {
+            userId,
+            actionType,
+            referenceId,
+          });
+          return 0;
+        }
+        throw err;
+      }
 
       // Mettre à jour le total XP et le niveau de l'utilisateur
       const user = await userRepository.findById(userId);
       if (!user) {
-        throw new Error('User not found');
+        throw new XpUserNotFoundError(`User ${userId} not found while granting XP`);
       }
 
       const newTotalXp = user.totalXp + xpAmount;
@@ -215,7 +215,7 @@ export class XpService {
     try {
       const user = await userRepository.findById(userId);
       if (!user) {
-        throw new Error('User not found');
+        throw new XpUserNotFoundError(`User ${userId} not found while handling daily login`);
       }
 
       const now = new Date();
@@ -300,7 +300,7 @@ export class XpService {
     try {
       const userData = await xpRepository.getUserXpData(userId);
       if (!userData) {
-        throw new Error('User not found');
+        throw new XpUserNotFoundError(`User ${userId} not found while fetching XP stats`);
       }
 
       // S'assurer que totalXp est un nombre valide (pas null/undefined)

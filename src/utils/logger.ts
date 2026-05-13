@@ -1,3 +1,9 @@
+// Bootstrap logger module — pino + file rotation + dedup.
+// All `console.*` calls in this file are intentional: they are emitted by the
+// logger's own bootstrap/rotation/fallback paths and cannot route back through
+// `deduplicatedLogger` without creating a circular initialization or recursion.
+// Callers everywhere else must import the default export (deduplicatedLogger).
+
 import pino from 'pino';
 import path from 'path';
 import { mkdir, stat, rename, unlink } from 'fs/promises';

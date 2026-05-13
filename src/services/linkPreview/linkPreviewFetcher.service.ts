@@ -3,13 +3,15 @@ import axios from 'axios';
 import { ExtractedPreviewData } from '../../types/linkPreview.types';
 import { LinkPreviewFetchError, LinkPreviewTimeoutError } from '../../errors/linkPreview.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { assertHostnameNotBlocked, SsrfBlockedError } from '../../utils/ssrf';
 
 export class LinkPreviewFetcherService {
   private static instance: LinkPreviewFetcherService;
-  private readonly REQUEST_TIMEOUT = 30000; // 30 secondes (augmenté de 10s à 30s)
+  private readonly REQUEST_TIMEOUT = 8000; // 8s — long enough for slow blogs, short enough to bound attacker amplification
   private readonly MAX_CONTENT_LENGTH = 1024 * 1024 * 2; // 2MB max
   private readonly MAX_RETRIES = 3; // 3 tentatives
   private readonly RETRY_DELAY = 2000; // 2 secondes entre chaque tentative
+  private readonly MAX_REDIRECTS = 5;
 
   private constructor() {}
 
@@ -62,34 +64,85 @@ export class LinkPreviewFetcherService {
   }
 
   /**
-   * Méthode avec retry pour les requêtes HTTP
+   * Single HTTP hop with SSRF check on the target hostname.
+   * Redirects are handled manually (maxRedirects: 0) so we can re-validate the
+   * destination hostname at every hop — auto-follow would let a server redirect
+   * us to a private/metadata address after the first DNS check.
    */
-  private async fetchWithRetry(url: string): Promise<any> {
-    let lastError: any;
-    
+  private async fetchOneHop(url: string): Promise<{ data: unknown; status: number }> {
+    const urlObj = new URL(url);
+    if (!['http:', 'https:'].includes(urlObj.protocol)) {
+      throw new LinkPreviewFetchError('Invalid protocol');
+    }
+    await assertHostnameNotBlocked(urlObj.hostname);
+
+    return axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; LinkPreviewBot/1.0)',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+      },
+      timeout: this.REQUEST_TIMEOUT,
+      maxRedirects: 0,
+      maxContentLength: this.MAX_CONTENT_LENGTH,
+      // Accept 3xx as success so we can handle redirects ourselves.
+      validateStatus: (s) => (s >= 200 && s < 300) || (s >= 300 && s < 400),
+    });
+  }
+
+  /**
+   * Méthode avec retry pour les requêtes HTTP, avec follow manuel des redirects
+   * et SSRF check à chaque hop.
+   */
+  private async fetchWithRetry(url: string): Promise<{ data: unknown; status: number }> {
+    let lastError: unknown;
+
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       try {
         logDeduplicator.info('Attempting to fetch preview', { url, attempt });
-        
-        const response = await axios.get(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (compatible; LinkPreviewBot/1.0)',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-          },
-          timeout: this.REQUEST_TIMEOUT,
-          maxRedirects: 5,
-          maxContentLength: this.MAX_CONTENT_LENGTH,
-        });
-        
+
+        let currentUrl = url;
+        let response: Awaited<ReturnType<typeof this.fetchOneHop>> | null = null;
+        for (let hop = 0; hop <= this.MAX_REDIRECTS; hop++) {
+          response = await this.fetchOneHop(currentUrl);
+          if (response.status < 300) break;
+          const locationHeader =
+            (response as unknown as { headers?: Record<string, string | undefined> }).headers
+              ?.location;
+          if (!locationHeader) {
+            throw new LinkPreviewFetchError(
+              `HTTP ${response.status} without Location header for ${currentUrl}`,
+            );
+          }
+          // Resolve relative redirects against the current URL.
+          currentUrl = new URL(locationHeader, currentUrl).toString();
+          if (hop === this.MAX_REDIRECTS) {
+            throw new LinkPreviewFetchError(`Too many redirects starting at ${url}`);
+          }
+        }
+        if (!response) {
+          throw new LinkPreviewFetchError(`No response for ${url}`);
+        }
+
         logDeduplicator.info('Preview fetch successful', { url, attempt });
         return response;
-        
       } catch (error) {
         lastError = error;
-        logDeduplicator.warn('Preview fetch attempt failed', { url, attempt, error: error instanceof Error ? error.message : String(error) });
-        
+        // SSRF blocks are permanent — never retry them.
+        if (error instanceof SsrfBlockedError) {
+          logDeduplicator.warn('Preview fetch blocked by SSRF guard', {
+            url,
+            reason: error.message,
+          });
+          throw new LinkPreviewFetchError(error.message);
+        }
+        logDeduplicator.warn('Preview fetch attempt failed', {
+          url,
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+
         if (!this.isRetryablePreviewError(error)) {
           throw lastError;
         }
@@ -98,7 +151,7 @@ export class LinkPreviewFetcherService {
         }
       }
     }
-    
+
     throw lastError;
   }
 
@@ -116,7 +169,12 @@ export class LinkPreviewFetcherService {
       // Faire la requête HTTP avec retry
       const response = await this.fetchWithRetry(url);
 
-      const html = response.data;
+      const html =
+        typeof response.data === 'string'
+          ? response.data
+          : Buffer.isBuffer(response.data)
+            ? response.data.toString('utf8')
+            : String(response.data);
       const $ = cheerio.load(html);
 
       // Extraire les données

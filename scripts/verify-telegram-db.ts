@@ -14,6 +14,12 @@ if (!CONNECTION_URL) {
   process.exit(1);
 }
 
+// Optional: a specific Telegram user to probe (subscriptions + last alert).
+// Set PROBE_TELEGRAM_ID="123456789" to enable.
+const PROBE_TELEGRAM_ID = process.env.PROBE_TELEGRAM_ID
+  ? Number(process.env.PROBE_TELEGRAM_ID)
+  : null;
+
 async function main() {
   const client = new Client({ connectionString: CONNECTION_URL });
   await client.connect();
@@ -121,54 +127,57 @@ async function main() {
     `);
 
     const userIdsInLast50 = [...new Set(last50Alerts.rows.map((r) => r.telegram_user_id))];
-    const yaugourtUser = await client.query(
-      `SELECT id, telegram_id, username FROM telegram_users WHERE telegram_id = 1090592141`
-    );
-    const yaugourtId = yaugourtUser.rows[0]?.id ?? null;
+    const probeUser = PROBE_TELEGRAM_ID
+      ? await client.query(
+          `SELECT id, telegram_id, username FROM telegram_users WHERE telegram_id = $1`,
+          [PROBE_TELEGRAM_ID]
+        )
+      : { rows: [] as Array<{ id: number; telegram_id: number; username: string | null }> };
+    const probeId = probeUser.rows[0]?.id ?? null;
 
-    const yaugourtInLast50 = yaugourtId ? userIdsInLast50.includes(yaugourtId) : false;
-    const yaugourtLastAlert = yaugourtId
+    const probeInLast50 = probeId ? userIdsInLast50.includes(probeId) : false;
+    const probeLastAlert = probeId
       ? await client.query(
           `SELECT sent_at, liquidation_id FROM telegram_sent_alerts WHERE telegram_user_id = $1 ORDER BY sent_at DESC LIMIT 1`,
-          [yaugourtId]
+          [probeId]
         )
       : { rows: [] };
 
     findings.alertDistribution = {
       last50Alerts_userIds: userIdsInLast50,
       last50Alerts_count: last50Alerts.rowCount,
-      yaugourt_telegram_id: 1090592141,
-      yaugourt_db_id: yaugourtId,
-      yaugourt_username: yaugourtUser.rows[0]?.username ?? null,
-      yaugourt_in_last_50_alerts: yaugourtInLast50,
-      yaugourt_last_alert_sent_at: yaugourtLastAlert.rows[0]?.sent_at ?? null,
-      yaugourt_last_alert_liquidation_id: yaugourtLastAlert.rows[0]?.liquidation_id ?? null,
+      probe_telegram_id: PROBE_TELEGRAM_ID,
+      probe_db_id: probeId,
+      probe_username: probeUser.rows[0]?.username ?? null,
+      probe_in_last_50_alerts: probeInLast50,
+      probe_last_alert_sent_at: probeLastAlert.rows[0]?.sent_at ?? null,
+      probe_last_alert_liquidation_id: probeLastAlert.rows[0]?.liquidation_id ?? null,
     };
 
-    // 4. Active subscriptions for Yaugourt
-    const yaugourtSubs = yaugourtId
+    // 4. Active subscriptions for the probed user
+    const probeSubs = probeId
       ? await client.query(
           `SELECT id, name, is_active, subscription_type, filter_coins, filter_min_usd, filter_wallets, use_linked_wallets, created_at
            FROM telegram_subscriptions
            WHERE telegram_user_id = $1
            ORDER BY created_at`,
-          [yaugourtId]
+          [probeId]
         )
       : { rows: [] };
 
-    const yaugourtWalletSubs = yaugourtId
+    const probeWalletSubs = probeId
       ? await client.query(
           `SELECT id, name, is_active, wallet_addresses, use_linked_wallets, event_types, min_amount_usd, created_at
            FROM telegram_wallet_subscriptions
            WHERE telegram_user_id = $1
            ORDER BY created_at`,
-          [yaugourtId]
+          [probeId]
         )
       : { rows: [] };
 
-    findings.yaugourtSubscriptions = {
-      liquidation_subscriptions: yaugourtSubs.rows,
-      wallet_subscriptions: yaugourtWalletSubs.rows,
+    findings.probeSubscriptions = {
+      liquidation_subscriptions: probeSubs.rows,
+      wallet_subscriptions: probeWalletSubs.rows,
     };
 
     // 5. Summary
@@ -190,9 +199,9 @@ async function main() {
         telegram_wallet_sent_alerts: orphanedWalletAlerts.rowCount,
       },
       alerts_in_correct_tables: true,
-      yaugourt_exists: !!yaugourtId,
-      yaugourt_has_subscriptions:
-        yaugourtSubs.rows.length > 0 || yaugourtWalletSubs.rows.length > 0,
+      probe_exists: !!probeId,
+      probe_has_subscriptions:
+        probeSubs.rows.length > 0 || probeWalletSubs.rows.length > 0,
     };
   } finally {
     await client.end();

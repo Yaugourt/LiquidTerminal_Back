@@ -67,13 +67,11 @@ router.post("/bulk-add", validatePrivyToken, validateBulkAddWallet, (async (req:
       body: req.body
     });
 
-    if (error instanceof WalletAlreadyExistsError ||
-        error instanceof UserNotFoundError ||
-        error instanceof WalletError) {
-      return res.status((error as any).statusCode || 400).json({
+    if (error instanceof WalletError) {
+      return res.status(error.statusCode || 400).json({
         success: false,
-        error: (error as any).message,
-        code: (error as any).code
+        error: error.message,
+        code: error.code,
       });
     }
 
@@ -121,12 +119,11 @@ router.post("/bulk-delete", validatePrivyToken, validateBulkDeleteWallet, (async
       body: req.body
     });
 
-    if (error instanceof UserNotFoundError ||
-        error instanceof WalletError) {
-      return res.status((error as any).statusCode || 400).json({
+    if (error instanceof WalletError) {
+      return res.status(error.statusCode || 400).json({
         success: false,
-        error: (error as any).message,
-        code: (error as any).code
+        error: error.message,
+        code: error.code,
       });
     }
 
@@ -241,16 +238,15 @@ router.post("/", validatePrivyToken, validateCreateWallet, (async (req: Request,
   } catch (error) {
     logDeduplicator.error('Error adding wallet:', { error: error instanceof Error ? error.message : String(error), body: req.body });
     
-    if (error instanceof WalletAlreadyExistsError ||
-        error instanceof UserNotFoundError) {
-      return res.status((error as any).statusCode).json({
+    if (error instanceof WalletError) {
+      return res.status(error.statusCode).json({
         success: false,
-        error: (error as any).message,
-        code: (error as any).code
+        error: error.message,
+        code: error.code,
       });
     }
 
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: "Erreur interne du serveur.",
       code: "INTERNAL_SERVER_ERROR"

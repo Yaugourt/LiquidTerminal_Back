@@ -1,6 +1,7 @@
 import { PrismaClient, XpActionType, XpTransaction, User, DailyTaskType, WeeklyChallengeType, DailyTaskProgress, WeeklyChallenge, DailyActionCount } from '@prisma/client';
 import { prisma } from '../core/prisma.service';
 import { WEEKLY_CHALLENGES_CONFIG } from '../constants/xp.constants';
+import { XpDailyCapExceededError } from '../errors/xp.errors';
 
 export class XpRepository {
     private prismaClient: PrismaClient | Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'> = prisma;
@@ -225,28 +226,35 @@ export class XpRepository {
     }
 
     /**
-     * Incrémente le compteur d'actions du jour
+     * Atomic increment-and-check: increments the daily counter and throws
+     * `XpDailyCapExceededError` (which rolls the increment back via $transaction)
+     * if the resulting count exceeds `cap`. Replaces the previous read-then-write
+     * pattern in xp.service which was vulnerable to concurrent double-grants.
      */
-    async incrementDailyActionCount(userId: number, actionType: XpActionType, date: Date): Promise<DailyActionCount> {
+    async tryIncrementDailyActionCount(
+        userId: number,
+        actionType: XpActionType,
+        date: Date,
+        cap: number,
+    ): Promise<DailyActionCount> {
         const dateOnly = new Date(date.toISOString().split('T')[0]);
 
-        return this.prismaClient.dailyActionCount.upsert({
-            where: {
-                userId_actionType_date: {
-                    userId,
-                    actionType,
-                    date: dateOnly,
+        return prisma.$transaction(async (tx) => {
+            const record = await tx.dailyActionCount.upsert({
+                where: {
+                    userId_actionType_date: {
+                        userId,
+                        actionType,
+                        date: dateOnly,
+                    },
                 },
-            },
-            update: {
-                count: { increment: 1 },
-            },
-            create: {
-                userId,
-                actionType,
-                date: dateOnly,
-                count: 1,
-            },
+                update: { count: { increment: 1 } },
+                create: { userId, actionType, date: dateOnly, count: 1 },
+            });
+            if (record.count > cap) {
+                throw new XpDailyCapExceededError();
+            }
+            return record;
         });
     }
 

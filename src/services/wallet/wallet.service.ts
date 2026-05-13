@@ -8,11 +8,13 @@ import {
   WalletQueryParams,
   UserWalletResponse 
 } from '../../types/wallet.types';
-import { 
-  WalletNotFoundError, 
+import {
+  WalletNotFoundError,
   WalletAlreadyExistsError,
   WalletValidationError,
-  UserNotFoundError
+  UserNotFoundError,
+  WalletListNotFoundError,
+  WalletListAccessDeniedError,
 } from '../../errors/wallet.errors';
 import { 
   walletCreateSchema, 
@@ -366,15 +368,11 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           });
 
           if (!walletList) {
-            const error = new WalletValidationError('Wallet list not found');
-            (error as any).statusCode = 404;
-            throw error;
+            throw new WalletListNotFoundError();
           }
 
           if (walletList.userId !== user.id) {
-            const error = new WalletValidationError('Access denied to this wallet list');
-            (error as any).statusCode = 403;
-            throw error;
+            throw new WalletListAccessDeniedError();
           }
         }
 

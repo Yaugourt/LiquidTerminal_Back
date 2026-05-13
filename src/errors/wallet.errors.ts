@@ -42,4 +42,18 @@ export class WalletLimitExceededError extends WalletError {
     super(message, 400, 'WALLET_LIMIT_EXCEEDED');
     this.name = 'WalletLimitExceededError';
   }
-} 
+}
+
+export class WalletListNotFoundError extends WalletError {
+  constructor(message: string = 'Wallet list not found') {
+    super(message, 404, 'WALLET_LIST_NOT_FOUND');
+    this.name = 'WalletListNotFoundError';
+  }
+}
+
+export class WalletListAccessDeniedError extends WalletError {
+  constructor(message: string = 'Access denied to this wallet list') {
+    super(message, 403, 'WALLET_LIST_ACCESS_DENIED');
+    this.name = 'WalletListAccessDeniedError';
+  }
+}

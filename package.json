@@ -1,8 +1,8 @@
 {
-  "name": "hyperinsight_back",
+  "name": "liquidterminal-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Production-grade REST API for the HyperLiquid ecosystem: aggregates real-time market data, manages user portfolios, and powers educational + gamification features.",
+  "main": "dist/app.js",
   "scripts": {
     "start": "node dist/app.js",
     "start:dev": "tsx watch src/app.ts",
@@ -39,9 +39,28 @@
     "hypedexer:inventory": "tsx scripts/hypedexer-openapi-inventory.ts",
     "hypedexer:required-query": "tsx scripts/hypedexer-openapi-required-query.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "hyperliquid",
+    "trading",
+    "api",
+    "rest",
+    "express",
+    "typescript",
+    "prisma",
+    "redis",
+    "defi",
+    "liquidterminal"
+  ],
+  "author": "Liquid Terminal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yaugourt/LiquidTerminal_Back.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Yaugourt/LiquidTerminal_Back/issues"
+  },
+  "homepage": "https://liquidterminal.xyz",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1024.0",
     "@aws-sdk/s3-request-presigner": "^3.1024.0",

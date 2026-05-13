@@ -4,6 +4,9 @@ import { EducationalResourceService } from './educational-resource.service';
 import { EducationalCategoryService } from './educational-category.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { EducationalError } from '../../errors/educational.errors';
+import { assertSafeUploadPath, UnsafePathError } from '../../utils/safe-path';
+
+const CSV_RESOURCES_UPLOAD_DIR = 'uploads/csv-resources';
 
 interface CsvRow {
   Link?: string;
@@ -47,9 +50,23 @@ export class CsvResourceService {
       createdCategories: []
     };
 
+    let safePath: string;
     try {
-      // Lire le fichier CSV
-      const fileContent = fs.readFileSync(filePath, 'utf-8');
+      safePath = assertSafeUploadPath(filePath, CSV_RESOURCES_UPLOAD_DIR);
+    } catch (err) {
+      if (err instanceof UnsafePathError) {
+        logDeduplicator.warn('Refused to process CSV with unsafe path', {
+          filePath,
+          reason: err.message,
+        });
+        throw new EducationalError(err.message, 400, 'CSV_PATH_UNSAFE');
+      }
+      throw err;
+    }
+
+    try {
+      // Lire le fichier CSV (chemin déjà validé)
+      const fileContent = fs.readFileSync(safePath, 'utf-8');
 
       // Parser le CSV
       const records = parse(fileContent, {
