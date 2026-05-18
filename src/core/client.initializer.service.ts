@@ -25,6 +25,7 @@ import { LiquidationsBackfillService } from '../services/liquidations/liquidatio
 import { TelegramWalletDispatcherService } from '../services/telegram/telegram.wallet-dispatcher.service';
 import { TelegramLiquidationDispatcherService } from '../services/telegram/telegram.liquidation-dispatcher.service';
 import { TelegramDocUpdateDispatcherService } from '../services/telegram/telegram.doc-update-dispatcher.service';
+import { TelegramFillAlertDispatcherService } from '../services/telegram/telegram.fill-alert-dispatcher.service';
 import { BotAnnouncementService } from '../services/telegram/bot-announcement.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
@@ -203,6 +204,11 @@ export class ClientInitializerService {
       this.clients.set('docUpdateDispatcher', docUpdateDispatcher);
       logDeduplicator.info('Telegram Doc Update Dispatcher service initialized successfully');
 
+      // Initialiser le dispatcher fill alerts pour le bot Telegram
+      const fillAlertDispatcher = TelegramFillAlertDispatcherService.getInstance();
+      this.clients.set('fillAlertDispatcher', fillAlertDispatcher);
+      logDeduplicator.info('Telegram Fill Alert Dispatcher service initialized successfully');
+
       const botAnnouncementService = BotAnnouncementService.getInstance();
       this.clients.set('botAnnouncementService', botAnnouncementService);
       logDeduplicator.info('Bot Announcement service initialized successfully');
@@ -327,6 +333,17 @@ export class ClientInitializerService {
       }
     }
 
+    // 5e. Start Telegram Fill Alert Dispatcher (connects to HypeDexer allFills + fills_spot)
+    const fillAlertDispatcher = this.clients.get('fillAlertDispatcher');
+    if (fillAlertDispatcher) {
+      try {
+        fillAlertDispatcher.start();
+        logDeduplicator.info('Started Telegram Fill Alert Dispatcher Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Telegram Fill Alert Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     // 6. Start Telegram Liquidation Dispatcher (subscribes to LiquidationsWebSocketService)
     const liquidationDispatcher = this.clients.get('liquidationDispatcher');
     if (liquidationDispatcher) {
@@ -404,6 +421,17 @@ export class ClientInitializerService {
         logDeduplicator.info('Telegram Doc Update Dispatcher Service stopped');
       } catch (error) {
         logDeduplicator.error('Error stopping Telegram Doc Update Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    // Stop fill alert dispatcher
+    const fillAlertDispatcher = this.clients.get('fillAlertDispatcher');
+    if (fillAlertDispatcher) {
+      try {
+        fillAlertDispatcher.stop();
+        logDeduplicator.info('Telegram Fill Alert Dispatcher Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Telegram Fill Alert Dispatcher Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 

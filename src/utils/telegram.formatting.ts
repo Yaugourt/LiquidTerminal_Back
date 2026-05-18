@@ -1,4 +1,5 @@
 import { AggregatedLiquidation } from '../types/liquidations.types';
+import { AggregatedFill } from '../types/fill-alerts.types';
 
 /**
  * Format a dollar amount in a human-readable way
@@ -83,6 +84,91 @@ ${trendEmoji} Mark Price: ${priceFormatted}
 <b>👛 Liquidated Wallet</b>
 <a href="${liquidTerminalAddress}">Liquid Terminal</a> • <a href="${hypurrscanAddress}">Hypurrscan</a>
 <code>${escapeHtml(liq.liquidated_user)}</code>
+
+━━━━━━━━━━━━━━━━━━━━
+<i>Data by <a href="https://app.hypedexer.com/">HypeDexer</a> (Enigma Validator)</i>
+<a href="https://x.com/liquidterminal">𝕏</a> • <a href="https://liquidterminal.xyz/">Website</a>
+`.trim();
+}
+
+/**
+ * Format a token price with adaptive precision (small prices keep more decimals)
+ */
+function formatTokenPrice(price: number): string {
+  if (!Number.isFinite(price)) return '$0';
+  if (price >= 1) {
+    return `$${price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+  if (price >= 0.01) return `$${price.toFixed(4)}`;
+  return `$${price.toPrecision(4)}`;
+}
+
+/**
+ * Shorten an Ethereum address for display (e.g. 0x1234…abcd)
+ */
+function shortenAddress(address: string): string {
+  if (address.length <= 12) return address;
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
+
+/**
+ * Format a fill timestamp (perp = epoch ms number, spot = ISO-8601 string)
+ * to a compact `YYYY-MM-DD HH:MM` UTC string.
+ */
+function formatFillTime(time: string | number): string {
+  const iso = typeof time === 'number' ? new Date(time).toISOString() : time;
+  return iso.slice(0, 16).replace('T', ' ');
+}
+
+/**
+ * Format a fill size with adaptive precision — small sizes keep more decimals
+ * so sub-1 amounts aren't rounded away (e.g. 0.0034 instead of 0.003).
+ */
+function formatSize(sz: number): string {
+  if (!Number.isFinite(sz)) return '0';
+  const maximumFractionDigits = Math.abs(sz) >= 1 ? 4 : 8;
+  return sz.toLocaleString('en-US', { maximumFractionDigits });
+}
+
+/**
+ * Format a Fill alert message for Telegram (HTML parse mode).
+ * Driven by HypeDexer `allFills` (perp) and `fills_spot` (spot) — an executed order.
+ */
+export function formatFillAlert(fill: AggregatedFill, subscriptionName: string): string {
+  const isBuy = fill.side === 'B';
+  const sideEmoji = isBuy ? '🟢' : '🔴';
+  const sideLabel = isBuy ? 'BUY' : 'SELL';
+  const sourceTag = fill.source === 'perp' ? 'PERP' : 'SPOT';
+  const twapTag = fill.twapId != null ? ' <code>TWAP</code>' : '';
+
+  const liquidTerminalTx = `https://liquidterminal.xyz/explorer/transaction/${fill.hash}`;
+  const liquidTerminalAddress = `https://liquidterminal.xyz/explorer/address/${fill.wallet}`;
+  const hypurrscanTx = `https://hypurrscan.io/tx/${fill.hash}`;
+  const hypurrscanAddress = `https://hypurrscan.io/address/${fill.wallet}`;
+
+  const dirLine =
+    fill.source === 'perp' && fill.dir ? `\n🧭 Direction: ${escapeHtml(fill.dir)}` : '';
+
+  // The order may have been filled in several fills — show the count + flag VWAP.
+  const isAggregated = fill.fillCount > 1;
+  const priceLabel = isAggregated ? ' <i>(VWAP)</i>' : '';
+  const fillCountLine = isAggregated ? `\n🧩 Filled in ${fill.fillCount} fills` : '';
+
+  return `
+💸 <b>FILL ALERT</b> <code>${sourceTag}</code>${twapTag}
+🔔 <i>${escapeHtml(subscriptionName)}</i>
+
+${sideEmoji} <b>${escapeHtml(fill.coin)}</b> ${sideLabel}
+💵 Notional: ${formatAmount(fill.notionalUsd)}
+📦 Size: ${formatSize(fill.sz)} @ ${formatTokenPrice(fill.px)}${priceLabel}${fillCountLine}${dirLine}
+🕐 ${formatFillTime(fill.time)} UTC
+
+<b>📝 Transaction</b>
+<a href="${liquidTerminalTx}">Liquid Terminal</a> • <a href="${hypurrscanTx}">Hypurrscan</a>
+<code>${escapeHtml(fill.hash)}</code>
+
+<b>👛 Wallet</b> <code>${escapeHtml(shortenAddress(fill.wallet))}</code>
+<a href="${liquidTerminalAddress}">Liquid Terminal</a> • <a href="${hypurrscanAddress}">Hypurrscan</a>
 
 ━━━━━━━━━━━━━━━━━━━━
 <i>Data by <a href="https://app.hypedexer.com/">HypeDexer</a> (Enigma Validator)</i>

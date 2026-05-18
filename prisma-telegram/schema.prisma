@@ -30,6 +30,12 @@ model TelegramUser {
   walletSubscriptions TelegramWalletSubscription[]
   hip4SentAlerts      TelegramHip4SentAlert[]
 
+  whaleTradeSubscriptions  TelegramWhaleTradeSubscription[]
+  spotFillSubscriptions    TelegramSpotFillSubscription[]
+  marketTradeSubscriptions TelegramMarketTradeSubscription[]
+  priceAlerts              TelegramPriceAlert[]
+  fillSubscriptions        TelegramFillSubscription[]
+
   /// Set when the one-time HIP-4 feature intro was sent via /start (Telegram bot).
   hip4IntroShownAt DateTime? @map("hip4_intro_shown_at") @db.Timestamp(6)
 
@@ -129,4 +135,179 @@ model TelegramHip4SentAlert {
   @@index([sentAt])
   @@index([telegramUserId, sentAt])
   @@map("telegram_hip4_sent_alerts")
+}
+
+// ==================== MARKET ALERTS (HypeDexer WS) ====================
+
+enum MarketTradeMode {
+  SINGLE
+  SPIKE
+}
+
+enum PriceAlertDirection {
+  ABOVE
+  BELOW
+}
+
+/// Whale Trade alerts — driven by HypeDexer `completed_trades` WS, market-wide (no wallet filter).
+model TelegramWhaleTradeSubscription {
+  id             String       @id @default(cuid())
+  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String       @map("telegram_user_id")
+  name           String       @db.VarChar(100)
+  isActive       Boolean      @default(true) @map("is_active")
+  filterCoins    String[]     @default([]) @map("filter_coins")
+  minVolumeUsd   Decimal      @default(0) @map("min_volume_usd") @db.Decimal(20, 2)
+  minPnlUsd      Decimal      @default(0) @map("min_pnl_usd") @db.Decimal(20, 2)
+  /// 'long' | 'short' | null (both)
+  direction      String?      @db.VarChar(10)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  sentAlerts TelegramWhaleTradeSentAlert[]
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@map("telegram_whale_trade_subscriptions")
+}
+
+model TelegramWhaleTradeSentAlert {
+  id             String                         @id @default(cuid())
+  subscription   TelegramWhaleTradeSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionId String                         @map("subscription_id")
+  eventId        String                         @map("event_id") @db.VarChar(255)
+  sentAt         DateTime                       @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([subscriptionId, eventId])
+  @@index([eventId])
+  @@index([sentAt])
+  @@map("telegram_whale_trade_sent_alerts")
+}
+
+/// Whale Spot alerts — driven by HypeDexer `fills_spot` WS.
+model TelegramSpotFillSubscription {
+  id             String       @id @default(cuid())
+  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String       @map("telegram_user_id")
+  name           String       @db.VarChar(100)
+  isActive       Boolean      @default(true) @map("is_active")
+  filterCoins    String[]     @default([]) @map("filter_coins")
+  minUsd         Decimal      @default(0) @map("min_usd") @db.Decimal(20, 2)
+  /// 'buy' | 'sell' | null (both)
+  side           String?      @db.VarChar(10)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  sentAlerts TelegramSpotFillSentAlert[]
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@map("telegram_spot_fill_subscriptions")
+}
+
+model TelegramSpotFillSentAlert {
+  id             String                       @id @default(cuid())
+  subscription   TelegramSpotFillSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionId String                       @map("subscription_id")
+  eventId        String                       @map("event_id") @db.VarChar(255)
+  sentAt         DateTime                     @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([subscriptionId, eventId])
+  @@index([eventId])
+  @@index([sentAt])
+  @@map("telegram_spot_fill_sent_alerts")
+}
+
+/// Market Trade alerts — driven by HypeDexer live-data `trades` WS.
+/// SINGLE = one trade exceeds minNotionalUsd. SPIKE = cumulative volume over windowSeconds exceeds spikeVolumeUsd.
+model TelegramMarketTradeSubscription {
+  id             String          @id @default(cuid())
+  telegramUser   TelegramUser    @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String          @map("telegram_user_id")
+  name           String          @db.VarChar(100)
+  isActive       Boolean         @default(true) @map("is_active")
+  mode           MarketTradeMode @default(SINGLE)
+  filterCoins    String[]        @default([]) @map("filter_coins")
+  /// 'A' | 'B' | null (both) — A = sell aggressor, B = buy aggressor
+  side           String?         @db.VarChar(10)
+  minNotionalUsd Decimal         @default(0) @map("min_notional_usd") @db.Decimal(20, 2)
+  windowSeconds  Int             @default(60) @map("window_seconds")
+  spikeVolumeUsd Decimal         @default(0) @map("spike_volume_usd") @db.Decimal(20, 2)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  sentAlerts TelegramMarketTradeSentAlert[]
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@map("telegram_market_trade_subscriptions")
+}
+
+model TelegramMarketTradeSentAlert {
+  id             String                          @id @default(cuid())
+  subscription   TelegramMarketTradeSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionId String                          @map("subscription_id")
+  eventId        String                          @map("event_id") @db.VarChar(255)
+  sentAt         DateTime                        @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([subscriptionId, eventId])
+  @@index([eventId])
+  @@index([sentAt])
+  @@map("telegram_market_trade_sent_alerts")
+}
+
+/// Price alerts — driven by HypeDexer live-data `allMids` WS. One-shot threshold crossing.
+model TelegramPriceAlert {
+  id             String              @id @default(cuid())
+  telegramUser   TelegramUser        @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String              @map("telegram_user_id")
+  coin           String              @db.VarChar(40)
+  targetPrice    Decimal             @map("target_price") @db.Decimal(30, 10)
+  direction      PriceAlertDirection
+  isActive       Boolean             @default(true) @map("is_active")
+  oneShot        Boolean             @default(true) @map("one_shot")
+  triggeredAt    DateTime?           @map("triggered_at") @db.Timestamp(6)
+  createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@index([coin])
+  @@map("telegram_price_alerts")
+}
+
+// ==================== FILL ALERTS (HypeDexer allFills + fills_spot) ====================
+
+/// Fill alerts — notify on executed orders (perp `allFills` + spot `fills_spot`),
+/// filtered by amount (minUsd), wallet(s) and/or token(s). At least one filter must be set.
+model TelegramFillSubscription {
+  id             String       @id @default(cuid())
+  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId String       @map("telegram_user_id")
+  name           String       @db.VarChar(100)
+  isActive       Boolean      @default(true) @map("is_active")
+  filterCoins    String[]     @default([]) @map("filter_coins")
+  filterWallets  String[]     @default([]) @map("filter_wallets")
+  minUsd         Decimal      @default(0) @map("min_usd") @db.Decimal(20, 2)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  sentAlerts TelegramFillSentAlert[]
+
+  @@index([telegramUserId])
+  @@index([isActive])
+  @@map("telegram_fill_subscriptions")
+}
+
+model TelegramFillSentAlert {
+  id             String                   @id @default(cuid())
+  subscription   TelegramFillSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionId String                   @map("subscription_id")
+  eventId        String                   @map("event_id") @db.VarChar(255)
+  sentAt         DateTime                 @default(now()) @map("sent_at") @db.Timestamp(6)
+
+  @@unique([subscriptionId, eventId])
+  @@index([eventId])
+  @@index([sentAt])
+  @@map("telegram_fill_sent_alerts")
 }

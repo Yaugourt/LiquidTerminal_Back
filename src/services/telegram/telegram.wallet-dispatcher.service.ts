@@ -4,6 +4,14 @@ import { HypeDexerCompletedTradesWSClient } from '../../clients/hypedexer/websoc
 import { TelegramWalletSubscriptionService } from './telegram.wallet-subscription.service';
 import { InternalWebSocketServer } from '../../websocket/ws.server';
 import { CompletedTrade } from '../../types/wallet-events.types';
+import {
+  markAlertSent,
+  RecentEventCache,
+  SerialQueue,
+  startSentAlertPurge,
+} from '../../utils/telegram.alert-dedup';
+
+const CONTEXT = 'TelegramWalletDispatcherService';
 
 /**
  * Shape of an active subscription returned by getActiveSubscriptions()
@@ -41,6 +49,12 @@ export class TelegramWalletDispatcherService {
   private cacheLoadedAt: number = 0;
   private static readonly CACHE_TTL_MS = 30_000;
 
+  // In-memory dedup: absorbs WS re-flushes/reconnects so the DB is hit once per alert
+  private readonly recentAlerts = new RecentEventCache();
+  // Serializes dispatch batches so they never overlap and exhaust the DB pool
+  private readonly queue = new SerialQueue(CONTEXT);
+  private purgeTimer: NodeJS.Timeout | null = null;
+
   private constructor() {}
 
   public static getInstance(): TelegramWalletDispatcherService {
@@ -57,13 +71,28 @@ export class TelegramWalletDispatcherService {
     this.wsClient = HypeDexerCompletedTradesWSClient.getInstance();
     this.wsClient.start();
 
-    this.unsubscribeCallback = this.wsClient.onCompletedTrade(async (trades) => {
-      for (const trade of trades) {
-        await this.dispatch(trade);
-      }
+    // Enqueue each batch onto a serial chain — batches never run concurrently,
+    // so the DB connection pool can't be exhausted by overlapping dispatches.
+    this.unsubscribeCallback = this.wsClient.onCompletedTrade((trades) => {
+      this.queue.enqueue(() => this.processBatch(trades));
     });
 
+    this.purgeTimer = startSentAlertPurge(
+      (cutoff) =>
+        prismaTelegram.telegramWalletSentAlert.deleteMany({ where: { sentAt: { lt: cutoff } } }),
+      CONTEXT
+    );
+
     logDeduplicator.info('TelegramWalletDispatcherService: Started');
+  }
+
+  /**
+   * Process one batch of completed trades sequentially.
+   */
+  private async processBatch(trades: CompletedTrade[]): Promise<void> {
+    for (const trade of trades) {
+      await this.dispatch(trade);
+    }
   }
 
   /**
@@ -78,8 +107,13 @@ export class TelegramWalletDispatcherService {
       this.wsClient.stop();
       this.wsClient = null;
     }
+    if (this.purgeTimer) {
+      clearInterval(this.purgeTimer);
+      this.purgeTimer = null;
+    }
     this.subscriptionCache = [];
     this.cacheLoadedAt = 0;
+    this.recentAlerts.clear();
 
     logDeduplicator.info('TelegramWalletDispatcherService: Stopped');
   }
@@ -129,9 +163,20 @@ export class TelegramWalletDispatcherService {
       // Filter by minimum amount
       if (trade.positionValue < sub.minAmountUsd) continue;
 
-      // Deduplication — insert attempt, catch unique constraint violation
-      const alreadySent = await this.markSent(sub.id, trade.tradeId);
-      if (alreadySent) continue;
+      // Deduplicate — in-memory first (no DB hit), then atomic insert.
+      const dedupKey = `${sub.id}|${trade.tradeId}`;
+      if (this.recentAlerts.has(dedupKey)) continue;
+
+      const sentResult = await markAlertSent(
+        () =>
+          prismaTelegram.telegramWalletSentAlert.create({
+            data: { subscriptionId: sub.id, eventId: trade.tradeId },
+          }),
+        CONTEXT
+      );
+      this.recentAlerts.add(dedupKey);
+      // 'duplicate' → already sent, skip. 'new'/'error' → send (fail open on DB error).
+      if (sentResult === 'duplicate') continue;
 
       // Push to bot via internal WebSocket
       try {
@@ -154,19 +199,4 @@ export class TelegramWalletDispatcherService {
     }
   }
 
-  /**
-   * Mark a trade as sent for a subscription.
-   * Uses unique constraint (subscriptionId, eventId) — insert succeeds = not sent yet.
-   * Returns true if already sent (duplicate), false if newly inserted.
-   */
-  private async markSent(subscriptionId: string, eventId: string): Promise<boolean> {
-    try {
-      await prismaTelegram.telegramWalletSentAlert.create({
-        data: { subscriptionId, eventId },
-      });
-      return false; // Successfully inserted — not a duplicate
-    } catch {
-      return true; // P2002 unique constraint violation — already sent
-    }
-  }
 }

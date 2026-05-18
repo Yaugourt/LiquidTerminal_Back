@@ -146,6 +146,7 @@ export type WSInternalSubscriptionType =
   | 'liquidation'
   | 'wallet_event'
   | 'liquidation_alert'
+  | 'fill_alert'
   | 'doc_update_alert'
   | 'bot_announcement';
 
@@ -192,6 +193,7 @@ export type WSEventType =
   | 'liquidation'
   | 'wallet_event'
   | 'liquidation_alert'
+  | 'fill_alert'
   | 'doc_update_alert'
   | 'bot_announcement'
   | 'heartbeat'
@@ -243,6 +245,18 @@ export interface WSLiquidationEvent extends WSServerMessage {
  */
 export interface WSLiquidationAlertEvent extends WSServerMessage {
   type: 'liquidation_alert';
+  data: {
+    telegramId: string;
+    message: string;
+  };
+}
+
+/**
+ * Internal WebSocket fill alert event (sent by TelegramFillAlertDispatcherService)
+ * The bot receives this and calls sendMessage(telegramId, message)
+ */
+export interface WSFillAlertEvent extends WSServerMessage {
+  type: 'fill_alert';
   data: {
     telegramId: string;
     message: string;

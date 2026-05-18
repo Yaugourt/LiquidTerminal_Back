@@ -6,6 +6,14 @@ import { AggregatedLiquidation } from '../../types/liquidations.types';
 import { formatLiquidationAlert } from '../../utils/telegram.formatting';
 import { TelegramAccountNotLinkedError, TelegramUserNotFoundError } from '../../errors/telegram.errors';
 import { TelegramService } from './telegram.service';
+import {
+  markAlertSent,
+  RecentEventCache,
+  SerialQueue,
+  startSentAlertPurge,
+} from '../../utils/telegram.alert-dedup';
+
+const CONTEXT = 'TelegramLiquidationDispatcherService';
 
 /**
  * Shape of an active liquidation subscription
@@ -48,6 +56,12 @@ export class TelegramLiquidationDispatcherService {
   private linkedWalletsCache = new Map<string, { wallets: string[]; fetchedAt: number }>();
   private static readonly LINKED_WALLETS_CACHE_TTL_MS = 60_000;
 
+  // In-memory dedup: absorbs WS re-flushes/reconnects so the DB is hit once per alert
+  private readonly recentAlerts = new RecentEventCache();
+  // Serializes dispatch batches so they never overlap and exhaust the DB pool
+  private readonly queue = new SerialQueue(CONTEXT);
+  private purgeTimer: NodeJS.Timeout | null = null;
+
   private constructor() {}
 
   public static getInstance(): TelegramLiquidationDispatcherService {
@@ -63,13 +77,28 @@ export class TelegramLiquidationDispatcherService {
   public start(): void {
     const wsService = LiquidationsWebSocketService.getInstance();
 
-    this.unsubscribeCallback = wsService.onProcessedLiquidation(async (liquidations) => {
-      for (const liq of liquidations) {
-        await this.dispatch(liq);
-      }
+    // Enqueue each batch onto a serial chain — batches never run concurrently,
+    // so the DB connection pool can't be exhausted by overlapping flushes.
+    this.unsubscribeCallback = wsService.onProcessedLiquidation((liquidations) => {
+      this.queue.enqueue(() => this.processBatch(liquidations));
     });
 
+    this.purgeTimer = startSentAlertPurge(
+      (cutoff) =>
+        prismaTelegram.telegramSentAlert.deleteMany({ where: { sentAt: { lt: cutoff } } }),
+      CONTEXT
+    );
+
     logDeduplicator.info('TelegramLiquidationDispatcherService: Started');
+  }
+
+  /**
+   * Process one batch of liquidations sequentially.
+   */
+  private async processBatch(liquidations: AggregatedLiquidation[]): Promise<void> {
+    for (const liq of liquidations) {
+      await this.dispatch(liq);
+    }
   }
 
   /**
@@ -80,9 +109,14 @@ export class TelegramLiquidationDispatcherService {
       this.unsubscribeCallback();
       this.unsubscribeCallback = null;
     }
+    if (this.purgeTimer) {
+      clearInterval(this.purgeTimer);
+      this.purgeTimer = null;
+    }
     this.subscriptionCache = [];
     this.cacheLoadedAt = 0;
     this.linkedWalletsCache.clear();
+    this.recentAlerts.clear();
 
     logDeduplicator.info('TelegramLiquidationDispatcherService: Stopped');
   }
@@ -142,9 +176,20 @@ export class TelegramLiquidationDispatcherService {
       const matches = await this.matchesFilters(liq, sub);
       if (!matches) continue;
 
-      // Deduplicate — atomic insert, catch P2002 if already sent
-      const alreadySent = await this.markSent(sub.telegramUserId, liquidationId);
-      if (alreadySent) continue;
+      // Deduplicate — in-memory first (no DB hit), then atomic insert.
+      const dedupKey = `${sub.telegramUserId}|${liquidationId}`;
+      if (this.recentAlerts.has(dedupKey)) continue;
+
+      const sentResult = await markAlertSent(
+        () =>
+          prismaTelegram.telegramSentAlert.create({
+            data: { telegramUserId: sub.telegramUserId, liquidationId },
+          }),
+        CONTEXT
+      );
+      this.recentAlerts.add(dedupKey);
+      // 'duplicate' → already sent, skip. 'new'/'error' → send (fail open on DB error).
+      if (sentResult === 'duplicate') continue;
 
       // Format message and broadcast via /ws
       try {
@@ -230,22 +275,6 @@ export class TelegramLiquidationDispatcherService {
       });
       // Return stale cache if available
       return cached?.wallets ?? [];
-    }
-  }
-
-  /**
-   * Mark a liquidation as sent for a subscription.
-   * Uses unique constraint (telegramUserId, liquidationId) — insert succeeds = not sent yet.
-   * Returns true if already sent (duplicate), false if newly inserted.
-   */
-  private async markSent(telegramUserId: string, liquidationId: string): Promise<boolean> {
-    try {
-      await prismaTelegram.telegramSentAlert.create({
-        data: { telegramUserId, liquidationId },
-      });
-      return false; // Successfully inserted — not a duplicate
-    } catch {
-      return true; // P2002 unique constraint violation — already sent
     }
   }
 }

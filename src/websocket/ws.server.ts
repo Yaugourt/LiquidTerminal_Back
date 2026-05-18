@@ -142,6 +142,7 @@ export class InternalWebSocketServer {
       liquidation: 0,
       wallet_event: 0,
       liquidation_alert: 0,
+      fill_alert: 0,
       doc_update_alert: 0,
       bot_announcement: 0,
     };
@@ -287,13 +288,14 @@ export class InternalWebSocketServer {
       (subType !== 'liquidation' &&
         subType !== 'wallet_event' &&
         subType !== 'liquidation_alert' &&
+        subType !== 'fill_alert' &&
         subType !== 'doc_update_alert' &&
         subType !== 'bot_announcement')
     ) {
       this.sendMessage(ws, {
         type: 'error',
         error:
-          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, doc_update_alert, bot_announcement',
+          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -356,13 +358,14 @@ export class InternalWebSocketServer {
       (subType !== 'liquidation' &&
         subType !== 'wallet_event' &&
         subType !== 'liquidation_alert' &&
+        subType !== 'fill_alert' &&
         subType !== 'doc_update_alert' &&
         subType !== 'bot_announcement')
     ) {
       this.sendMessage(ws, {
         type: 'error',
         error:
-          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, doc_update_alert, bot_announcement',
+          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -567,6 +570,43 @@ export class InternalWebSocketServer {
 
     if (sentCount > 0) {
       logDeduplicator.info('InternalWebSocketServer: Broadcast liquidation alert', {
+        telegramId,
+        clientCount: sentCount,
+      });
+    }
+
+    return sentCount;
+  }
+
+  /**
+   * Broadcast a fill alert to all clients subscribed to 'fill_alert'.
+   * The Telegram bot (1 connected client) receives the event and routes it
+   * to the correct Telegram user via telegramId in the payload.
+   */
+  public broadcastFillAlert(telegramId: string, message: string): number {
+    if (!this.wss) return 0;
+
+    const serialized = JSON.stringify({
+      type: 'fill_alert',
+      data: { telegramId, message },
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    let sentCount = 0;
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      const client = this.clients.get(clientId);
+      if (!client) continue;
+
+      const hasSub = client.subscriptions.some((s) => s.type === 'fill_alert');
+      if (!hasSub) continue;
+
+      this.sendRawMessage(ws, serialized);
+      sentCount++;
+    }
+
+    if (sentCount > 0) {
+      logDeduplicator.info('InternalWebSocketServer: Broadcast fill alert', {
         telegramId,
         clientCount: sentCount,
       });
