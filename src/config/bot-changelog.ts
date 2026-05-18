@@ -7,17 +7,20 @@
  *   3. Deploy → BotAnnouncementService broadcasts automatically to all users
  */
 
-export const CURRENT_BOT_VERSION = '1.3.0';
+export const CURRENT_BOT_VERSION = '1.4.0';
 
 export const BOT_ANNOUNCEMENT_MESSAGE = `🆕 <b>Bot Update — v${CURRENT_BOT_VERSION}</b>
 
 Here's what's new:
 
-📚 <b>Hyperliquid Docs alerts</b>
-The bot now monitors the Hyperliquid documentation automatically. Whenever a page is updated, you'll be notified here — no setup needed.
+💸 <b>Fill Alerts</b>
+Get notified the moment an order is executed on Hyperliquid — perp and spot. Filter by minimum size, token, and/or wallet.
 
-🔘 <b>Docs button in menu</b>
-A new <b>📚 Docs</b> button has been added to the main menu. Tap it anytime to get info about the doc monitoring feature.
+⚡ <b>One-tap presets</b>
+Spin up a Fill alert instantly: 🐋 Whale Fills, 📈 BTC/ETH/HYPE, 🎯 Altcoin Fills, 💥 Mega Orders — or set up your own filters.
+
+🧾 <b>Fill Alerts button in menu</b>
+A new <b>🧾 Fill Alerts</b> button has been added to the main menu. Manage your alerts anytime from /status.
 
 ━━━━━━━━━━━━━━━━━━━━
 <a href="https://liquidterminal.xyz/">Liquid Terminal</a> • <a href="https://x.com/liquidterminal">𝕏</a>`.trim();
