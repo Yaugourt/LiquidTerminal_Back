@@ -7,20 +7,23 @@
  *   3. Deploy → BotAnnouncementService broadcasts automatically to all users
  */
 
-export const CURRENT_BOT_VERSION = '1.4.0';
+export const CURRENT_BOT_VERSION = '1.4.1';
 
 export const BOT_ANNOUNCEMENT_MESSAGE = `🆕 <b>Bot Update — v${CURRENT_BOT_VERSION}</b>
 
 Here's what's new:
 
-💸 <b>Fill Alerts</b>
-Get notified the moment an order is executed on Hyperliquid — perp and spot. Filter by minimum size, token, and/or wallet.
+🎛️ <b>Advanced Fill filters</b>
+Fine-tune your Fill alerts with four new filters: <b>Side</b> (Buy/Sell), <b>Source</b> (Perp/Spot), <b>Direction</b> (Open/Close) and <b>Max size</b>.
 
-⚡ <b>One-tap presets</b>
-Spin up a Fill alert instantly: 🐋 Whale Fills, 📈 BTC/ETH/HYPE, 🎯 Altcoin Fills, 💥 Mega Orders — or set up your own filters.
+📉 <b>New preset — Position Closes</b>
+One-tap alert on perp position closes above $50k.
 
-🧾 <b>Fill Alerts button in menu</b>
-A new <b>🧾 Fill Alerts</b> button has been added to the main menu. Manage your alerts anytime from /status.
+💰 <b>Richer alerts</b>
+Fill alerts now show <b>realized PnL</b> on close, the time window when an order is filled in pieces, and a dedicated <b>TWAP</b> block instead of an empty transaction.
+
+🏠 <b>Refreshed main menu</b>
+New welcome message and a compact grid layout — fewer scrolls, faster access.
 
 ━━━━━━━━━━━━━━━━━━━━
 <a href="https://liquidterminal.xyz/">Liquid Terminal</a> • <a href="https://x.com/liquidterminal">𝕏</a>`.trim();

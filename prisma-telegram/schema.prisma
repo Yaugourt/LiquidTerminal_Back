@@ -281,16 +281,24 @@ model TelegramPriceAlert {
 /// Fill alerts — notify on executed orders (perp `allFills` + spot `fills_spot`),
 /// filtered by amount (minUsd), wallet(s) and/or token(s). At least one filter must be set.
 model TelegramFillSubscription {
-  id             String       @id @default(cuid())
-  telegramUser   TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
-  telegramUserId String       @map("telegram_user_id")
-  name           String       @db.VarChar(100)
-  isActive       Boolean      @default(true) @map("is_active")
-  filterCoins    String[]     @default([]) @map("filter_coins")
-  filterWallets  String[]     @default([]) @map("filter_wallets")
-  minUsd         Decimal      @default(0) @map("min_usd") @db.Decimal(20, 2)
-  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
-  updatedAt      DateTime     @updatedAt @map("updated_at")
+  id              String       @id @default(cuid())
+  telegramUser    TelegramUser @relation(fields: [telegramUserId], references: [id], onDelete: Cascade)
+  telegramUserId  String       @map("telegram_user_id")
+  name            String       @db.VarChar(100)
+  isActive        Boolean      @default(true) @map("is_active")
+  filterCoins     String[]     @default([]) @map("filter_coins")
+  filterWallets   String[]     @default([]) @map("filter_wallets")
+  minUsd          Decimal      @default(0) @map("min_usd") @db.Decimal(20, 2)
+  /// 'BUY' | 'SELL' | null (both)
+  filterSide      String?      @map("filter_side") @db.VarChar(10)
+  /// 'PERP' | 'SPOT' | null (both)
+  filterSource    String?      @map("filter_source") @db.VarChar(10)
+  /// 'OPEN' | 'CLOSE' | null (both) — perp only
+  filterDirection String?      @map("filter_direction") @db.VarChar(10)
+  /// null = no cap
+  maxUsd          Decimal?     @map("max_usd") @db.Decimal(30, 8)
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamp(6)
+  updatedAt       DateTime     @updatedAt @map("updated_at")
 
   sentAlerts TelegramFillSentAlert[]
 

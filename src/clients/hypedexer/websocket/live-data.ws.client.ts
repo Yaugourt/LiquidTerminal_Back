@@ -223,6 +223,9 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   private normalizeFill(address: string, raw: HypeDexerFill): NormalizedFill {
     const px = parseFloat(raw.px);
     const sz = parseFloat(raw.sz);
+    // closedPnl is a string in the HypeDexer schema; default to 0 if it parses to NaN.
+    const closedPnlParsed = parseFloat(raw.closedPnl);
+    const closedPnl = Number.isFinite(closedPnlParsed) ? closedPnlParsed : 0;
     return {
       source: 'perp',
       oid: raw.oid,
@@ -236,6 +239,7 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
       hash: raw.hash,
       dir: raw.dir,
       twapId: raw.twapId ?? null,
+      closedPnl,
     };
   }
 

@@ -131,6 +131,27 @@ function formatSize(sz: number): string {
 }
 
 /**
+ * Format a signed PnL value as `+$X` / `-$X` using formatAmount() under the hood
+ * (formatAmount always returns a positive `$X` — we just prepend the sign here).
+ */
+function formatSignedPnl(pnl: number): string {
+  const sign = pnl >= 0 ? '+' : '-';
+  return `${sign}${formatAmount(Math.abs(pnl))}`;
+}
+
+/**
+ * Format a duration in milliseconds as a compact `Xs` or `Xm Ys` string.
+ * Mirrors `formatTimeRange` used by liquidations.
+ */
+function formatDurationMs(durationMs: number): string {
+  const durationSec = Math.round(durationMs / 1000);
+  if (durationSec < 60) return `${durationSec}s`;
+  const minutes = Math.floor(durationSec / 60);
+  const seconds = durationSec % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
+/**
  * Format a Fill alert message for Telegram (HTML parse mode).
  * Driven by HypeDexer `allFills` (perp) and `fills_spot` (spot) — an executed order.
  */
@@ -141,9 +162,7 @@ export function formatFillAlert(fill: AggregatedFill, subscriptionName: string):
   const sourceTag = fill.source === 'perp' ? 'PERP' : 'SPOT';
   const twapTag = fill.twapId != null ? ' <code>TWAP</code>' : '';
 
-  const liquidTerminalTx = `https://liquidterminal.xyz/explorer/transaction/${fill.hash}`;
   const liquidTerminalAddress = `https://liquidterminal.xyz/explorer/address/${fill.wallet}`;
-  const hypurrscanTx = `https://hypurrscan.io/tx/${fill.hash}`;
   const hypurrscanAddress = `https://hypurrscan.io/address/${fill.wallet}`;
 
   const dirLine =
@@ -152,20 +171,42 @@ export function formatFillAlert(fill: AggregatedFill, subscriptionName: string):
   // The order may have been filled in several fills — show the count + flag VWAP.
   const isAggregated = fill.fillCount > 1;
   const priceLabel = isAggregated ? ' <i>(VWAP)</i>' : '';
-  const fillCountLine = isAggregated ? `\n🧩 Filled in ${fill.fillCount} fills` : '';
+  const durationSuffix =
+    isAggregated && fill.aggregationDurationMs !== undefined
+      ? ` (${formatDurationMs(fill.aggregationDurationMs)})`
+      : '';
+  const fillCountLine = isAggregated
+    ? `\n🧩 Filled in ${fill.fillCount} fills${durationSuffix}`
+    : '';
+
+  // Realized PnL line — perp only, hidden when 0 or undefined.
+  const pnlLine =
+    fill.closedPnlTotal !== undefined && fill.closedPnlTotal !== 0
+      ? `\n💰 Realized PnL: ${fill.closedPnlTotal > 0 ? '🟢' : '🔴'} ${formatSignedPnl(fill.closedPnlTotal)}`
+      : '';
+
+  // TWAP orders aren't tied to a single transaction hash — replace the
+  // transaction block with the TWAP id instead.
+  const transactionBlock =
+    fill.twapId != null
+      ? `<b>🧵 TWAP</b> <code>${escapeHtml(String(fill.twapId))}</code>`
+      : (() => {
+          const liquidTerminalTx = `https://liquidterminal.xyz/explorer/transaction/${fill.hash}`;
+          const hypurrscanTx = `https://hypurrscan.io/tx/${fill.hash}`;
+          return `<b>📝 Transaction</b>
+<a href="${liquidTerminalTx}">Liquid Terminal</a> • <a href="${hypurrscanTx}">Hypurrscan</a>
+<code>${escapeHtml(fill.hash)}</code>`;
+        })();
 
   return `
-💸 <b>FILL ALERT</b> <code>${sourceTag}</code>${twapTag}
-🔔 <i>${escapeHtml(subscriptionName)}</i>
+💸 <b>FILL ALERT</b> <code>${sourceTag}</code>${twapTag} · <i>${escapeHtml(subscriptionName)}</i>
 
 ${sideEmoji} <b>${escapeHtml(fill.coin)}</b> ${sideLabel}
 💵 Notional: ${formatAmount(fill.notionalUsd)}
-📦 Size: ${formatSize(fill.sz)} @ ${formatTokenPrice(fill.px)}${priceLabel}${fillCountLine}${dirLine}
+📦 Size: ${formatSize(fill.sz)} @ ${formatTokenPrice(fill.px)}${priceLabel}${pnlLine}${fillCountLine}${dirLine}
 🕐 ${formatFillTime(fill.time)} UTC
 
-<b>📝 Transaction</b>
-<a href="${liquidTerminalTx}">Liquid Terminal</a> • <a href="${hypurrscanTx}">Hypurrscan</a>
-<code>${escapeHtml(fill.hash)}</code>
+${transactionBlock}
 
 <b>👛 Wallet</b> <code>${escapeHtml(shortenAddress(fill.wallet))}</code>
 <a href="${liquidTerminalAddress}">Liquid Terminal</a> • <a href="${hypurrscanAddress}">Hypurrscan</a>

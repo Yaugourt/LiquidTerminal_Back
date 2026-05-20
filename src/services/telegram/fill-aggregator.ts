@@ -76,12 +76,31 @@ export class FillAggregator {
 
     let totalSz = 0;
     let totalNotional = 0;
+    let closedPnlSum = 0;
+    let hasClosedPnl = false;
+    let minTimeMs = Number.POSITIVE_INFINITY;
+    let maxTimeMs = Number.NEGATIVE_INFINITY;
     for (const f of fills) {
       totalSz += f.sz;
       totalNotional += f.notionalUsd;
+      if (f.closedPnl !== undefined) {
+        closedPnlSum += f.closedPnl;
+        hasClosedPnl = true;
+      }
+      const t = FillAggregator.toEpochMs(f.time);
+      if (t < minTimeMs) minTimeMs = t;
+      if (t > maxTimeMs) maxTimeMs = t;
     }
     // Volume-weighted average price; guard against a zero-size order.
     const vwap = totalSz > 0 ? totalNotional / totalSz : first.px;
+
+    // Only expose closedPnlTotal if at least one fill carried it AND it's non-zero.
+    const closedPnlTotal = hasClosedPnl && closedPnlSum !== 0 ? closedPnlSum : undefined;
+    // Only meaningful when more than one fill was aggregated.
+    const aggregationDurationMs =
+      fills.length > 1 && Number.isFinite(minTimeMs) && Number.isFinite(maxTimeMs)
+        ? maxTimeMs - minTimeMs
+        : undefined;
 
     return {
       source: first.source,
@@ -93,11 +112,25 @@ export class FillAggregator {
       px: vwap,
       sz: totalSz,
       notionalUsd: totalNotional,
+      // Keep the original time format of the first fill for display.
       time: first.time,
       hash: first.hash,
       dir: first.dir,
       twapId: first.twapId ?? null,
       fillCount: fills.length,
+      closedPnlTotal,
+      aggregationDurationMs,
     };
+  }
+
+  /**
+   * Convert a `NormalizedFill.time` to epoch ms.
+   * - perp sends `number` (epoch ms)
+   * - spot sends `string` (ISO-8601)
+   */
+  private static toEpochMs(time: string | number): number {
+    if (typeof time === 'number') return time;
+    const parsed = Date.parse(time);
+    return Number.isFinite(parsed) ? parsed : 0;
   }
 }

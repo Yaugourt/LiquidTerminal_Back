@@ -11,6 +11,14 @@ export interface ActiveFillSubscription {
   filterCoins: string[];
   filterWallets: string[];
   minUsd: number;
+  /// 'BUY' | 'SELL' | null (both)
+  filterSide: 'BUY' | 'SELL' | null;
+  /// 'PERP' | 'SPOT' | null (both)
+  filterSource: 'PERP' | 'SPOT' | null;
+  /// 'OPEN' | 'CLOSE' | null (both) — perp only
+  filterDirection: 'OPEN' | 'CLOSE' | null;
+  /// null = no upper bound
+  maxUsd: number | null;
 }
 
 /**
@@ -50,6 +58,25 @@ export class TelegramFillSubscriptionService {
       filterCoins: sub.filterCoins,
       filterWallets: sub.filterWallets,
       minUsd: Number(sub.minUsd),
+      filterSide: normalizeSide(sub.filterSide),
+      filterSource: normalizeSource(sub.filterSource),
+      filterDirection: normalizeDirection(sub.filterDirection),
+      maxUsd: sub.maxUsd != null ? Number(sub.maxUsd) : null,
     }));
   }
+}
+
+function normalizeSide(value: string | null): 'BUY' | 'SELL' | null {
+  if (value === 'BUY' || value === 'SELL') return value;
+  return null;
+}
+
+function normalizeSource(value: string | null): 'PERP' | 'SPOT' | null {
+  if (value === 'PERP' || value === 'SPOT') return value;
+  return null;
+}
+
+function normalizeDirection(value: string | null): 'OPEN' | 'CLOSE' | null {
+  if (value === 'OPEN' || value === 'CLOSE') return value;
+  return null;
 }

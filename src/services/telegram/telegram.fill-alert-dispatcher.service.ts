@@ -226,6 +226,11 @@ export class TelegramFillAlertDispatcherService {
       return false;
     }
 
+    // Filter by maximum notional USD (null/0 = no cap).
+    if (sub.maxUsd != null && sub.maxUsd > 0 && fill.notionalUsd > sub.maxUsd) {
+      return false;
+    }
+
     // Filter by coin (case-insensitive).
     if (sub.filterCoins.length > 0) {
       const coinLower = fill.coin.toLowerCase();
@@ -239,6 +244,24 @@ export class TelegramFillAlertDispatcherService {
       if (!sub.filterWallets.some((w) => w.toLowerCase() === fill.wallet)) {
         return false;
       }
+    }
+
+    // Filter by side: 'BUY' → 'B', 'SELL' → 'A'.
+    if (sub.filterSide === 'BUY' && fill.side !== 'B') return false;
+    if (sub.filterSide === 'SELL' && fill.side !== 'A') return false;
+
+    // Filter by source: PERP | SPOT.
+    if (sub.filterSource === 'PERP' && fill.source !== 'perp') return false;
+    if (sub.filterSource === 'SPOT' && fill.source !== 'spot') return false;
+
+    // Filter by direction (perp only). If the sub explicitly demands a direction
+    // and the fill is spot or has no `dir`, exclude it.
+    if (sub.filterDirection != null) {
+      if (fill.source !== 'perp' || !fill.dir) return false;
+      const isOpen = fill.dir.includes('Open');
+      const isClose = fill.dir.includes('Close');
+      if (sub.filterDirection === 'OPEN' && !isOpen) return false;
+      if (sub.filterDirection === 'CLOSE' && !isClose) return false;
     }
 
     return true;

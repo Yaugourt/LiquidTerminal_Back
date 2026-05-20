@@ -129,6 +129,7 @@ export interface NormalizedFill {
   hash: string;
   dir?: string; // Perp only — fill.dir
   twapId?: number | null; // Perp only — set when the fill belongs to a TWAP order
+  closedPnl?: number; // Perp only — undefined on spot
 }
 
 /**
@@ -151,4 +152,10 @@ export interface AggregatedFill {
   dir?: string; // Perp only
   twapId?: number | null; // Perp only — set when the order is a TWAP
   fillCount: number; // Number of fills aggregated (>= 1)
+  /// Perp only — sum of closedPnl across aggregated fills. Undefined if no
+  /// fill in the buffer carried a closedPnl (e.g. all spot, or all 0).
+  closedPnlTotal?: number;
+  /// Span between first and last fill in the buffer (ms). Undefined when
+  /// only one fill was aggregated.
+  aggregationDurationMs?: number;
 }
