@@ -184,7 +184,12 @@ export class IndexerVaultsIndexerService {
       .sort((a, b) => b.followerCount - a.followerCount)
       .slice(0, CANDIDATE_POOL_SIZE);
 
-    const snapshotLimit = window === '24h' ? 3 : 10;
+    // HypeDexer daily snapshots are emitted once a day per vault but the
+    // schedule slips — many vaults have their "latest" snapshot 2-4 days old.
+    // We therefore compare snapshots by INDEX rather than by an absolute time
+    // cutoff: latest vs N-th prior daily snapshot.
+    const baselineIndex = window === '24h' ? 1 : 7;
+    const snapshotLimit = baselineIndex + 2;
     const ledgerLimit = window === '24h' ? 500 : 2000;
 
     const enriched = await batchedMap(candidates, FAN_OUT_CONCURRENCY, async (s) => {
@@ -214,7 +219,16 @@ export class IndexerVaultsIndexerService {
 
       const sortedSnaps = snaps.slice().sort((a, b) => b.time - a.time);
       const latest = sortedSnaps[0];
-      const baseline = sortedSnaps.find((sn) => sn.time <= cutoff) ?? null;
+      // Walk backwards from `baselineIndex`, accepting the first index that
+      // is distinct from `latest` — handles vaults that only have a couple
+      // of snapshots in total.
+      let baseline: DailySnapshot | null = null;
+      for (let i = Math.min(baselineIndex, sortedSnaps.length - 1); i >= 1; i--) {
+        if (sortedSnaps[i] !== latest) {
+          baseline = sortedSnaps[i];
+          break;
+        }
+      }
 
       const tvl = latest?.accountValue ?? 0;
       const currentFollowers = latest?.followerCount ?? s.followerCount;
