@@ -59,3 +59,22 @@ export const vaultsLedgerQuerySchema = z.object({
   }),
   params: z.object({}),
 });
+
+const leaderboardWindow = z.enum(['24h', '7d']).optional();
+const leaderboardLimit = z.coerce.number().int().min(1).max(50).optional();
+
+export const vaultsLeaderboardFollowersQuerySchema = z.object({
+  query: z.object({
+    window: leaderboardWindow,
+    limit: leaderboardLimit,
+  }),
+  params: z.object({}),
+});
+
+export const vaultsLeaderboardOutflowsQuerySchema = z.object({
+  query: z.object({
+    window: leaderboardWindow,
+    limit: leaderboardLimit,
+  }),
+  params: z.object({}),
+});

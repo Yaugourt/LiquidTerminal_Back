@@ -37,12 +37,19 @@ export const HYPEDEXER_TTL = {
   buildersStats:          30,   // 30s — données actives
   buildersTop:            30,   // 30s — données actives
   hip4Analytics:          60,   // analytics bucketed — 1h buckets change every hour
+  /** Enriched markets/questions cache. Lower than `staticList` because the
+   * payload includes live mid_price overlays from HL allMids — 2 min is too
+   * stale for prediction-market probabilities. */
+  hip4EnrichedList:       30,
   evmStats:               30,   // EVM global stats
   evmStatsDaily:         300,   // EVM daily stats (slow-changing)
   evmBlocks:               5,   // EVM blocks (fast-changing)
   evmTransactions:         5,   // EVM transactions (fast-changing)
   evmBridgeEvents:        30,   // EVM bridge events
   evmLedgerTransfers:     30,   // EVM ledger transfers
+  /** Vault leaderboards — heavy fan-out aggregation across top-N candidates;
+   * keep at 5 min to amortize the per-vault snapshot/ledger calls. */
+  vaultLeaderboards:     300,
 } as const;
 
 /** Clés de cache pour les endpoints globaux (identiques pour tous les users) */
@@ -72,6 +79,8 @@ export const HYPEDEXER_CACHE_KEYS = {
   evmTransactions:      'hypedexer:evm:transactions',
   evmBridgeEvents:      'hypedexer:evm:bridge:events',
   evmLedgerTransfers:   'hypedexer:evm:ledger:transfers',
+  /** Single precomputed payload shared by both leaderboard endpoints — keyed by window. */
+  vaultLeaderboards:    (window: string) => `hypedexer:vaults:leaderboards:${window}`,
 } as const;
 
 /** Clés de cache pour les endpoints builders — combinaisons timeframe/sort */
@@ -101,5 +110,20 @@ export const HYPEDEXER_USER_CACHE_KEY = {
   hip3Overview:     (addr: string) => `hypedexer:hip3:user:${addr}:overview`,
   hip3Coins:        (addr: string) => `hypedexer:hip3:user:${addr}:coins`,
   hip3Fills:        (addr: string) => `hypedexer:hip3:user:${addr}:fills`,
-  hip4Fills:        (addr: string) => `hypedexer:hip4:user:${addr}:fills`,
+  /** HIP-4 user fills cache key. Must include every filter that changes the
+   * upstream result so coin/outcome filters don't poison the unfiltered key. */
+  hip4Fills: (addr: string, filters: {
+    coin?: string;
+    outcome_id?: number;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const parts = [
+      `coin:${filters.coin ?? ''}`,
+      `oid:${filters.outcome_id ?? ''}`,
+      `lim:${filters.limit ?? ''}`,
+      `off:${filters.offset ?? ''}`,
+    ].join('|');
+    return `hypedexer:hip4:user:${addr}:fills:${parts}`;
+  },
 } as const;
