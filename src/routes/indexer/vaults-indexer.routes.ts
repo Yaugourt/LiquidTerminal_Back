@@ -8,8 +8,13 @@ import {
   vaultsDailySnapshotsQuerySchema,
   vaultsEquitySnapshotsQuerySchema,
   vaultsLedgerQuerySchema,
+  vaultsLeaderboardFollowersQuerySchema,
+  vaultsLeaderboardOutflowsQuerySchema,
 } from '../../schemas/indexer/vaults-indexer.schema';
-import { IndexerVaultsIndexerService } from '../../services/indexer/indexer-vaults-indexer.service';
+import {
+  IndexerVaultsIndexerService,
+  LeaderboardWindow,
+} from '../../services/indexer/indexer-vaults-indexer.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
@@ -186,6 +191,56 @@ router.get(
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_LEDGER_ERROR',
+      });
+    }
+  }) as RequestHandler
+);
+
+function parseWindow(q: unknown): LeaderboardWindow {
+  return q === '7d' ? '7d' : '24h';
+}
+
+router.get(
+  '/leaderboards/followers-gained',
+  marketRateLimiter,
+  validateGetRequest(vaultsLeaderboardFollowersQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const window = parseWindow(req.query.window);
+      const limit = num(req.query.limit) ?? 5;
+      const { data, meta } = await svc.getFollowersGained(window, limit);
+      res.json({ success: true, data, meta });
+    } catch (e) {
+      logDeduplicator.error('GET /indexer/vaults/leaderboards/followers-gained', {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      res.status(502).json({
+        success: false,
+        error: e instanceof Error ? e.message : 'Upstream error',
+        code: 'INDEXER_VAULTS_LEADERBOARDS_FOLLOWERS_ERROR',
+      });
+    }
+  }) as RequestHandler
+);
+
+router.get(
+  '/leaderboards/outflows',
+  marketRateLimiter,
+  validateGetRequest(vaultsLeaderboardOutflowsQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const window = parseWindow(req.query.window);
+      const limit = num(req.query.limit) ?? 3;
+      const { data, meta } = await svc.getOutflows(window, limit);
+      res.json({ success: true, data, meta });
+    } catch (e) {
+      logDeduplicator.error('GET /indexer/vaults/leaderboards/outflows', {
+        error: e instanceof Error ? e.message : String(e),
+      });
+      res.status(502).json({
+        success: false,
+        error: e instanceof Error ? e.message : 'Upstream error',
+        code: 'INDEXER_VAULTS_LEADERBOARDS_OUTFLOWS_ERROR',
       });
     }
   }) as RequestHandler

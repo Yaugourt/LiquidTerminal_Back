@@ -107,6 +107,8 @@ describe('Indexer GET validation smoke', () => {
     '/indexer/completed-trades/summary',
     '/indexer/twaps/stats',
     '/indexer/vaults/vaultSummaries',
+    '/indexer/vaults/leaderboards/followers-gained',
+    '/indexer/vaults/leaderboards/outflows',
     '/indexer/users/leaderboard',
   ];
 
