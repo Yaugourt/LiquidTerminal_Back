@@ -7,6 +7,8 @@ export class VaultsService {
   private static instance: VaultsService;
   private readonly UPDATE_CHANNEL = 'vaults:list:updated';
   private readonly FILTERED_CACHE_KEY = 'vaults:filtered_list';
+  // Variante incluant les vaults fermés (peuplée par le client de polling).
+  private readonly ALL_CACHE_KEY = 'vaults:filtered_list_all';
   private lastUpdate: Record<string, number> = {};
 
   private constructor() {
@@ -49,7 +51,11 @@ export class VaultsService {
    */
   public async getVaultsList(params: VaultQueryParams = {}): Promise<VaultsResponse> {
     try {
-      const cachedData = await redisService.get(this.FILTERED_CACHE_KEY);
+      // Opt-in : la vue includeClosed lit le cache qui retient les vaults
+      // fermés. Par défaut on garde le cache open-only (comportement inchangé
+      // pour toutes les agrégations TVL existantes).
+      const cacheKey = params.includeClosed ? this.ALL_CACHE_KEY : this.FILTERED_CACHE_KEY;
+      const cachedData = await redisService.get(cacheKey);
       if (!cachedData) {
         throw new VaultsError('No vaults data available in cache');
       }
@@ -62,6 +68,14 @@ export class VaultsService {
         summary: vault.summary,
         apr: vault.apr
       }));
+
+      // Filtre de statut : true = closed only, false = open only.
+      // (Sans effet sur le cache open-only, qui ne contient pas de closed.)
+      if (params.isClosed !== undefined) {
+        filteredVaults = filteredVaults.filter(
+          vault => vault.summary.isClosed === params.isClosed
+        );
+      }
 
       if (params.name) {
         filteredVaults = filteredVaults.filter(vault => 

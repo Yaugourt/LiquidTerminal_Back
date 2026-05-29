@@ -114,5 +114,8 @@ export interface VaultQueryParams {
   page?: number;
   name?: string;
   leader?: string;
+  /** Filter by status: true = closed only, false = open only. */
   isClosed?: boolean;
+  /** Opt-in: read the cache that retains closed vaults. Default false = open-only. */
+  includeClosed?: boolean;
 } 

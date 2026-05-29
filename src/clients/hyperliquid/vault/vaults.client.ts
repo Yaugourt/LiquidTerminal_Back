@@ -11,6 +11,10 @@ export class HyperliquidVaultsClient extends BaseApiService {
   private static readonly REQUEST_WEIGHT = 20;
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
   private static readonly FILTERED_CACHE_KEY = 'vaults:filtered_list';
+  // Same list but WITHOUT the isClosed exclusion — used to serve the
+  // opt-in `includeClosed` view. The default key above stays open-only so
+  // every existing consumer (TVL aggregations…) is unaffected.
+  private static readonly ALL_CACHE_KEY = 'vaults:filtered_list_all';
   private static readonly UPDATE_CHANNEL = 'vaults:list:updated';
   private static readonly UPDATE_INTERVAL = 30000; // 30 seconds
 
@@ -36,9 +40,12 @@ export class HyperliquidVaultsClient extends BaseApiService {
   }
 
   /**
-   * Supprime les doublons et filtre les vaults invalides
+   * Supprime les doublons et filtre les vaults invalides.
+   * @param includeClosed Quand true, conserve les vaults fermés (la vue
+   *        opt-in `includeClosed`). Par défaut ils sont exclus, comportement
+   *        historique attendu par toutes les agrégations TVL existantes.
    */
-  private processVaults(vaults: VaultData[]): VaultData[] {
+  private processVaults(vaults: VaultData[], includeClosed = false): VaultData[] {
     // Identifier d'abord tous les vaults parents
     const parentVaults = new Set<string>();
     const seen = new Set<string>();
@@ -62,8 +69,8 @@ export class HyperliquidVaultsClient extends BaseApiService {
     const filteredVaults = uniqueVaults.filter(vault => {
       const { isClosed, relationship, tvl } = vault.summary;
 
-      // Exclure les vaults fermés
-      if (isClosed) {
+      // Exclure les vaults fermés (sauf en mode includeClosed)
+      if (isClosed && !includeClosed) {
         return false;
       }
 
@@ -85,7 +92,8 @@ export class HyperliquidVaultsClient extends BaseApiService {
       originalCount: vaults.length,
       uniqueCount: uniqueVaults.length,
       filteredCount: filteredVaults.length,
-      parentVaultsCount: parentVaults.size
+      parentVaultsCount: parentVaults.size,
+      includeClosed
     });
 
     return filteredVaults;
@@ -160,15 +168,22 @@ export class HyperliquidVaultsClient extends BaseApiService {
   private async updateVaultsList(): Promise<VaultData[]> {
     try {
       const rawVaults = await this.getVaultsListRaw();
-      
-      // Traiter et filtrer les vaults
-      const vaults = this.processVaults(rawVaults);
 
-      // Sauvegarder les données filtrées
-      await redisService.set(
-        HyperliquidVaultsClient.FILTERED_CACHE_KEY,
-        JSON.stringify(vaults)
-      );
+      // Traiter et filtrer les vaults : open-only (défaut) + variante avec closed
+      const vaults = this.processVaults(rawVaults);
+      const vaultsWithClosed = this.processVaults(rawVaults, true);
+
+      // Sauvegarder les deux listes
+      await Promise.all([
+        redisService.set(
+          HyperliquidVaultsClient.FILTERED_CACHE_KEY,
+          JSON.stringify(vaults)
+        ),
+        redisService.set(
+          HyperliquidVaultsClient.ALL_CACHE_KEY,
+          JSON.stringify(vaultsWithClosed)
+        )
+      ]);
 
       // Notifier les mises à jour
       const now = Date.now();
@@ -178,9 +193,10 @@ export class HyperliquidVaultsClient extends BaseApiService {
       }));
 
       this.lastUpdate = now;
-      
-      logDeduplicator.info('Vaults list updated', { 
-        count: vaults.length
+
+      logDeduplicator.info('Vaults list updated', {
+        count: vaults.length,
+        countWithClosed: vaultsWithClosed.length
       });
 
       return vaults;

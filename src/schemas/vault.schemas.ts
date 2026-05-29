@@ -19,6 +19,9 @@ export const vaultsGetSchema = z.object({
     leader: z.string().optional(),
     isClosed: z.string()
       .transform(val => val === 'true')
+      .optional(),
+    includeClosed: z.string()
+      .transform(val => val === 'true')
       .optional()
   }),
   params: z.object({}),
@@ -42,6 +45,9 @@ export const vaultsQuerySchema = z.object({
     name: z.string().optional(),
     leader: z.string().optional(),
     isClosed: z.string()
+      .transform(val => val === 'true')
+      .optional(),
+    includeClosed: z.string()
       .transform(val => val === 'true')
       .optional()
   }),

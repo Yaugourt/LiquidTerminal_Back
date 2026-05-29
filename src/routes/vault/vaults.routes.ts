@@ -11,14 +11,15 @@ const vaultsService = VaultsService.getInstance();
 
 router.get('/', validateGetRequest(vaultsGetSchema), async (req: Request, res: Response): Promise<void> => {
   try {
-    const { 
-      sortBy, 
-      sortOrder, 
-      limit, 
+    const {
+      sortBy,
+      sortOrder,
+      limit,
       page,
       name,
       leader,
-      isClosed 
+      isClosed,
+      includeClosed
     } = req.query;
 
     const result = await vaultsService.getVaultsList({
@@ -28,7 +29,8 @@ router.get('/', validateGetRequest(vaultsGetSchema), async (req: Request, res: R
       page: page ? Number(page) : undefined,
       name: name as string,
       leader: leader as string,
-      isClosed: isClosed ? isClosed === 'true' : undefined
+      isClosed: isClosed !== undefined ? isClosed === 'true' : undefined,
+      includeClosed: includeClosed !== undefined ? includeClosed === 'true' : undefined
     });
 
     logDeduplicator.info('Vaults list retrieved successfully', { 
