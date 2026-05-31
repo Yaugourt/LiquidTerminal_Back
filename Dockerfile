@@ -13,6 +13,13 @@ COPY prisma-historical ./prisma-historical/
 COPY prisma-content ./prisma-content/
 COPY prisma-telegram ./prisma-telegram/
 COPY prisma.config.ts ./
+
+# prisma.config.ts (Prisma 7+) resolves env() at load time, so DATABASE_URL must
+# be set even for `prisma generate`. A dummy value is enough at build time; the
+# real one is injected by Railway as a runtime env var.
+ARG DATABASE_URL=postgresql://build:build@localhost:5432/build
+ENV DATABASE_URL=$DATABASE_URL
+
 RUN npx prisma generate \
  && npx prisma generate --schema ./prisma-historical/schema.prisma \
  && npx prisma generate --schema ./prisma-content/schema.prisma \
