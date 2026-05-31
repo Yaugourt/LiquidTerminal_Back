@@ -1,0 +1,17 @@
+node_modules
+.git
+.gitignore
+.env
+.env.*
+dist
+coverage
+tests
+docs
+*.md
+.agents
+.cursor
+.gemini
+.github
+*.log
+logs.*.json*
+.DS_Store

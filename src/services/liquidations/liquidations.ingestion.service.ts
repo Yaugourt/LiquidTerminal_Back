@@ -166,7 +166,7 @@ export class LiquidationsIngestionService {
   private toCreateInput(liq: Liquidation): RawLiquidationCreateInput {
     return {
       tid: BigInt(liq.tid),
-      time: new Date(liq.time),
+      time: new Date(liq.time_ms),
       timeMs: BigInt(liq.time_ms),
       coin: liq.coin,
       hash: liq.hash,

@@ -1,16 +1,13 @@
-# ─── Stage 1: Build ───────────────────────────────────────────────────────────
+# Stage 1: Build
 FROM node:20.19.0-alpine AS builder
 
 WORKDIR /app
 
-ARG DATABASE_URL
-ENV DATABASE_URL=$DATABASE_URL
-
-# Dépendances — layer en cache tant que package.json ne change pas
+# Deps layer cached as long as package.json is unchanged
 COPY package*.json ./
 RUN npm ci
 
-# Schémas Prisma — layer séparé pour ne régénérer que si les schémas changent
+# Prisma schemas in a dedicated layer so codegen only re-runs on schema changes
 COPY prisma ./prisma/
 COPY prisma-historical ./prisma-historical/
 COPY prisma-content ./prisma-content/
@@ -21,29 +18,33 @@ RUN npx prisma generate \
  && npx prisma generate --schema ./prisma-content/schema.prisma \
  && npx prisma generate --schema ./prisma-telegram/schema.prisma
 
-# Code source + build TypeScript
+# Source code + TypeScript build
 COPY . .
 RUN npm run build
 
-# Élagage des devDeps dans le même node_modules (évite une 2e install complète)
+# Prune devDeps in place to avoid a second full install
 RUN npm prune --omit=dev
 
-# ─── Stage 2: Production ──────────────────────────────────────────────────────
+# Stage 2: Production
 FROM node:20.19.0-alpine AS production
 
 WORKDIR /app
 
-# node_modules déjà élagués + clients Prisma générés — aucune install supplémentaire
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/prisma ./prisma/
-COPY --from=builder /app/prisma-historical ./prisma-historical/
-COPY --from=builder /app/prisma-content ./prisma-content/
-COPY --from=builder /app/prisma-telegram ./prisma-telegram/
-COPY --from=builder /app/prisma.config.ts ./
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/scripts ./scripts/
+COPY --from=builder --chown=node:node /app/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/prisma ./prisma/
+COPY --from=builder --chown=node:node /app/prisma-historical ./prisma-historical/
+COPY --from=builder --chown=node:node /app/prisma-content ./prisma-content/
+COPY --from=builder --chown=node:node /app/prisma-telegram ./prisma-telegram/
+COPY --from=builder --chown=node:node /app/prisma.config.ts ./
+COPY --from=builder --chown=node:node /app/dist ./dist
+COPY --from=builder --chown=node:node /app/package.json ./
+COPY --from=builder --chown=node:node /app/scripts ./scripts/
+
+USER node
 
 EXPOSE 3002
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3002/api/health/ready || exit 1
 
 CMD ["node", "dist/app.js"]
