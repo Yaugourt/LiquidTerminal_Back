@@ -33,6 +33,7 @@ import globalPerpStatsRoutes from './routes/perp/perpStats.routes';
 import auctionRoutes from './routes/spot/auction.routes';
 import vaultsRoutes from './routes/vault/vaults.routes';
 import feesRoutes from './routes/fees/fees.routes';
+import revenueRoutes from './routes/revenue/revenue.routes';
 
 import walletRoutes from './routes/wallet/wallet.routes';
 import projectRoutes from './routes/project/project.routes';
@@ -118,6 +119,7 @@ app.use('/market/perp', marketPerpRoutes);
 app.use('/market/auction', auctionRoutes);
 app.use('/market/vaults', vaultsRoutes);
 app.use('/market/fees', feesRoutes);
+app.use('/market/revenue', revenueRoutes);
 app.use('/wallet', walletRoutes);
 app.use('/project', projectRoutes);
 app.use('/project/csv', projectCsvRoutes);

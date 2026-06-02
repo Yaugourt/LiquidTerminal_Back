@@ -88,7 +88,7 @@ export class HyperliquidSpotClient extends BaseApiService {
 
         return {
           name: displayName,
-          logo: `https://app.hyperliquid.xyz/coins/${logoName}_USDC.svg`,
+          logo: `https://app.hyperliquid.xyz/coins/${logoName}_spot.svg`,
           price: current,
           marketCap: current * Number(ctx.circulatingSupply),
           volume: Number(ctx.dayNtlVlm),

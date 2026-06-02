@@ -11,6 +11,7 @@ import { HypurrscanUnstakingClient } from '../clients/hypurrscan/unstaking.clien
 import { SpotUSDCClient } from '../clients/hypurrscan/spotUSDC.client';
 import { HyperliquidSpotStatsClient } from '../clients/hyperliquid/spot/spot.stats.client';
 import { HypurrscanFeesClient } from '../clients/hypurrscan/fees.client';
+import { HypurrscanFeesHistoricalClient } from '../clients/hypurrscan/feesHistorical.client';
 import { HyperliquidGlobalStatsClient } from '../clients/hyperliquid/globalstats.client';
 import { HyperliquidLeaderboardClient } from '../clients/hyperliquid/leaderboard/leaderboard.client';
 import { HypurrscanStakedHoldersClient } from '../clients/hypurrscan/stakedHolders.client';
@@ -137,6 +138,10 @@ export class ClientInitializerService {
       // Initialiser le client Fees
       const feesClient = HypurrscanFeesClient.getInstance();
       this.clients.set('fees', feesClient);
+
+      // Initialiser le client Fees Historical (553 days, daily, feeds RevenueService)
+      const feesHistoricalClient = HypurrscanFeesHistoricalClient.getInstance();
+      this.clients.set('feesHistorical', feesHistoricalClient);
 
       // Initialiser le client Global Stats
       const globalStatsClient = HyperliquidGlobalStatsClient.getInstance();

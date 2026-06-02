@@ -16,31 +16,35 @@ import { PrismaReadListItemRepository } from './prisma/prisma.readlist-item.repo
 import { PrismaLinkPreviewRepository } from './prisma/prisma.linkPreview.repository';
 import { PrismaPublicGoodRepository } from './prisma/prisma.publicgood.repository';
 import { PrismaHistoricalLiquidationRepository } from './prisma/prisma.historical.repository';
+import { ProjectDataSourceRepository } from './interfaces/project-datasource.repository.interface';
+import { PrismaProjectDataSourceRepository } from './prisma/prisma.project-datasource.repository';
 
 // Export des interfaces
-export type { 
-  ProjectRepository, 
-  CategoryRepository, 
-  EducationalCategoryRepository, 
+export type {
+  ProjectRepository,
+  CategoryRepository,
+  EducationalCategoryRepository,
   EducationalResourceRepository,
   ReadListRepository,
   ReadListItemRepository,
   LinkPreviewRepository,
   PublicGoodRepository,
-  HistoricalLiquidationRepository
+  HistoricalLiquidationRepository,
+  ProjectDataSourceRepository
 };
 
 // Export des implémentations
-export { 
-  PrismaProjectRepository, 
-  PrismaCategoryRepository, 
+export {
+  PrismaProjectRepository,
+  PrismaCategoryRepository,
   PrismaEducationalCategoryRepository,
   PrismaEducationalResourceRepository,
   PrismaReadListRepository,
   PrismaReadListItemRepository,
   PrismaLinkPreviewRepository,
   PrismaPublicGoodRepository,
-  PrismaHistoricalLiquidationRepository
+  PrismaHistoricalLiquidationRepository,
+  PrismaProjectDataSourceRepository
 };
 
 // Instances par défaut
@@ -52,4 +56,5 @@ export const readListRepository: ReadListRepository = new PrismaReadListReposito
 export const readListItemRepository: ReadListItemRepository = new PrismaReadListItemRepository();
 export const linkPreviewRepository: LinkPreviewRepository = new PrismaLinkPreviewRepository();
 export const publicGoodRepository: PublicGoodRepository = new PrismaPublicGoodRepository();
-export const historicalLiquidationRepository: HistoricalLiquidationRepository = new PrismaHistoricalLiquidationRepository(); 
+export const historicalLiquidationRepository: HistoricalLiquidationRepository = new PrismaHistoricalLiquidationRepository();
+export const projectDataSourceRepository: ProjectDataSourceRepository = new PrismaProjectDataSourceRepository();

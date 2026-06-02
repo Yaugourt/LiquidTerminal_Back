@@ -30,6 +30,7 @@ export const CACHE_KEYS = {
   PROJECT_LIST: (params: string) => `${CACHE_PREFIX.PROJECT}:list:${params}`,
   PROJECT_BY_CATEGORIES: (categoryIds: number[]) => `${CACHE_PREFIX.PROJECT}:categories:${categoryIds.sort().join(',')}`,
   PROJECT_CATEGORIES: (projectId: number) => `${CACHE_PREFIX.PROJECT}:${projectId}:categories`,
+  PROJECT_METRICS: (projectId: number) => `${CACHE_PREFIX.PROJECT}:${projectId}:metrics`,
   CATEGORY: (id: number) => `${CACHE_PREFIX.CATEGORY}:${id}`,
   CATEGORY_LIST: (params: string) => `${CACHE_PREFIX.CATEGORY}:list:${params}`,
   CATEGORY_PROJECTS: (categoryId: number) => `${CACHE_PREFIX.CATEGORY}:${categoryId}:projects`,

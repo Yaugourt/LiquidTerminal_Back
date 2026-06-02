@@ -266,6 +266,24 @@ model Project {
   telegram   String?   @db.VarChar(255)
   website    String?   @db.VarChar(255)
   categories ProjectCategory[]
+  dataSources ProjectDataSource[]
+}
+
+model ProjectDataSource {
+  id         Int      @id @default(autoincrement())
+  projectId  Int
+  type       String   @db.VarChar(50)   // HL_SPOT_TOKEN | DEFILLAMA | HL_BUILDER | HL_VAULT | MANUAL
+  identifier String   @db.VarChar(255)  // token symbol | defillama slug | builder/vault address…
+  config     String?  @db.Text          // optional provider config, stored as JSON text
+  priority   Int      @default(0)
+  enabled    Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamp(6)
+  updatedAt  DateTime @updatedAt
+
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, type, identifier])
+  @@index([projectId])
 }
 
 model ProjectCategory {

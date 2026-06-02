@@ -1,5 +1,6 @@
 import express, { Request, Response, RequestHandler, NextFunction } from "express";
 import { ProjectService } from "../../services/project/project.service";
+import { ProjectMetricsService } from "../../services/projectMetrics/projectMetrics.service";
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { projectCategoriesUpdateSchema, projectCreateWithUploadSchema } from '../../schemas/project.schema';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
@@ -12,6 +13,7 @@ import { uploadProjectFilesR2, validateAndUploadToR2, handleUploadErrorR2, getUp
 
 const router = express.Router();
 const projectService = new ProjectService();
+const projectMetricsService = ProjectMetricsService.getInstance();
 
 // Appliquer le rate limiting à toutes les routes
 router.use(marketRateLimiter);
@@ -305,6 +307,35 @@ router.get('/:id/categories', (async (req: Request, res: Response) => {
       projectId: req.params.id
     });
     res.status(500).json({ message: 'Internal server error' });
+  }
+}) as RequestHandler);
+
+// Route pour récupérer les métriques agrégées d'un projet (DeFiLlama-like)
+router.get('/:id/metrics', (async (req: Request, res: Response) => {
+  try {
+    const projectId = parseInt(String(req.params.id));
+    if (isNaN(projectId)) {
+      logDeduplicator.warn('Invalid project ID provided', { id: req.params.id });
+      return res.status(400).json({ success: false, error: "Invalid project ID", code: 'INVALID_PROJECT_ID' });
+    }
+
+    const metrics = await projectMetricsService.getMetrics(projectId);
+
+    res.json({
+      success: true,
+      data: metrics
+    });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      logDeduplicator.warn('Project not found for metrics retrieval', { projectId: req.params.id });
+      return res.status(404).json({ success: false, error: error.message, code: error.code });
+    }
+
+    logDeduplicator.error('Error fetching project metrics:', {
+      error: error instanceof Error ? error.message : String(error),
+      projectId: req.params.id
+    });
+    res.status(500).json({ success: false, error: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
   }
 }) as RequestHandler);
 
