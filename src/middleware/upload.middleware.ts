@@ -149,7 +149,7 @@ const scanUploadedFile = async (filePath: string): Promise<boolean> => {
 };
 
 // Middleware pour gérer les erreurs d'upload
-export const handleUploadError = (error: Error, req: Request, res: Response, next: NextFunction) => {
+export const handleUploadError = (error: Error, req: Request, res: Response, _next: NextFunction) => {
   if (error instanceof multer.MulterError) {
     logDeduplicator.error('Upload error:', { error: error.message, field: error.field });
     

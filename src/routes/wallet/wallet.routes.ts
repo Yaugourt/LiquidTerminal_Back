@@ -4,11 +4,7 @@ import { WalletListService } from "../../services/walletlist/walletlist.service"
 import { WalletListItemService } from "../../services/walletlist/walletlist-item.service";
 import { marketRateLimiter } from "../../middleware/apiRateLimiter";
 import { validatePrivyToken } from "../../middleware/authMiddleware";
-import { 
-  WalletAlreadyExistsError, 
-  UserNotFoundError,
-  WalletError
-} from "../../errors/wallet.errors";
+import { WalletError } from "../../errors/wallet.errors";
 import { WalletListError } from "../../errors/walletlist.errors";
 import {
   validateCreateWallet,

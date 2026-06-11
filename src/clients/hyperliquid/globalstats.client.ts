@@ -1,5 +1,4 @@
 import { BaseApiService } from '../../core/base.api.service';
-import { GlobalStats } from '../../types/market.types';
 import { CircuitBreakerService } from '../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../core/redis.service';

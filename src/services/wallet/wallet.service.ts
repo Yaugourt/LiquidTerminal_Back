@@ -5,8 +5,7 @@ import {
   WalletCreateInput, 
   WalletUpdateInput, 
   WalletResponse,
-  WalletQueryParams,
-  UserWalletResponse 
+  WalletQueryParams
 } from '../../types/wallet.types';
 import {
   WalletNotFoundError,
@@ -50,11 +49,11 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
     return await this.repository.existsByAddress(data.address);
   }
 
-  protected async checkExistsForUpdate(id: number, data: WalletUpdateInput): Promise<boolean> {
+  protected async checkExistsForUpdate(_id: number, _data: WalletUpdateInput): Promise<boolean> {
     return false; // Nous ne permettons pas de modifier l'adresse
   }
 
-  protected async checkCanDelete(id: number): Promise<void> {
+  protected async checkCanDelete(_id: number): Promise<void> {
     // Vérifier si le wallet a des transactions
     // Cette méthode sera implémentée plus tard
   }
@@ -382,9 +381,6 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
 
         // Étape 2: Récupérer tous les wallet IDs
         const walletRecords = await this.repository.findManyByAddresses(addresses);
-        const addressToWalletId = new Map(
-          walletRecords.map((w: any) => [w.address, w.id])
-        );
 
         // Étape 3: Vérifier quels wallets l'utilisateur possède déjà
         const existingUserWallets = await userWalletRepository.findManyByUserAndWallets(

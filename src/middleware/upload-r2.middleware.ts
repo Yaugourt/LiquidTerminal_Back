@@ -223,7 +223,7 @@ export const validateAndUploadToR2 = async (
 /**
  * Middleware pour gérer les erreurs d'upload
  */
-export const handleUploadErrorR2 = (error: Error, req: Request, res: Response, next: NextFunction) => {
+export const handleUploadErrorR2 = (error: Error, req: Request, res: Response, _next: NextFunction) => {
   if (error instanceof multer.MulterError) {
     logDeduplicator.error('Upload error:', { error: error.message, field: error.field });
     

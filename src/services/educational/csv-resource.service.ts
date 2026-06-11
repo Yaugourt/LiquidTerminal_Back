@@ -169,7 +169,7 @@ export class CsvResourceService {
   /**
    * Traite une ligne du CSV
    */
-  private async processRow(row: CsvRow, userId: number, result: CsvProcessingResult): Promise<void> {
+  private async processRow(row: CsvRow, userId: number, _result: CsvProcessingResult): Promise<void> {
     try {
       logDeduplicator.info('Processing CSV row', { 
         originalRow: row,

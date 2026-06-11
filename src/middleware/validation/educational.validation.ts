@@ -24,7 +24,7 @@ export const validateEducationalCategoryQuery = (req: Request, res: Response, ne
   try {
     educationalCategoryQuerySchema.parse(req.query);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid query parameters',
@@ -47,7 +47,7 @@ export const validateEducationalResourceQuery = (req: Request, res: Response, ne
   try {
     educationalResourceQuerySchema.parse(req.query);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid query parameters',

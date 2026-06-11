@@ -12,7 +12,7 @@ export const validateCreateWallet = (req: Request, res: Response, next: NextFunc
   try {
     walletCreateSchema.parse(req.body);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
@@ -25,7 +25,7 @@ export const validateUpdateWallet = (req: Request, res: Response, next: NextFunc
   try {
     walletUpdateSchema.parse(req.body);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
@@ -38,7 +38,7 @@ export const validateWalletQuery = (req: Request, res: Response, next: NextFunct
   try {
     walletQuerySchema.parse(req.query);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid query parameters',
@@ -51,7 +51,7 @@ export const validateBulkAddWallet = (req: Request, res: Response, next: NextFun
   try {
     walletBulkAddSchema.parse(req.body);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
@@ -64,7 +64,7 @@ export const validateBulkDeleteWallet = (req: Request, res: Response, next: Next
   try {
     walletBulkDeleteSchema.parse(req.body);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid request data',

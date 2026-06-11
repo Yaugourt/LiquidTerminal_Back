@@ -49,7 +49,7 @@ const upload = multer({
 export const uploadCsvProjects = upload.single('csv');
 
 // Middleware pour gérer les erreurs d'upload CSV
-export const handleCsvProjectUploadError = (error: Error, req: Request, res: Response, next: NextFunction) => {
+export const handleCsvProjectUploadError = (error: Error, req: Request, res: Response, _next: NextFunction) => {
   if (error instanceof multer.MulterError) {
     logDeduplicator.error('Multer error during CSV project upload', { error: error.message });
     

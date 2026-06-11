@@ -4,8 +4,7 @@ import {
   EducationalResourceResponse,
   EducationalResourceCategoryCreateInput,
   EducationalResourceCategoryResponse,
-  ResourceSubmitInput,
-  ResourceReviewInput
+  ResourceSubmitInput
 } from '../../types/educational.types';
 import {
   EducationalResourceNotFoundError,
@@ -21,7 +20,6 @@ import {
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
 import {
-  educationalResourceCreateSchema,
   educationalResourceServiceCreateSchema,
   educationalResourceUpdateSchema,
   educationalResourceQuerySchema,
@@ -81,7 +79,7 @@ export class EducationalResourceService extends BaseService<
     return false;
   }
 
-  protected async checkCanDelete(id: number): Promise<void> {
+  protected async checkCanDelete(_id: number): Promise<void> {
     return;
   }
 
@@ -134,8 +132,6 @@ export class EducationalResourceService extends BaseService<
 
         return await this.repository.assignToCategory(validatedData);
       });
-    } catch (error) {
-      throw error;
     } finally {
       this.repository.resetPrismaClient();
       educationalCategoryRepository.resetPrismaClient();

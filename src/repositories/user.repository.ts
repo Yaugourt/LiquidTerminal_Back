@@ -1,6 +1,5 @@
 import { PrismaClient, Prisma, User, UserRole } from '@prisma/client';
 import { prisma } from '../core/prisma.service';
-import { logDeduplicator } from '../utils/logDeduplicator';
 import { UserRepository } from './interfaces/user.repository.interface';
 
 export class UserRepositoryImpl implements UserRepository {

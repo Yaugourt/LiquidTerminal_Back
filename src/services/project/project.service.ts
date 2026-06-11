@@ -79,7 +79,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
       }
 
       // Utiliser le service de transaction pour l'assignation des catégories
-      await prismaContent.$transaction(async (tx) => {
+      await prismaContent.$transaction(async (_tx) => {
         // Vérifier si le projet existe
         const project = await this.repository.findById(projectId);
         if (!project) {
@@ -139,7 +139,7 @@ export class ProjectService extends BaseService<ProjectResponse, ProjectCreateIn
       }
 
       // Utiliser le service de transaction pour le retrait des catégories
-      await prismaContent.$transaction(async (tx) => {
+      await prismaContent.$transaction(async (_tx) => {
         // Vérifier si le projet existe
         const project = await this.repository.findById(projectId);
         if (!project) {

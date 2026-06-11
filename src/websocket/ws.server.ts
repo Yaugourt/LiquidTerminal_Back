@@ -287,7 +287,7 @@ export class InternalWebSocketServer {
             timestamp: new Date().toISOString(),
           });
       }
-    } catch (error) {
+    } catch {
       this.sendMessage(ws, {
         type: 'error',
         error: 'Invalid message format',

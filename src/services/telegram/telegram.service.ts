@@ -341,10 +341,6 @@ export class TelegramService {
         };
       }
 
-      // Check if the code is still valid (pending)
-      const redisKey = `${TelegramService.LINK_CODE_PREFIX}${code}`;
-      const stored = await redisService.get(redisKey);
-
       return {
         linked: false,
         // Code still pending = user hasn't clicked the bot link yet

@@ -1,6 +1,5 @@
-import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { prisma } from '../core/prisma.service';
-import { logDeduplicator } from '../utils/logDeduplicator';
 
 export class WalletRepository {
   private prismaClient: PrismaClient | Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'> = prisma;

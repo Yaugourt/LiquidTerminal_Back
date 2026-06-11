@@ -5,45 +5,6 @@ import { logDeduplicator } from '../utils/logDeduplicator';
 import fs from 'fs';
 import crypto from 'crypto';
 
-// Configuration du stockage pour logo
-const logoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/publicgoods/logos/');
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const hash = crypto.createHash('md5').update(file.originalname + uniqueSuffix).digest('hex').substring(0, 8);
-    const ext = path.extname(file.originalname);
-    cb(null, `publicgood-logo-${uniqueSuffix}-${hash}${ext}`);
-  }
-});
-
-// Configuration du stockage pour banner
-const bannerStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/publicgoods/banners/');
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const hash = crypto.createHash('md5').update(file.originalname + uniqueSuffix).digest('hex').substring(0, 8);
-    const ext = path.extname(file.originalname);
-    cb(null, `publicgood-banner-${uniqueSuffix}-${hash}${ext}`);
-  }
-});
-
-// Configuration du stockage pour screenshots
-const screenshotStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/publicgoods/screenshots/');
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const hash = crypto.createHash('md5').update(file.originalname + uniqueSuffix).digest('hex').substring(0, 8);
-    const ext = path.extname(file.originalname);
-    cb(null, `publicgood-screenshot-${uniqueSuffix}-${hash}${ext}`);
-  }
-});
-
 // Filtre pour les types de fichiers autorisés
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
   // 1. Vérifier le type MIME
@@ -252,7 +213,7 @@ export const validateUploadedPublicGoodFiles = async (req: Request, res: Respons
 };
 
 // Middleware pour gérer les erreurs d'upload
-export const handlePublicGoodUploadError = (error: Error, req: Request, res: Response, next: NextFunction) => {
+export const handlePublicGoodUploadError = (error: Error, req: Request, res: Response, _next: NextFunction) => {
   if (error instanceof multer.MulterError) {
     logDeduplicator.error('Upload error:', { error: error.message, field: error.field });
     

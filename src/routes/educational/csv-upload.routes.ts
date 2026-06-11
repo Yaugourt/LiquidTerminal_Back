@@ -2,7 +2,7 @@ import express, { Request, Response, RequestHandler } from "express";
 import { CsvResourceService } from "../../services/educational/csv-resource.service";
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validatePrivyToken } from '../../middleware/authMiddleware';
-import { requireModerator, requireAdmin } from '../../middleware/roleMiddleware';
+import { requireModerator } from '../../middleware/roleMiddleware';
 import { 
   uploadCsvResources, 
   handleCsvUploadError, 

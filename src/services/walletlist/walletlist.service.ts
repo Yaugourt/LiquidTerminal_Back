@@ -85,7 +85,7 @@ export class WalletListService extends BaseService<
    * @param id ID de la wallet list à supprimer
    * @throws Erreur si la wallet list ne peut pas être supprimée
    */
-  protected async checkCanDelete(id: number): Promise<void> {
+  protected async checkCanDelete(_id: number): Promise<void> {
     // Les wallet lists peuvent toujours être supprimées
     // Les items seront supprimés en cascade grâce à la contrainte de la DB
     return;

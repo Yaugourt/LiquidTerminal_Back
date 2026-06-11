@@ -73,7 +73,7 @@ export class ReadListItemService extends BaseService<
    * @param data Données de mise à jour
    * @returns true si un autre item avec la même ressource existe déjà, false sinon
    */
-  protected async checkExistsForUpdate(id: number, data: ReadListItemUpdateInput): Promise<boolean> {
+  protected async checkExistsForUpdate(_id: number, _data: ReadListItemUpdateInput): Promise<boolean> {
     // Pour les items, on ne vérifie pas les doublons sur les mises à jour
     // car on ne change pas la ressource ou la read list
     return false;
@@ -84,7 +84,7 @@ export class ReadListItemService extends BaseService<
    * @param id ID de l'item à supprimer
    * @throws Erreur si l'item ne peut pas être supprimé
    */
-  protected async checkCanDelete(id: number): Promise<void> {
+  protected async checkCanDelete(_id: number): Promise<void> {
     // Les items peuvent toujours être supprimés
     return;
   }
@@ -235,8 +235,6 @@ export class ReadListItemService extends BaseService<
       }
 
       return { item: result.updatedItem, xpGranted };
-    } catch (error) {
-      throw error;
     } finally {
       this.repository.resetPrismaClient();
       readListRepository.resetPrismaClient();
@@ -276,8 +274,6 @@ export class ReadListItemService extends BaseService<
           itemsCount: itemOrders.length
         });
       });
-    } catch (error) {
-      throw error;
     } finally {
       this.repository.resetPrismaClient();
       readListRepository.resetPrismaClient();
@@ -311,8 +307,6 @@ export class ReadListItemService extends BaseService<
 
         logDeduplicator.info('Read list item deleted successfully', { itemId, userId });
       });
-    } catch (error) {
-      throw error;
     } finally {
       this.repository.resetPrismaClient();
       readListRepository.resetPrismaClient();
@@ -353,8 +347,6 @@ export class ReadListItemService extends BaseService<
         logDeduplicator.info('Read list item updated successfully', { itemId, userId });
         return updatedItem;
       });
-    } catch (error) {
-      throw error;
     } finally {
       this.repository.resetPrismaClient();
       readListRepository.resetPrismaClient();

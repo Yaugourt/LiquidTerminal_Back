@@ -33,7 +33,7 @@ router.post('/with-upload',
         req.body.categoryIds = JSON.parse(req.body.categoryIds);
       }
       next();
-    } catch (error) {
+    } catch {
       return res.status(400).json({
         success: false,
         error: 'Invalid categoryIds format',

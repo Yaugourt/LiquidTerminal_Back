@@ -71,7 +71,7 @@ export class WalletListItemService extends BaseService<
    * @param data Données de mise à jour
    * @returns true si une autre entité avec les mêmes données existe déjà, false sinon
    */
-  protected async checkExistsForUpdate(id: number, data: WalletListItemUpdateInput): Promise<boolean> {
+  protected async checkExistsForUpdate(_id: number, _data: WalletListItemUpdateInput): Promise<boolean> {
     // Pour les wallet list items, on ne vérifie pas de doublons lors de la mise à jour
     // car on ne peut pas avoir de doublons de userWallet dans une même liste
     return false;
@@ -82,7 +82,7 @@ export class WalletListItemService extends BaseService<
    * @param id ID du wallet list item à supprimer
    * @throws Erreur si le wallet list item ne peut pas être supprimé
    */
-  protected async checkCanDelete(id: number): Promise<void> {
+  protected async checkCanDelete(_id: number): Promise<void> {
     // Les wallet list items peuvent toujours être supprimés
     return;
   }

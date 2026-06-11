@@ -2,8 +2,7 @@ import {
   LinkPreviewResponse, 
   LinkPreviewCreateInput, 
   LinkPreviewUpdateInput,
-  LinkPreviewQueryParams,
-  ExtractedPreviewData
+  LinkPreviewQueryParams
 } from '../../types/linkPreview.types';
 import { 
   LinkPreviewNotFoundError, 
@@ -181,7 +180,7 @@ export class LinkPreviewService extends BaseService<
   /**
    * Surcharge de la méthode checkExistsForUpdate pour les aperçus de liens
    */
-  protected async checkExistsForUpdate(id: number, data: LinkPreviewUpdateInput): Promise<boolean> {
+  protected async checkExistsForUpdate(_id: number, _data: LinkPreviewUpdateInput): Promise<boolean> {
     // Pour les aperçus, on ne vérifie pas les doublons lors de la mise à jour
     return false;
   }

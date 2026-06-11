@@ -1,4 +1,4 @@
-import { BaseResponse, PaginatedResponse, BasePagination } from './common.types';
+import { BaseResponse, BasePagination } from './common.types';
 
 // Types de base pour les validateurs
 export interface ValidatorSummary {

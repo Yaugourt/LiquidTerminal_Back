@@ -13,7 +13,7 @@ export const validateCreateReadList = (req: Request, res: Response, next: NextFu
   try {
     readListCreateSchema.parse(req.body);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
@@ -26,7 +26,7 @@ export const validateUpdateReadList = (req: Request, res: Response, next: NextFu
   try {
     readListUpdateSchema.parse(req.body);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
@@ -40,7 +40,7 @@ export const validateReadListQuery = (req: Request, res: Response, next: NextFun
   try {
     readListQuerySchema.parse(req.query);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid query parameters',
@@ -68,7 +68,7 @@ export const validateUpdateReadListItem = (req: Request, res: Response, next: Ne
   try {
     readListItemUpdateSchema.parse(req.body);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid request data',
@@ -81,7 +81,7 @@ export const validateReadListItemQuery = (req: Request, res: Response, next: Nex
   try {
     readListItemQuerySchema.parse(req.query);
     next();
-  } catch (error) {
+  } catch {
     res.status(400).json({
       success: false,
       error: 'Invalid query parameters',

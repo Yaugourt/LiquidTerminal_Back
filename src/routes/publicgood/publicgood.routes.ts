@@ -1,7 +1,7 @@
 import express, { Request, Response, RequestHandler, NextFunction } from 'express';
 import { PublicGoodService } from '../../services/publicgood/publicgood.service';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
-import { publicGoodCreateSchema, publicGoodUpdateSchema, publicGoodReviewSchema, publicGoodQuerySchema } from '../../schemas/publicgood.schema';
+import { publicGoodCreateSchema, publicGoodUpdateSchema, publicGoodReviewSchema } from '../../schemas/publicgood.schema';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { PublicGoodError } from '../../errors/publicgood.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -187,7 +187,7 @@ router.post('/',
       }
       
       next();
-    } catch (error) {
+    } catch {
       return res.status(400).json({
         success: false,
         error: 'Invalid JSON format in request body',
@@ -292,7 +292,7 @@ router.put('/:id',
       }
       
       next();
-    } catch (error) {
+    } catch {
       return res.status(400).json({
         success: false,
         error: 'Invalid JSON format in request body',
