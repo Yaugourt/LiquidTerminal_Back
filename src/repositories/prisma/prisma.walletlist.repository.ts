@@ -253,6 +253,21 @@ export class PrismaWalletListRepository extends BasePrismaRepository implements 
     );
   }
 
+  async isOwner(walletListId: number, userId: number): Promise<boolean> {
+    return this.executeWithErrorHandling(
+      async () => {
+        const walletList = await this.prismaClient.walletList.findUnique({
+          where: { id: walletListId },
+          select: { userId: true }
+        });
+
+        return !!walletList && walletList.userId === userId;
+      },
+      'checking wallet list ownership',
+      { walletListId, userId }
+    );
+  }
+
   async updateItemsCount(walletListId: number): Promise<void> {
     return this.executeWithErrorHandling(
       async () => {

@@ -46,11 +46,15 @@ export abstract class BasePrismaRepository {
    */
   protected defaultPrismaClient: PrismaClient | PrismaTransactionClient = prisma;
 
-  // Constantes communes pour les sélections
+  // Constantes communes pour les sélections.
+  // NOTE: email is intentionally NOT selected — these projections feed
+  // public-facing creator/owner objects on wallet lists & read lists, and the
+  // listing endpoints are unauthenticated. Exposing user emails here would leak
+  // PII to anonymous callers. Use a dedicated query if an authenticated,
+  // owner-scoped flow ever genuinely needs the email.
   protected static readonly UserSelect = {
     id: true,
-    name: true,
-    email: true
+    name: true
   } as const;
 
   protected static readonly CreatorInclude = {

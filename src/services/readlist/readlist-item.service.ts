@@ -121,7 +121,7 @@ export class ReadListItemService extends BaseService<
           throw new ReadListNotFoundError();
         }
 
-        if (!await readListRepository.hasAccess(data.readListId!, userId)) {
+        if (!await readListRepository.isOwner(data.readListId!, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -198,7 +198,7 @@ export class ReadListItemService extends BaseService<
         }
 
         // Vérifier l'accès à la read list
-        if (!await readListRepository.hasAccess(item.readListId, userId)) {
+        if (!await readListRepository.isOwner(item.readListId, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -259,8 +259,8 @@ export class ReadListItemService extends BaseService<
         this.repository.setPrismaClient(tx);
         readListRepository.setPrismaClient(tx);
 
-        // Vérifier l'accès à la read list
-        if (!await readListRepository.hasAccess(readListId, userId)) {
+        // Vérifier que l'utilisateur est propriétaire (opération d'écriture)
+        if (!await readListRepository.isOwner(readListId, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -302,7 +302,7 @@ export class ReadListItemService extends BaseService<
         }
 
         // Vérifier l'accès à la read list
-        if (!await readListRepository.hasAccess(item.readListId, userId)) {
+        if (!await readListRepository.isOwner(item.readListId, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -310,6 +310,48 @@ export class ReadListItemService extends BaseService<
         await this.delete(itemId);
 
         logDeduplicator.info('Read list item deleted successfully', { itemId, userId });
+      });
+    } catch (error) {
+      throw error;
+    } finally {
+      this.repository.resetPrismaClient();
+      readListRepository.resetPrismaClient();
+    }
+  }
+
+  /**
+   * Met à jour un item avec vérification que l'utilisateur est PROPRIÉTAIRE de la read list.
+   * Sans ce contrôle, n'importe quel utilisateur authentifié pourrait modifier les
+   * items (notes/ordre/statut) d'une liste qui ne lui appartient pas, y compris privée.
+   * @param itemId ID de l'item
+   * @param userId ID de l'utilisateur demandeur
+   * @param data Données de mise à jour (validées/strippées par BaseService.update)
+   */
+  async updateWithPermission(
+    itemId: number,
+    userId: number,
+    data: ReadListItemUpdateInput
+  ): Promise<ReadListItemResponse> {
+    try {
+      return await transactionService.execute(async (tx) => {
+        this.repository.setPrismaClient(tx);
+        readListRepository.setPrismaClient(tx);
+
+        // Vérifier que l'item existe
+        const item = await this.repository.findById(itemId);
+        if (!item) {
+          throw new ReadListItemNotFoundError();
+        }
+
+        // Vérifier que l'utilisateur est propriétaire de la read list
+        if (!await readListRepository.isOwner(item.readListId, userId)) {
+          throw new ReadListPermissionError();
+        }
+
+        const updatedItem = await this.update(itemId, data);
+
+        logDeduplicator.info('Read list item updated successfully', { itemId, userId });
+        return updatedItem;
       });
     } catch (error) {
       throw error;

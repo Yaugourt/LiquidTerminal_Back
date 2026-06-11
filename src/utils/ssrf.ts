@@ -1,5 +1,5 @@
 import { lookup } from 'dns/promises';
-import { isIP, isIPv4 } from 'net';
+import { isIP, isIPv4, type LookupFunction } from 'net';
 import { SSRF_BLOCKED_CIDRS_V4, SSRF_BLOCKED_CIDRS_V6 } from '../constants/security.constants';
 
 function ipv4ToInt(ip: string): number {
@@ -133,3 +133,46 @@ export class SsrfBlockedError extends Error {
     this.name = 'SsrfBlockedError';
   }
 }
+
+/**
+ * A `dns.lookup`-compatible function that resolves a hostname and returns ONLY
+ * non-blocked addresses. Wire it into an http/https Agent so the address the
+ * socket actually connects to is the one that passed the SSRF blocklist —
+ * closing the DNS-rebinding / TOCTOU window where a hostname resolves to a
+ * public IP during validation but to 127.0.0.1 / 169.254.169.254 at connect time.
+ */
+export const safeLookup: LookupFunction = (hostname, options, callback) => {
+  const opts = (typeof options === 'object' && options !== null ? options : {}) as {
+    all?: boolean;
+    family?: number;
+  };
+  const lookupOpts =
+    opts.family === 4 || opts.family === 6
+      ? { all: true as const, family: opts.family }
+      : { all: true as const };
+
+  lookup(hostname, lookupOpts)
+    .then((addresses) => {
+      const safe = addresses.filter((a) => {
+        try {
+          return !isBlockedIp(a.address);
+        } catch {
+          return false;
+        }
+      });
+      if (safe.length === 0) {
+        const err = new SsrfBlockedError(
+          `Refused to connect to ${hostname}: all resolved addresses are blocked`
+        ) as unknown as NodeJS.ErrnoException;
+        err.code = 'SSRF_BLOCKED';
+        callback(err, '');
+        return;
+      }
+      if (opts.all) {
+        callback(null, safe);
+      } else {
+        callback(null, safe[0].address, safe[0].family);
+      }
+    })
+    .catch((err) => callback(err as NodeJS.ErrnoException, ''));
+};

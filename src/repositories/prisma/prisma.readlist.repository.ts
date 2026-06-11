@@ -276,6 +276,21 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
     );
   }
 
+  async isOwner(readListId: number, userId: number): Promise<boolean> {
+    return this.executeWithErrorHandling(
+      async () => {
+        const readList = await this.prismaClient.readList.findUnique({
+          where: { id: readListId },
+          select: { userId: true }
+        });
+
+        return !!readList && readList.userId === userId;
+      },
+      'checking read list ownership',
+      { readListId, userId }
+    );
+  }
+
   async updateItemsCount(readListId: number): Promise<void> {
     return this.executeWithErrorHandling(
       async () => {

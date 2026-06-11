@@ -13,6 +13,7 @@ import {
   WSConnectionStats,
 } from '../types/websocket.types';
 import { CompletedTrade } from '../types/wallet-events.types';
+import { isValidBotApiKey } from '../utils/botApiKey';
 
 /**
  * Internal WebSocket Server
@@ -38,6 +39,17 @@ export class InternalWebSocketServer {
   private static readonly MAX_CONNECTIONS_PER_IP = 5;
   private static readonly MAX_TOTAL_CONNECTIONS = 1000;
   private static readonly MAX_MESSAGES_PER_SECOND = 10;
+
+  // Subscription channels that carry other users' PII (telegramId) and trade
+  // activity. They are fanned out only to authenticated (bot) connections.
+  // 'liquidation' stays public (on-chain data, also consumed by the frontend).
+  private static readonly PRIVATE_SUBSCRIPTION_TYPES: ReadonlySet<string> = new Set([
+    'wallet_event',
+    'liquidation_alert',
+    'fill_alert',
+    'doc_update_alert',
+    'bot_announcement',
+  ]);
   private messageCounters: Map<string, { count: number; resetAt: number }> = new Map();
 
   // Heartbeat
@@ -196,6 +208,14 @@ export class InternalWebSocketServer {
       isAuthenticated: false,
     };
 
+    // Authenticate the connection when it presents a valid bot API key on the
+    // upgrade handshake (`Authorization: Bot <key>`). Only authenticated
+    // connections may subscribe to per-user channels (see handleSubscribe).
+    const authHeader = req.headers['authorization'];
+    if (typeof authHeader === 'string' && authHeader.startsWith('Bot ') && isValidBotApiKey(authHeader.slice(4))) {
+      client.isAuthenticated = true;
+    }
+
     this.clients.set(clientId, client);
     this.clientsBySocket.set(ws, clientId);
     this.incrementIpCount(ip);
@@ -298,6 +318,26 @@ export class InternalWebSocketServer {
           'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Per-user channels expose other users' PII (telegramId) + trade activity:
+    // only an authenticated bot connection may subscribe to them.
+    if (
+      InternalWebSocketServer.PRIVATE_SUBSCRIPTION_TYPES.has(subType) &&
+      !client.isAuthenticated
+    ) {
+      this.sendMessage(ws, {
+        type: 'error',
+        error: 'Authentication required for this subscription type',
+        code: 'UNAUTHORIZED',
+        timestamp: new Date().toISOString(),
+      });
+      logDeduplicator.warn('InternalWebSocketServer: Unauthenticated subscription rejected', {
+        clientId: client.id,
+        ip: client.ip,
+        type: subType,
       });
       return;
     }

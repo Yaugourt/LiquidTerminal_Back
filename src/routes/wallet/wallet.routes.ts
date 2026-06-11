@@ -166,9 +166,10 @@ router.post("/", validatePrivyToken, validateCreateWallet, (async (req: Request,
     let walletListItem = null;
     if (walletListId) {
       try {
-        // Vérifier que l'utilisateur a accès à la wallet list
-        const hasAccess = await walletListService.hasAccess(walletListId, user.id);
-        if (!hasAccess) {
+        // Écriture : seul le propriétaire peut ajouter un wallet à la liste
+        // (hasAccess autoriserait aussi les listes publiques d'autrui).
+        const isOwner = await walletListService.isOwner(walletListId, user.id);
+        if (!isOwner) {
           logDeduplicator.warn('User attempted to add wallet to inaccessible list', {
             userId: user.id,
             walletListId,

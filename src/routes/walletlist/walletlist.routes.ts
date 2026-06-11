@@ -57,10 +57,11 @@ router.post('/', validatePrivyToken, (async (req: Request, res: Response) => {
   }
 }) as RequestHandler);
 
-// Lister toutes les wallet lists
+// Lister les wallet lists publiques (endpoint non authentifié : ne jamais
+// exposer les listes privées — on force isPublic via getPublicLists).
 router.get('/', validateWalletListQuery, (async (req: Request, res: Response) => {
   try {
-    const walletLists = await walletListService.getAll(req.query);
+    const walletLists = await walletListService.getPublicLists(req.query);
     res.json({ success: true, data: walletLists.data, pagination: walletLists.pagination });
   } catch (error) {
     logDeduplicator.error('Error fetching wallet lists:', { error: error instanceof Error ? error.message : String(error) });
@@ -169,8 +170,8 @@ router.put('/:id', validatePrivyToken, validateUpdateWalletList, (async (req: Re
     }
 
     // Vérifier que l'utilisateur a accès à la wallet list
-    const hasAccess = await walletListService.hasAccess(id, user.id);
-    if (!hasAccess) {
+    const isOwner = await walletListService.isOwner(id, user.id);
+    if (!isOwner) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
 
@@ -205,8 +206,8 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
     }
 
     // Vérifier que l'utilisateur a accès à la wallet list
-    const hasAccess = await walletListService.hasAccess(id, user.id);
-    if (!hasAccess) {
+    const isOwner = await walletListService.isOwner(id, user.id);
+    if (!isOwner) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
 
@@ -303,8 +304,8 @@ router.post('/:id/items', validatePrivyToken, validateCreateWalletListItem, (asy
     }
 
     // Vérifier que l'utilisateur a accès à la wallet list
-    const hasAccess = await walletListService.hasAccess(walletListId, user.id);
-    if (!hasAccess) {
+    const isOwner = await walletListService.isOwner(walletListId, user.id);
+    if (!isOwner) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
 
@@ -348,8 +349,8 @@ router.put('/items/:itemId', validatePrivyToken, validateUpdateWalletListItem, (
 
     // Récupérer l'item pour vérifier les permissions
     const existingItem = await walletListItemService.getById(itemId);
-    const hasAccess = await walletListService.hasAccess(existingItem.walletListId, user.id);
-    if (!hasAccess) {
+    const isOwner = await walletListService.isOwner(existingItem.walletListId, user.id);
+    if (!isOwner) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
 
@@ -385,8 +386,8 @@ router.delete('/items/:itemId', validatePrivyToken, (async (req: Request, res: R
 
     // Récupérer l'item pour vérifier les permissions
     const existingItem = await walletListItemService.getById(itemId);
-    const hasAccess = await walletListService.hasAccess(existingItem.walletListId, user.id);
-    if (!hasAccess) {
+    const isOwner = await walletListService.isOwner(existingItem.walletListId, user.id);
+    if (!isOwner) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
 

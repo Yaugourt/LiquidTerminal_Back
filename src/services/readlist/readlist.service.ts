@@ -116,6 +116,23 @@ export class ReadListService extends BaseService<
   }
 
   /**
+   * Vérifie si l'utilisateur est le propriétaire de la read list.
+   * À utiliser pour toute opération d'ÉCRITURE — `hasAccess` accorde aussi
+   * l'accès aux listes publiques et ne doit servir qu'en lecture.
+   * @param readListId ID de la read list
+   * @param userId ID de l'utilisateur
+   * @returns true si l'utilisateur est propriétaire, false sinon
+   */
+  async isOwner(readListId: number, userId: number): Promise<boolean> {
+    try {
+      return await this.repository.isOwner(readListId, userId);
+    } catch (error) {
+      logDeduplicator.error('Error checking read list ownership:', { error: error instanceof Error ? error.message : String(error), readListId, userId });
+      return false;
+    }
+  }
+
+  /**
    * Récupère une read list avec vérification des permissions
    * @param id ID de la read list
    * @param userId ID de l'utilisateur demandeur

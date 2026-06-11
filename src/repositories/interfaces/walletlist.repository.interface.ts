@@ -79,9 +79,14 @@ export interface WalletListRepository extends BaseRepository {
   }>;
 
   /**
-   * Vérifie si un utilisateur a accès à une wallet list
+   * Vérifie si un utilisateur a accès EN LECTURE à une wallet list (propriétaire OU liste publique)
    */
   hasAccess(walletListId: number, userId: number): Promise<boolean>;
+
+  /**
+   * Vérifie si l'utilisateur est le PROPRIÉTAIRE de la wallet list (pour les écritures)
+   */
+  isOwner(walletListId: number, userId: number): Promise<boolean>;
 
   /**
    * Met à jour le nombre d'items dans une wallet list

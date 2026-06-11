@@ -14,10 +14,14 @@ import { prisma } from '../core/prisma.service';
 
 // ---------- User selectors aligned with the frontend contract ------------
 
-const USER_SELECT_FULL = { id: true, name: true, email: true } as const;
+// email is intentionally NOT selected: creator/submitter/reviewer objects are
+// returned on UNAUTHENTICATED public endpoints (GET /educational/resources,
+// GET /readlists/:id, GET /publicgoods). Selecting email would leak user PII to
+// anonymous callers. The frontend never renders these emails.
+const USER_SELECT_FULL = { id: true, name: true } as const;
 const USER_SELECT_MINIMAL = { id: true, name: true } as const;
 
-export type UserFull = { id: number; name: string | null; email: string | null };
+export type UserFull = { id: number; name: string | null };
 export type UserMinimal = { id: number; name: string | null };
 
 // ---------- Internal: batched User lookup (deduped, single round-trip) ----
@@ -44,8 +48,8 @@ async function fetchUsersMinimal(userIds: number[]): Promise<Map<number, UserMin
 
 // ---------- attachCreator -------------------------------------------------
 // Used by: EducationalResource (addedBy → creator), EducationalCategory
-// (createdBy → creator), ReadList (userId → creator). Frontend expects
-// creator = { id, name, email }.
+// (createdBy → creator), ReadList (userId → creator). creator = { id, name }
+// (no email — see USER_SELECT_FULL note above).
 
 export async function attachCreator<T extends Record<string, unknown>, K extends keyof T>(
   rows: T[],
@@ -108,8 +112,8 @@ export async function attachReporter<
 }
 
 // ---------- attachSubmitter / attachReviewedBy (PublicGood) ---------------
-// Frontend expects submittedBy = { id, name, email } (always),
-// reviewedBy = { id, name, email } | null.
+// submittedBy = { id, name } (always), reviewedBy = { id, name } | null.
+// No email — these are returned on the public GET /publicgoods listing.
 
 export async function attachSubmitter<
   T extends Record<string, unknown>,

@@ -12,7 +12,6 @@ export interface WalletListResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   items: WalletListItemResponse[];
 }
@@ -46,7 +45,6 @@ export interface WalletListItemResponse {
     User: {
       id: number;
       name: string | null;
-      email: string | null;
     };
     Wallet: {
       id: number;
@@ -81,7 +79,6 @@ export interface WalletListSummaryResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   itemsCount: number;
 }

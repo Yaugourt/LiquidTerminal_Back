@@ -216,8 +216,8 @@ export class WalletListItemService extends BaseService<
   ): Promise<void> {
     try {
       // Vérifier l'accès à la wallet list
-      const hasAccess = await this.walletListRepository.hasAccess(walletListId, userId);
-      if (!hasAccess) {
+      const isOwner = await this.walletListRepository.isOwner(walletListId, userId);
+      if (!isOwner) {
         throw new WalletListNotFoundError();
       }
 
@@ -282,8 +282,8 @@ export class WalletListItemService extends BaseService<
   async removeFromWalletList(walletListId: number, userWalletId: number, userId: number): Promise<void> {
     try {
       // Vérifier l'accès à la wallet list
-      const hasAccess = await this.walletListRepository.hasAccess(walletListId, userId);
-      if (!hasAccess) {
+      const isOwner = await this.walletListRepository.isOwner(walletListId, userId);
+      if (!isOwner) {
         throw new WalletListNotFoundError();
       }
 

@@ -1,0 +1,42 @@
+# Secrets & local env — never copy into the build context/image layers
+.env
+.env.*
+!.env.example
+
+# VCS & CI
+.git
+.github
+.gitignore
+
+# Dependencies & build outputs (reinstalled/rebuilt inside the image)
+node_modules
+dist
+build
+coverage
+
+# Local data that must never land in an image
+logs
+uploads
+backups
+*.dump
+*.log
+
+# Prisma generated clients (regenerated in the build)
+prisma-historical/generated
+prisma-content/generated
+prisma-telegram/generated
+
+# Editor / agent tooling
+.vscode
+.idea
+.cursor
+.agents
+.agent
+.gemini
+
+# Misc
+*.tsbuildinfo
+.DS_Store
+README.md
+docs
+tests

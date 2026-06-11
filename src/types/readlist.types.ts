@@ -12,7 +12,6 @@ export interface ReadListResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   items: ReadListItemResponse[];
 }
@@ -78,7 +77,6 @@ export interface ReadListSummaryResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   itemsCount: number;
 }

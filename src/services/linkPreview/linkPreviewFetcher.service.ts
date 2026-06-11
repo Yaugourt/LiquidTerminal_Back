@@ -1,9 +1,11 @@
 import * as cheerio from 'cheerio';
 import axios from 'axios';
+import { Agent as HttpAgent } from 'http';
+import { Agent as HttpsAgent } from 'https';
 import { ExtractedPreviewData } from '../../types/linkPreview.types';
 import { LinkPreviewFetchError, LinkPreviewTimeoutError } from '../../errors/linkPreview.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { assertHostnameNotBlocked, SsrfBlockedError } from '../../utils/ssrf';
+import { assertHostnameNotBlocked, SsrfBlockedError, safeLookup } from '../../utils/ssrf';
 
 export class LinkPreviewFetcherService {
   private static instance: LinkPreviewFetcherService;
@@ -12,6 +14,11 @@ export class LinkPreviewFetcherService {
   private readonly MAX_RETRIES = 3; // 3 tentatives
   private readonly RETRY_DELAY = 2000; // 2 secondes entre chaque tentative
   private readonly MAX_REDIRECTS = 5;
+
+  // Agents that resolve via safeLookup, so the socket connects only to an
+  // address that passed the SSRF blocklist (no DNS-rebinding/TOCTOU window).
+  private readonly httpAgent = new HttpAgent({ lookup: safeLookup });
+  private readonly httpsAgent = new HttpsAgent({ lookup: safeLookup });
 
   private constructor() {}
 
@@ -86,6 +93,8 @@ export class LinkPreviewFetcherService {
       timeout: this.REQUEST_TIMEOUT,
       maxRedirects: 0,
       maxContentLength: this.MAX_CONTENT_LENGTH,
+      httpAgent: this.httpAgent,
+      httpsAgent: this.httpsAgent,
       // Accept 3xx as success so we can handle redirects ourselves.
       validateStatus: (s) => (s >= 200 && s < 300) || (s >= 300 && s < 400),
     });

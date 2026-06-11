@@ -10,6 +10,28 @@ import {
   attachSubmitterAndReviewerOne
 } from '../../utils/cross-db-enrich';
 
+// Colonnes réellement modifiables par le soumetteur via create/update.
+// Tout le reste — status, submitterId, reviewerId, reviewedAt, reviewNotes — est
+// géré EXCLUSIVEMENT par le flux de modération (`review()`), jamais accepté depuis
+// le corps de requête. Cela empêche l'auto-approbation par mass-assignment.
+const PUBLIC_GOOD_WRITABLE_FIELDS = [
+  'name', 'description', 'githubUrl', 'demoUrl', 'websiteUrl', 'category',
+  'discordContact', 'telegramContact', 'logo', 'banner', 'screenshots',
+  'problemSolved', 'targetUsers', 'hlIntegration', 'developmentStatus',
+  'leadDeveloperName', 'leadDeveloperContact', 'teamSize', 'experienceLevel',
+  'technologies', 'supportTypes', 'contributorTypes', 'budgetRange',
+] as const;
+
+function pickWritablePublicGoodFields(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of PUBLIC_GOOD_WRITABLE_FIELDS) {
+    if (data[key] !== undefined) {
+      out[key] = data[key];
+    }
+  }
+  return out;
+}
+
 export class PrismaPublicGoodRepository extends BasePrismaRepository implements PublicGoodRepository {
   constructor() {
     super();
@@ -120,7 +142,7 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
       async () => {
         const publicGood = await this.prismaClient.publicGood.create({
           data: {
-            ...data,
+            ...(pickWritablePublicGoodFields(data as unknown as Record<string, unknown>) as unknown as PublicGoodCreateInput),
             submitterId: data.submitterId!,
             status: 'PENDING' as ProjectStatus
           }
@@ -143,7 +165,7 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
       async () => {
         const publicGood = await this.prismaClient.publicGood.update({
           where: { id },
-          data
+          data: pickWritablePublicGoodFields(data as unknown as Record<string, unknown>) as PublicGoodUpdateInput
         });
 
         const enriched = await attachSubmitterAndReviewerOne(

@@ -79,9 +79,14 @@ export interface ReadListRepository extends BaseRepository {
   }>;
 
   /**
-   * Vérifie si un utilisateur a accès à une read list
+   * Vérifie si un utilisateur a accès EN LECTURE à une read list (propriétaire OU liste publique)
    */
   hasAccess(readListId: number, userId: number): Promise<boolean>;
+
+  /**
+   * Vérifie si l'utilisateur est le PROPRIÉTAIRE de la read list (pour les écritures)
+   */
+  isOwner(readListId: number, userId: number): Promise<boolean>;
 
   /**
    * Met à jour le nombre d'items dans une read list

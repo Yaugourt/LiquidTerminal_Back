@@ -1,10 +1,13 @@
 # ─── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM node:20.19.0-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
+# DATABASE_URL is needed by `prisma generate` at build time (as a build ARG,
+# available to RUN steps) but is intentionally NOT promoted to ENV — that would
+# bake the DB credentials into the image config, recoverable via `docker inspect`.
+# For a fully leak-free build, pass it as a BuildKit secret instead.
 ARG DATABASE_URL
-ENV DATABASE_URL=$DATABASE_URL
 
 # Dépendances — layer en cache tant que package.json ne change pas
 COPY package*.json ./
@@ -29,9 +32,11 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ─── Stage 2: Production ──────────────────────────────────────────────────────
-FROM node:20.19.0-alpine AS production
+FROM node:22-alpine AS production
 
 WORKDIR /app
+
+ENV NODE_ENV=production
 
 # node_modules déjà élagués + clients Prisma générés — aucune install supplémentaire
 COPY --from=builder /app/node_modules ./node_modules
@@ -45,5 +50,8 @@ COPY --from=builder /app/package.json ./
 COPY --from=builder /app/scripts ./scripts/
 
 EXPOSE 3002
+
+# Drop root: run as the unprivileged `node` user shipped in the base image.
+USER node
 
 CMD ["node", "dist/app.js"]

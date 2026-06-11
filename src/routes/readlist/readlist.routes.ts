@@ -59,10 +59,11 @@ router.post('/', validatePrivyToken, (async (req: Request, res: Response) => {
   }
 }) as RequestHandler);
 
-// Lister toutes les read lists
+// Lister les read lists publiques (endpoint non authentifié : ne jamais
+// exposer les listes privées — on force isPublic via getPublicLists).
 router.get('/', validateReadListQuery, (async (req: Request, res: Response) => {
   try {
-    const readLists = await readListService.getAll(req.query);
+    const readLists = await readListService.getPublicLists(req.query);
     res.json({ success: true, data: readLists.data, pagination: readLists.pagination });
   } catch (error) {
     logDeduplicator.error('Error fetching read lists:', { error: error instanceof Error ? error.message : String(error) });
@@ -170,7 +171,9 @@ router.put('/:id', validatePrivyToken, validateUpdateReadList, (async (req: Requ
       return res.status(401).json({ success: false, error: 'User not found', code: 'USER_NOT_FOUND' });
     }
 
-    await readListService.getByIdWithPermission(id, user.id);
+    if (!await readListService.isOwner(id, user.id)) {
+      return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
+    }
     const readList = await readListService.update(id, req.body);
     res.json({ success: true, message: 'Read list updated successfully', data: readList });
   } catch (error) {
@@ -201,7 +204,9 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
       return res.status(401).json({ success: false, error: 'User not found', code: 'USER_NOT_FOUND' });
     }
 
-    await readListService.getByIdWithPermission(id, user.id);
+    if (!await readListService.isOwner(id, user.id)) {
+      return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
+    }
     await readListService.delete(id);
     res.json({ success: true, message: 'Read list deleted successfully' });
   } catch (error) {
@@ -284,7 +289,18 @@ router.put('/items/:itemId', validatePrivyToken, validateUpdateReadListItem, (as
       return res.status(400).json({ success: false, error: 'Invalid item ID format', code: 'INVALID_ID_FORMAT' });
     }
 
-    const item = await readListItemService.update(itemId, req.body);
+    const privyUserId = req.user?.sub;
+    if (!privyUserId) {
+      return res.status(401).json({ success: false, error: 'User not authenticated', code: 'UNAUTHENTICATED' });
+    }
+
+    // Récupère l'utilisateur depuis la DB
+    const user = await prisma.user.findUnique({ where: { privyUserId } });
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'User not found', code: 'USER_NOT_FOUND' });
+    }
+
+    const item = await readListItemService.updateWithPermission(itemId, user.id, req.body);
     res.json({ success: true, message: 'Read list item updated successfully', data: item });
   } catch (error) {
     logDeduplicator.error('Error updating read list item:', { error: error instanceof Error ? error.message : String(error), id: req.params.itemId, body: req.body });
