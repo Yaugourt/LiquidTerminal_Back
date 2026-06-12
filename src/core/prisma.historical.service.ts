@@ -16,9 +16,14 @@ class PrismaHistoricalService {
 
       const pool = new Pool({
         connectionString: process.env.HISTORICAL_DATABASE_URL,
+        // This pool absorbs the liquidations ingestion writes — without an
+        // explicit max it fell back to pg defaults (10) and was the first
+        // pool to time out under load
+        max: parseInt(process.env.HISTORICAL_DB_POOL_MAX || '20', 10),
+        min: parseInt(process.env.HISTORICAL_DB_POOL_MIN || '2', 10),
         // Prevent stale connections after DB restarts
         idleTimeoutMillis: 10000,       // recycle idle connections after 10s
-        connectionTimeoutMillis: 5000,  // fail fast if DB unreachable
+        connectionTimeoutMillis: 10000, // aligned with the main DB pool
         keepAlive: true,                // detect dead TCP connections early
       });
       const adapter = new PrismaPg(pool);

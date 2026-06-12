@@ -2,6 +2,7 @@ import { BaseApiService } from '../../core/base.api.service';
 import { SpotUSDCData } from '../../types/market.types';
 import { USDCDataError } from '../../errors/spot.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../utils/guardedInterval';
 import { redisService } from '../../core/redis.service';
 import { CircuitBreakerService } from '../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
@@ -42,15 +43,11 @@ export class SpotUSDCClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting SpotUSDC polling');
-    this.updateSpotUSDCData().catch(err =>
-      logDeduplicator.error('Error in initial SpotUSDC update:', { error: err instanceof Error ? err.message : String(err) })
+    this.pollingInterval = startGuardedInterval(
+      'SpotUSDC polling',
+      () => this.updateSpotUSDCData(),
+      this.UPDATE_INTERVAL
     );
-
-    this.pollingInterval = setInterval(() => {
-      this.updateSpotUSDCData().catch(err =>
-        logDeduplicator.error('Error in SpotUSDC polling:', { error: err instanceof Error ? err.message : String(err) })
-      );
-    }, this.UPDATE_INTERVAL);
   }
 
   public stopPolling(): void {

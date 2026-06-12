@@ -53,6 +53,34 @@ function parseRetryAfterMs(value: string | undefined | null): number | undefined
   return undefined;
 }
 
+/**
+ * Global cap on concurrent outbound HTTP requests across all API clients.
+ * Native fetch has no socket limit: when an upstream slows down, dozens of
+ * 30s-timeout requests (plus their retries) pile up and exhaust sockets,
+ * which surfaces as "fetch failed" on every client at once.
+ */
+const MAX_CONCURRENT_OUTBOUND_REQUESTS = 50;
+let activeOutboundRequests = 0;
+const outboundWaitQueue: Array<() => void> = [];
+
+async function acquireOutboundSlot(): Promise<void> {
+  if (activeOutboundRequests < MAX_CONCURRENT_OUTBOUND_REQUESTS) {
+    activeOutboundRequests++;
+    return;
+  }
+  await new Promise<void>((resolve) => outboundWaitQueue.push(resolve));
+}
+
+function releaseOutboundSlot(): void {
+  const next = outboundWaitQueue.shift();
+  if (next) {
+    // Hand the slot directly to the next waiter; activeOutboundRequests unchanged
+    next();
+  } else {
+    activeOutboundRequests--;
+  }
+}
+
 export abstract class BaseApiService {
     private readonly API_TIMEOUT = 30000; // 30 secondes au lieu de 5
     private readonly MAX_RETRIES = 3;
@@ -80,6 +108,9 @@ export abstract class BaseApiService {
         method: options.method,
         timeout: timeoutMs
       });
+
+      // Queue wait is intentionally outside the request timeout window
+      await acquireOutboundSlot();
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -133,6 +164,7 @@ export abstract class BaseApiService {
         throw error;
       } finally {
         clearTimeout(timeout);
+        releaseOutboundSlot();
       }
     }
 

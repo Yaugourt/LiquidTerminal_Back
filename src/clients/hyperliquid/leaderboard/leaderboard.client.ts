@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../../utils/guardedInterval';
 
 export class HyperliquidLeaderboardClient extends BaseApiService {
   private static instance: HyperliquidLeaderboardClient;
@@ -42,15 +43,11 @@ export class HyperliquidLeaderboardClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting leaderboard polling');
-    this.updateLeaderboardData().catch(err =>
-      logDeduplicator.error('Error in initial leaderboard update:', { error: err instanceof Error ? err.message : String(err) })
+    this.pollingInterval = startGuardedInterval(
+      'Leaderboard polling',
+      () => this.updateLeaderboardData(),
+      this.UPDATE_INTERVAL
     );
-
-    this.pollingInterval = setInterval(() => {
-      this.updateLeaderboardData().catch(err =>
-        logDeduplicator.error('Error in leaderboard polling:', { error: err instanceof Error ? err.message : String(err) })
-      );
-    }, this.UPDATE_INTERVAL);
   }
 
   public stopPolling(): void {

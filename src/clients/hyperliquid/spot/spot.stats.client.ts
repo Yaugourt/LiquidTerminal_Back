@@ -1,6 +1,7 @@
 import { redisService } from '../../../core/redis.service';
 import { SpotGlobalStats, MarketData } from '../../../types/market.types';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../../utils/guardedInterval';
 
 export class HyperliquidSpotStatsClient {
   private static instance: HyperliquidSpotStatsClient | null = null;
@@ -28,15 +29,11 @@ export class HyperliquidSpotStatsClient {
     }
 
     logDeduplicator.info('Starting spot stats polling');
-    this.updateSpotStats().catch(err =>
-      logDeduplicator.error('Error in initial spot stats update:', { error: err instanceof Error ? err.message : String(err) })
+    this.pollingInterval = startGuardedInterval(
+      'Spot stats polling',
+      () => this.updateSpotStats(),
+      HyperliquidSpotStatsClient.UPDATE_INTERVAL
     );
-
-    this.pollingInterval = setInterval(() => {
-      this.updateSpotStats().catch(err =>
-        logDeduplicator.error('Error in spot stats polling:', { error: err instanceof Error ? err.message : String(err) })
-      );
-    }, HyperliquidSpotStatsClient.UPDATE_INTERVAL);
   }
 
   public stopPolling(): void {

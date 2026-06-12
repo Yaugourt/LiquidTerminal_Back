@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../../utils/guardedInterval';
 
 export class HyperliquidPerpClient extends BaseApiService {
   private static instance: HyperliquidPerpClient;
@@ -44,17 +45,11 @@ export class HyperliquidPerpClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting perp polling');
-    // Faire une première mise à jour immédiate
-    this.updatePerpData().catch(error => {
-      logDeduplicator.error('Error in initial perp update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updatePerpData().catch(error => {
-        logDeduplicator.error('Error in perp polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, this.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Perp polling',
+      () => this.updatePerpData(),
+      this.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

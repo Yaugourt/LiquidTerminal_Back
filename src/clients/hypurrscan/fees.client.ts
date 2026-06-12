@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../utils/guardedInterval';
 
 export class HypurrscanFeesClient extends BaseApiService {
   private static instance: HypurrscanFeesClient;
@@ -47,15 +48,11 @@ export class HypurrscanFeesClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting fees polling');
-    this.updateFeesData().catch(error => {
-      logDeduplicator.error('Error in initial fees update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    this.pollingInterval = setInterval(() => {
-      this.updateFeesData().catch(error => {
-        logDeduplicator.error('Error in fees polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, HypurrscanFeesClient.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Fees polling',
+      () => this.updateFeesData(),
+      HypurrscanFeesClient.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

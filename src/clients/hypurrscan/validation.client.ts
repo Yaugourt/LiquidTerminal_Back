@@ -5,6 +5,7 @@ import { ValidationRawData } from '../../types/staking.types';
 import { redisService } from '../../core/redis.service';
 import { withDistributedLock } from '../../utils/distributedLock';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../utils/guardedInterval';
 
 export class HypurrscanValidationClient extends BaseApiService {
   private static instance: HypurrscanValidationClient;
@@ -43,17 +44,11 @@ export class HypurrscanValidationClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting Hypurrscan validation polling');
-    // Faire une première mise à jour immédiate
-    this.updateValidations().catch(error => {
-      logDeduplicator.error('Error in initial Hypurrscan validation update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updateValidations().catch(error => {
-        logDeduplicator.error('Error in Hypurrscan validation polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, HypurrscanValidationClient.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Hypurrscan validation polling',
+      () => this.updateValidations(),
+      HypurrscanValidationClient.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

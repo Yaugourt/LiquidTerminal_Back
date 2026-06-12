@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../../utils/guardedInterval';
 
 export class ValidatorClient extends BaseApiService {
   private static instance: ValidatorClient;
@@ -43,17 +44,11 @@ export class ValidatorClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting validator polling');
-    // Faire une première mise à jour immédiate
-    this.updateValidators().catch(error => {
-      logDeduplicator.error('Error in initial validator update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updateValidators().catch(error => {
-        logDeduplicator.error('Error in validator polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, this.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Validator polling',
+      () => this.updateValidators(),
+      this.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

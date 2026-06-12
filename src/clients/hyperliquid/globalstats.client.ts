@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../utils/guardedInterval';
 
 interface RawGlobalStats {
   totalVolume: number;
@@ -82,17 +83,11 @@ export class HyperliquidGlobalStatsClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting global stats polling');
-    // Make an initial update
-    this.updateGlobalStats().catch(err =>
-      logDeduplicator.error('Error in initial global stats update:', { error: err instanceof Error ? err.message : String(err) })
+    this.pollingInterval = startGuardedInterval(
+      'Global stats polling',
+      () => this.updateGlobalStats(),
+      this.UPDATE_INTERVAL
     );
-
-    // Start regular polling
-    this.pollingInterval = setInterval(() => {
-      this.updateGlobalStats().catch(err =>
-        logDeduplicator.error('Error in global stats polling:', { error: err instanceof Error ? err.message : String(err) })
-      );
-    }, this.UPDATE_INTERVAL);
   }
 
   public stopPolling(): void {

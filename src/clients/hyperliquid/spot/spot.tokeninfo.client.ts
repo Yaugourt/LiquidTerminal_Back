@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../../utils/guardedInterval';
 
 export class HyperliquidTokenInfoClient extends BaseApiService {
   private static instance: HyperliquidTokenInfoClient;
@@ -43,13 +44,11 @@ export class HyperliquidTokenInfoClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting token info polling');
-    
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updateAllTokens().catch(error => {
-        logDeduplicator.error('Error in token info polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, this.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Token info polling',
+      () => this.updateAllTokens(),
+      this.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

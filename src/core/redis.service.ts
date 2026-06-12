@@ -8,7 +8,7 @@ const REDIS_CONFIG = {
   enableReadyCheck: true, // Wait for Redis to be ready before accepting commands
   lazyConnect: false,
   connectTimeout: 10000, // 10s connect (was 30s - fail faster on real connection issues)
-  commandTimeout: 5000, // 5s per command (was 10s - avoid long hangs under load)
+  commandTimeout: 10000, // 10s per command (5s proved too aggressive under load: bursts of publishes from the pollers turned a slow Redis into a cascade of "Command timed out" + retries)
   enableOfflineQueue: false, // Fail-fast instead of silently queuing when disconnected
   keepAlive: 10000, // 10s keepalive (was 30s - detect dead connections faster)
   retryStrategy: (times: number) => {

@@ -4,6 +4,7 @@ import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { AuctionInfo } from '../../types/auction.types';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../utils/guardedInterval';
 
 export class HypurrscanClient extends BaseApiService {
   private static instance: HypurrscanClient;
@@ -42,17 +43,11 @@ export class HypurrscanClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting Hypurrscan polling');
-    // Faire une première mise à jour immédiate
-    this.updateAuctions().catch(error => {
-      logDeduplicator.error('Error in initial Hypurrscan update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updateAuctions().catch(error => {
-        logDeduplicator.error('Error in Hypurrscan polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, HypurrscanClient.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Hypurrscan auction polling',
+      () => this.updateAuctions(),
+      HypurrscanClient.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

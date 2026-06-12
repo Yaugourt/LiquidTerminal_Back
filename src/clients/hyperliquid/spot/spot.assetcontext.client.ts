@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../../utils/guardedInterval';
 import * as unitTokens from './unit.json';
 
 export class HyperliquidSpotClient extends BaseApiService {
@@ -45,15 +46,11 @@ export class HyperliquidSpotClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting spot polling');
-    this.updateSpotData().catch(err =>
-      logDeduplicator.error('Error in initial spot update:', { error: err instanceof Error ? err.message : String(err) })
+    this.pollingInterval = startGuardedInterval(
+      'Spot polling',
+      () => this.updateSpotData(),
+      this.UPDATE_INTERVAL
     );
-
-    this.pollingInterval = setInterval(() => {
-      this.updateSpotData().catch(err =>
-        logDeduplicator.error('Error in spot polling:', { error: err instanceof Error ? err.message : String(err) })
-      );
-    }, this.UPDATE_INTERVAL);
   }
 
   private async updateSpotData(): Promise<void> {

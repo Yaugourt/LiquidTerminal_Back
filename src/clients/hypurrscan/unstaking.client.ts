@@ -5,6 +5,7 @@ import { UnstakingQueueRawData } from '../../types/staking.types';
 import { redisService } from '../../core/redis.service';
 import { withDistributedLock } from '../../utils/distributedLock';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../utils/guardedInterval';
 
 export class HypurrscanUnstakingClient extends BaseApiService {
   private static instance: HypurrscanUnstakingClient;
@@ -43,17 +44,11 @@ export class HypurrscanUnstakingClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting Hypurrscan unstaking polling');
-    // Faire une première mise à jour immédiate
-    this.updateUnstakingQueue().catch(error => {
-      logDeduplicator.error('Error in initial Hypurrscan unstaking update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updateUnstakingQueue().catch(error => {
-        logDeduplicator.error('Error in Hypurrscan unstaking polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, HypurrscanUnstakingClient.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Hypurrscan unstaking polling',
+      () => this.updateUnstakingQueue(),
+      HypurrscanUnstakingClient.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

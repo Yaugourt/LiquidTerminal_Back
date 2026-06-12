@@ -3,6 +3,7 @@ import { VaultData } from '../../../types/vault.types';
 import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../../utils/guardedInterval';
 import { redisService } from '../../../core/redis.service';
 
 export class HyperliquidVaultsClient extends BaseApiService {
@@ -106,17 +107,11 @@ export class HyperliquidVaultsClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting vaults polling');
-    // Faire une première mise à jour immédiate
-    this.updateVaultsList().catch(error => {
-      logDeduplicator.error('Error in initial vaults update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updateVaultsList().catch(error => {
-        logDeduplicator.error('Error in vaults polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, HyperliquidVaultsClient.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Vaults polling',
+      () => this.updateVaultsList(),
+      HyperliquidVaultsClient.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {

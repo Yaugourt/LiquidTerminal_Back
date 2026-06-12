@@ -4,6 +4,7 @@ import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { StakedHoldersData } from '../../types/staking.types';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { startGuardedInterval } from '../../utils/guardedInterval';
 
 export class HypurrscanStakedHoldersClient extends BaseApiService {
   private static instance: HypurrscanStakedHoldersClient;
@@ -42,17 +43,11 @@ export class HypurrscanStakedHoldersClient extends BaseApiService {
     }
 
     logDeduplicator.info('Starting Hypurrscan staked holders polling');
-    // Faire une première mise à jour immédiate
-    this.updateStakedHolders().catch(error => {
-      logDeduplicator.error('Error in initial staked holders update:', { error: error instanceof Error ? error.message : String(error) });
-    });
-
-    // Démarrer le polling régulier
-    this.pollingInterval = setInterval(() => {
-      this.updateStakedHolders().catch(error => {
-        logDeduplicator.error('Error in staked holders polling:', { error: error instanceof Error ? error.message : String(error) });
-      });
-    }, HypurrscanStakedHoldersClient.UPDATE_INTERVAL);
+    this.pollingInterval = startGuardedInterval(
+      'Hypurrscan staked holders polling',
+      () => this.updateStakedHolders(),
+      HypurrscanStakedHoldersClient.UPDATE_INTERVAL
+    );
   }
 
   public stopPolling(): void {
