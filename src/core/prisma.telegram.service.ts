@@ -22,6 +22,15 @@ class PrismaTelegramService {
         min: 2,
         keepAlive: true,
       });
+
+      // Without this listener, an idle-client error (e.g. Postgres dropping the
+      // connection) bubbles up as an uncaught 'error' event and crashes the process.
+      pool.on('error', (err) => {
+        logDeduplicator.error('PostgreSQL telegram pool error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       const adapter = new PrismaPg(pool);
 
       PrismaTelegramService.instance = new PrismaClient({
