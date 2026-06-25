@@ -78,6 +78,17 @@ app.use(compression());
 // Ajouter Request ID pour traçabilité (doit être en premier)
 app.use(requestIdMiddleware);
 
+// Log non-2xx responses (the app otherwise only logs incoming requests) so 4xx/5xx
+// can be attributed to a route. Deduped: identical method+path+status collapse with a count.
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  res.on('finish', () => {
+    if (res.statusCode >= 400) {
+      void logDeduplicator.warn(`Non-2xx response: ${req.method} ${req.path} ${res.statusCode}`);
+    }
+  });
+  next();
+});
+
 // Configuration CORS basée sur les constantes de sécurité
 app.use(cors({
   origin: (origin, callback) => {
