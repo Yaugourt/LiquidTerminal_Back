@@ -2,6 +2,7 @@ import { PrismaClient } from '../../prisma-content/generated/client';
 import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { registerPool } from './poolRegistry';
 
 class PrismaContentService {
   private static instance: PrismaClient;
@@ -30,6 +31,8 @@ class PrismaContentService {
           error: err instanceof Error ? err.message : String(err),
         });
       });
+
+      registerPool('content', pool);
 
       const adapter = new PrismaPg(pool);
 

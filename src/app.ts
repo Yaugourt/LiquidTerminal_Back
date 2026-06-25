@@ -11,6 +11,7 @@ import { securityHeaders } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
 import { ClientInitializerService } from './core/client.initializer.service';
+import { startPoolMonitor } from './core/poolRegistry';
 import { prisma } from './core/prisma.service';
 import { PrismaHistoricalService } from './core/prisma.historical.service';
 // Eagerly instantiate Content/Telegram Prisma singletons so connection errors
@@ -162,6 +163,10 @@ async function bootstrapApplication(): Promise<void> {
 
     const fileCleanupService = FileCleanupService.getInstance();
     fileCleanupService.startAutoCleanup();
+
+    // Periodically log each DB pool's saturation so the next "Connection terminated"
+    // incident shows which database ran out of connections.
+    startPoolMonitor();
 
     await logDeduplicator.info('Application bootstrap completed successfully');
   } catch (error) {

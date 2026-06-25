@@ -2,6 +2,7 @@ import { PrismaClient } from '../../prisma-telegram/generated/client';
 import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { registerPool } from './poolRegistry';
 
 class PrismaTelegramService {
   private static instance: PrismaClient;
@@ -30,6 +31,8 @@ class PrismaTelegramService {
           error: err instanceof Error ? err.message : String(err),
         });
       });
+
+      registerPool('telegram', pool);
 
       const adapter = new PrismaPg(pool);
 

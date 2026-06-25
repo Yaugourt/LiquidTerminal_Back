@@ -2,6 +2,7 @@ import { PrismaClient } from '../../prisma-historical/generated/client';
 import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { registerPool } from './poolRegistry';
 
 class PrismaHistoricalService {
   private static instance: PrismaClient;
@@ -26,6 +27,18 @@ class PrismaHistoricalService {
         connectionTimeoutMillis: 10000, // aligned with the main DB pool
         keepAlive: true,                // detect dead TCP connections early
       });
+
+      // Without this listener, an idle-client error (e.g. Postgres dropping the
+      // connection) bubbles up as an uncaught 'error' event and crashes the process.
+      // This is the pool that saturates first under ingestion load.
+      pool.on('error', (err) => {
+        logDeduplicator.error('PostgreSQL historical pool error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+      registerPool('historical', pool);
+
       const adapter = new PrismaPg(pool);
 
       PrismaHistoricalService.instance = new PrismaClient({

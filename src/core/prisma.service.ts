@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { registerPool } from './poolRegistry';
 
 /**
  * Service Prisma singleton pour optimiser les connexions à la base de données
@@ -33,13 +34,15 @@ class PrismaService {
         });
       });
 
+      registerPool('main', pool);
+
       const adapter = new PrismaPg(pool);
 
       PrismaService.instance = new PrismaClient({
         adapter,
         log: ['error', 'warn'],
       });
-      
+
       // Gestion des événements de connexion
       // Note: Les événements $on ne sont pas correctement typés dans Prisma
       // Nous utilisons une approche alternative pour le logging
