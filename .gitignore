@@ -38,10 +38,11 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Prisma generated clients
-prisma-historical/generated/
-prisma-content/generated/
-prisma-telegram/generated/
+# Prisma generated clients (ignore both the dir and a symlink named "generated";
+# no trailing slash so a symlink isn't accidentally tracked and broken in CI)
+prisma-historical/generated
+prisma-content/generated
+prisma-telegram/generated
 
 # TypeScript cache
 *.tsbuildinfo
