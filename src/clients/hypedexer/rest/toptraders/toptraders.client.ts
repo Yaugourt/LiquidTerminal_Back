@@ -16,7 +16,10 @@ import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 const CACHE_KEY_PREFIX = 'toptraders';
 const UPDATE_CHANNEL = 'toptraders:updated';
 const UPDATE_INTERVAL = 120000;
-const CACHE_TTL = 55;
+// TTL must outlive the poll cycle (120s) so the scheduled poll always rewrites the key
+// before it expires, avoiding a cold window that triggers on-demand refreshes and
+// amplifies upstream 429s. Freshness stays governed by the poll, not the TTL.
+const CACHE_TTL = 150;
 const SORT_TYPES: TopTradersSortType[] = ['pnl_pos', 'pnl_neg', 'volume', 'trades'];
 
 /**

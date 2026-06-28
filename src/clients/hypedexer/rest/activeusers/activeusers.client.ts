@@ -15,7 +15,11 @@ import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 const CACHE_KEY_PREFIX = 'activeusers';
 const UPDATE_CHANNEL = 'activeusers:updated';
 const UPDATE_INTERVAL = 120000;
-const CACHE_TTL = 55;
+// TTL must outlive the poll cycle (120s) so the scheduled poll always rewrites the
+// key before it expires. A shorter TTL left a ~65s cold window each cycle during which
+// incoming requests cache-missed and triggered on-demand refreshes (4 HypeDexer calls
+// each), amplifying upstream 429s. Freshness stays governed by the poll, not the TTL.
+const CACHE_TTL = 150;
 const HOURS_TO_CACHE = [1, 4, 12, 24];
 
 /**

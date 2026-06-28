@@ -10,7 +10,9 @@ import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 /** Cache config for getRecentLiquidations (default params only) */
 const CACHE_KEY = 'liquidations:recent';
-const CACHE_TTL = 15;
+// TTL slightly above the poll cycle so the scheduled poll rewrites the key before it
+// expires, avoiding a brief cold window that forces on-demand refreshes.
+const CACHE_TTL = 20;
 const UPDATE_INTERVAL = 15000; // 15s
 const UPDATE_CHANNEL = 'liquidations:recent:updated';
 
