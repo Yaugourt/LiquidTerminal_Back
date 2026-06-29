@@ -10,6 +10,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    # prisma.config.ts resolves DATABASE_URL via env() at config-load time, so every
+    # prisma command (even generate, which never connects) needs it present. A dummy
+    # URL is enough in CI since no step touches a real database.
+    env:
+      DATABASE_URL: postgresql://user:pass@localhost:5432/db
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,8 +28,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Generate all four Prisma clients (main + historical + content + telegram); the
+      # type-check and build steps import every one of them, so generating only the main
+      # client leaves the others missing and tsc fails.
       - name: Generate Prisma client
-        run: npx prisma generate
+        run: npm run prisma:generate
 
       - name: Type check
         run: npx tsc --noEmit
