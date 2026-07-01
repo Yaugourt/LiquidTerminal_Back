@@ -22,6 +22,17 @@ class PrismaContentService {
         min: 2,
         keepAlive: true,
       });
+
+      // A pg.Pool emits 'error' on idle clients when the server closes a
+      // connection (idle timeout, failover, restart). Without a listener Node
+      // throws an unhandled exception and the process crashes. Invisible locally
+      // (local PG never closes idle connections), fatal on managed PG in prod.
+      pool.on('error', (err) => {
+        logDeduplicator.error('Content PostgreSQL pool error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       const adapter = new PrismaPg(pool);
 
       PrismaContentService.instance = new PrismaClient({

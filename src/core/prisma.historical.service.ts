@@ -16,11 +16,27 @@ class PrismaHistoricalService {
 
       const pool = new Pool({
         connectionString: process.env.HISTORICAL_DATABASE_URL,
+        // Explicit sizing: this pool carries the heaviest write load (2s ingestion
+        // flush + daily paginated backfill). Without max it defaulted to pg's 10,
+        // the narrowest pool for the busiest DB, which starved under bursts.
+        max: parseInt(process.env.DB_HIST_POOL_MAX || '15', 10),
+        min: parseInt(process.env.DB_HIST_POOL_MIN || '2', 10),
         // Prevent stale connections after DB restarts
         idleTimeoutMillis: 10000,       // recycle idle connections after 10s
         connectionTimeoutMillis: 5000,  // fail fast if DB unreachable
         keepAlive: true,                // detect dead TCP connections early
       });
+
+      // A pg.Pool emits 'error' on idle clients when the server closes a
+      // connection (idle timeout, failover, restart). Without a listener Node
+      // throws an unhandled exception and the process crashes. Invisible locally
+      // (local PG never closes idle connections), fatal on managed PG in prod.
+      pool.on('error', (err) => {
+        logDeduplicator.error('Historical PostgreSQL pool error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       const adapter = new PrismaPg(pool);
 
       PrismaHistoricalService.instance = new PrismaClient({
