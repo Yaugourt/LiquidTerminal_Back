@@ -28,6 +28,12 @@ export class TrendingValidatorError extends StakingError {
   }
 }
 
+export class ValidatorVotesError extends StakingError {
+  constructor(message: string = 'Failed to fetch validator votes', statusCode: number = 500) {
+    super(message, statusCode, 'VALIDATOR_VOTES_ERROR');
+  }
+}
+
 export class RateLimitError extends StakingError {
   constructor(message: string = 'Rate limit exceeded') {
     super(message, 429, 'RATE_LIMIT_ERROR');

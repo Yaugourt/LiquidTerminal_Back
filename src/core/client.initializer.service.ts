@@ -3,6 +3,7 @@ import { HyperliquidPerpClient } from '../clients/hyperliquid/perp/perp.assetcon
 import { HyperliquidSpotDeployClient } from '../clients/hyperliquid/spot/spot.deploy.client';
 import { HyperliquidTokenInfoClient } from '../clients/hyperliquid/spot/spot.tokeninfo.client';
 import { ValidatorClient } from '../clients/hyperliquid/staking/validator';
+import { ValidatorVotesClient } from '../clients/hyperliquid/staking/votes';
 import { HyperliquidVaultClient } from '../clients/hyperliquid/vault/hlpvault.client';
 import { HyperliquidVaultsClient } from '../clients/hyperliquid/vault/vaults.client';
 import { HypurrscanClient } from '../clients/hypurrscan/auction.client';
@@ -109,6 +110,10 @@ export class ClientInitializerService {
       // Initialiser le client Validator
       const validatorClient = ValidatorClient.getInstance();
       this.clients.set('validator', validatorClient);
+
+      // Initialiser le client Validator Votes (L1 governance snapshot)
+      const validatorVotesClient = ValidatorVotesClient.getInstance();
+      this.clients.set('validatorVotes', validatorVotesClient);
 
       // Initialiser le client Vault
       const vaultClient = HyperliquidVaultClient.getInstance();

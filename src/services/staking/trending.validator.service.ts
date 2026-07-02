@@ -1,4 +1,5 @@
 import { TrendingValidator, ValidatorSummary } from '../../types/staking.types';
+import { isFoundationValidator } from '../../constants/staking.constants';
 import { redisService } from '../../core/redis.service';
 import { TrendingValidatorError } from '../../errors/staking.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -69,8 +70,8 @@ export class TrendingValidatorService {
       });
 
       // Agréger les validateurs de Hyper Foundation
-      const hyperFoundationValidators = formattedValidators.filter((v: TrendingValidator) => v.name.startsWith('Hyper Foundation'));
-      const otherValidators = formattedValidators.filter((v: TrendingValidator) => !v.name.startsWith('Hyper Foundation'));
+      const hyperFoundationValidators = formattedValidators.filter((v: TrendingValidator) => isFoundationValidator(v.name));
+      const otherValidators = formattedValidators.filter((v: TrendingValidator) => !isFoundationValidator(v.name));
 
       // Créer l'entrée agrégée pour Hyper Foundation
       const hyperFoundationAggregate: TrendingValidator = {

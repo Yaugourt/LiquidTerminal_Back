@@ -65,6 +65,58 @@ export interface ValidatorOverallStats {
   totalHypeStaked: number;
 }
 
+// ─── Validator L1 votes (governance) ───
+
+// Raw snapshot element from HL info { type: "validatorL1Votes" }.
+// `action` is a polymorphic L1 action (a tagged union we do not fully model);
+// it is summarised defensively in the service.
+export interface ValidatorL1Vote {
+  expireTime: number; // epoch ms — voting window close
+  action: Record<string, unknown>;
+  votes: string[]; // validator addresses (JOIN on `validator`, NOT signer)
+  quorumReached: boolean;
+}
+
+// One voter, joined to its validator summary.
+export interface VoteParticipant {
+  validator: string; // 0x address
+  name: string;
+  stake: number; // HYPE (wei / 10^8)
+  isFoundation: boolean;
+}
+
+// A pending proposal enriched server-side (join + Foundation stamp + weights).
+export interface ValidatorVoteInfo {
+  id: number; // index within the current snapshot (no upstream id)
+  actionType: string; // best-effort label, e.g. "settleOutcome"
+  summary: string | null; // action details when present, else null
+  expireTime: number; // epoch ms
+  quorumReached: boolean;
+  voterCount: number; // matched voters
+  totalValidators: number;
+  participationPct: number; // voterCount / totalValidators * 100
+  votingStake: number; // HYPE backing this proposal
+  stakeWeightPct: number; // votingStake / totalStake * 100 (incl. Foundation)
+  stakeWeightExFoundationPct: number; // community-only stake weight
+  foundationVoterCount: number; // how many of the voters are Foundation
+  voters: VoteParticipant[];
+}
+
+// Overall snapshot context (single-sourced Foundation split).
+export interface ValidatorVotesStats {
+  totalValidators: number;
+  totalStake: number; // HYPE
+  foundationStake: number; // HYPE
+  communityStake: number; // HYPE
+  pendingCount: number;
+  lastUpdate: number; // epoch ms
+}
+
+export interface ValidatorVotesResponse extends BaseResponse {
+  data: ValidatorVoteInfo[];
+  stats: ValidatorVotesStats;
+}
+
 // Types pour les actions de validation/delegation
 export interface ValidationAction {
   type: string;

@@ -47,6 +47,7 @@ import publicGoodRoutes from './routes/publicgood';
 
 import validatorRoutes from './routes/staking/validator.routes';
 import trendingValidatorRoutes from './routes/staking/trendingValidator.routes';
+import validatorVotesRoutes from './routes/staking/votes.routes';
 import validationRoutes from './routes/staking/validation.routes';
 import unstakingRoutes from './routes/staking/unstaking.routes';
 import stakedHoldersRoutes from './routes/staking/stakedHolders.routes';
@@ -131,6 +132,7 @@ app.use('/link-preview', linkPreviewRoutes);
 app.use('/publicgoods', publicGoodRoutes);
 app.use('/staking/validators', validatorRoutes);
 app.use('/staking/validators/trending', trendingValidatorRoutes);
+app.use('/staking/validators/votes', validatorVotesRoutes);
 app.use('/staking/validations', validationRoutes);
 app.use('/staking/unstaking-queue', unstakingRoutes);
 app.use('/staking/holders', stakedHoldersRoutes);

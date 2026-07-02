@@ -51,3 +51,5 @@ coverage/
 
 # Local database dumps (pg_dump)
 backups/
+.gstack/
+logs.*.json*

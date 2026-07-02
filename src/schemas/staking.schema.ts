@@ -63,6 +63,12 @@ export const trendingValidatorsGetSchema = z.object({
   params: z.object({})
 });
 
+// Schéma pour les votes L1 des validateurs (aucun query param)
+export const validatorVotesGetSchema = z.object({
+  query: z.object({}),
+  params: z.object({})
+});
+
 // Schéma pour les routes sans query params
 export const stakingStatsGetSchema = z.object({
   query: z.object({}),
