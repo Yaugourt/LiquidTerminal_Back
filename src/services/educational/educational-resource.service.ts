@@ -559,6 +559,20 @@ export class EducationalResourceService extends BaseService<
   }
 
   /**
+   * Leaderboard public "most saved" : ressources APPROVED classées par nombre
+   * de read lists qui les incluent. Fraîcheur par TTL court : les écritures
+   * d'items de read list n'invalident pas ce cache (une minute de retard est
+   * acceptable pour un classement).
+   */
+  async getPopularResources(limit: number): Promise<EducationalResourceResponse[]> {
+    return await cacheService.getOrSet(
+      CACHE_KEYS.EDUCATIONAL_RESOURCE_POPULAR(limit),
+      async () => await (this.repository as any).findPopular(limit),
+      CACHE_TTL.SHORT
+    );
+  }
+
+  /**
    * Récupère les soumissions d'un utilisateur (tous les statuts)
    */
   async getUserSubmissions(userId: number, params: {

@@ -13,6 +13,7 @@ import {
 } from '../../middleware/validation';
 import {
   educationalResourcesGetSchema,
+  educationalResourcesPopularGetSchema,
   educationalResourceByIdGetSchema,
   educationalResourcesByCategoryGetSchema
 } from '../../schemas/educational.schema';
@@ -120,6 +121,35 @@ router.get('/', validateGetRequest(educationalResourcesGetSchema), (async (req: 
     });
   } catch (error) {
     logDeduplicator.error('Error fetching educational resources:', { error: error instanceof Error ? error.message : String(error) });
+
+    if (error instanceof EducationalError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        code: error.code
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR'
+    });
+  }
+}) as RequestHandler);
+
+// Route publique "most saved" : APPROVED classées par nombre de read lists.
+// Déclarée avant /:id pour ne pas être capturée par le param.
+router.get('/popular', validateGetRequest(educationalResourcesPopularGetSchema), (async (req: Request, res: Response) => {
+  try {
+    const limit = parseInt(String(req.query.limit ?? '5'), 10) || 5;
+    const resources = await educationalResourceService.getPopularResources(limit);
+    res.json({
+      success: true,
+      data: resources
+    });
+  } catch (error) {
+    logDeduplicator.error('Error fetching popular educational resources:', { error: error instanceof Error ? error.message : String(error) });
 
     if (error instanceof EducationalError) {
       return res.status(error.statusCode).json({

@@ -33,7 +33,10 @@ export interface EducationalResourceRepository extends BaseRepository {
    */
   findById(id: number): Promise<EducationalResourceResponse | null>;
 
-
+  /**
+   * Ressources APPROVED classées par nombre de read lists qui les incluent.
+   */
+  findPopular(limit: number): Promise<EducationalResourceResponse[]>;
 
   /**
    * Crée une nouvelle ressource éducative

@@ -65,6 +65,8 @@ export interface EducationalResourceResponse {
     email: string | null;
   };
   categories: EducationalResourceCategoryResponse[];
+  /** Number of read lists that include this resource (public popularity signal). */
+  savesCount?: number;
 }
 
 // Types pour les opérations CRUD des ressources éducatives

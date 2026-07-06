@@ -10,6 +10,7 @@ import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
 import { ResourceStatus } from '../../types/prisma-enums';
 import { prismaContent } from '../../core/prisma.content.service';
+import { prisma } from '../../core/prisma.service';
 import {
   attachCreator,
   attachReviewer,
@@ -65,7 +66,30 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         (row as unknown as { categories: unknown }).categories = enrichedCats;
       }
     }
+    await this.attachSavesCounts(withReviewer as Array<Record<string, unknown>>);
     return withReviewer as unknown as Array<T & { creator: unknown; reviewer: unknown }>;
+  }
+
+  /**
+   * Attach `savesCount` (read lists including the resource) to each row.
+   * ReadListItem lives in the CORE DB while resources live in the Content DB,
+   * so this is a single cross-db groupBy, not a Prisma relation count.
+   */
+  private async attachSavesCounts(rows: Array<Record<string, unknown>>): Promise<void> {
+    const ids = rows
+      .map((row) => row.id)
+      .filter((id): id is number => typeof id === 'number');
+    if (ids.length === 0) return;
+
+    const grouped = await prisma.readListItem.groupBy({
+      by: ['resourceId'],
+      where: { resourceId: { in: ids } },
+      _count: { resourceId: true }
+    });
+    const byId = new Map(grouped.map((g) => [g.resourceId, g._count.resourceId]));
+    for (const row of rows) {
+      row.savesCount = byId.get(row.id as number) ?? 0;
+    }
   }
 
   private async enrichResourceOne<T extends { categories?: Array<Record<string, unknown>> }>(
@@ -148,6 +172,43 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         pagination: this.buildPagination(total, page, limit)
       };
     }, 'finding all educational resources', { page: params.page, limit: params.limit, sort: params.sort, order: params.order, search: params.search, addedBy: params.addedBy, categoryId: params.categoryId });
+  }
+
+  /**
+   * Public "most saved" leaderboard: APPROVED resources ranked by how many
+   * read lists include them. Rank comes from a Core-DB groupBy on
+   * ReadListItem (cross-db, no Prisma relation); only resources with at
+   * least one save are returned — no zero-save filler.
+   */
+  async findPopular(limit: number): Promise<EducationalResourceResponse[]> {
+    return this.executeWithErrorHandling(
+      async () => {
+        // Over-fetch ids: some top-saved resources may not be APPROVED.
+        const grouped = await prisma.readListItem.groupBy({
+          by: ['resourceId'],
+          _count: { resourceId: true },
+          orderBy: { _count: { resourceId: 'desc' } },
+          take: limit * 3
+        });
+        if (grouped.length === 0) return [];
+
+        const rankedIds = grouped.map((g) => g.resourceId);
+        const rows = await this.prismaClient.educationalResource.findMany({
+          where: { id: { in: rankedIds }, status: 'APPROVED' },
+          include: this.includeConfig
+        });
+        const rowById = new Map(rows.map((row: { id: number }) => [row.id, row]));
+        const top = rankedIds
+          .map((id) => rowById.get(id))
+          .filter((row): row is NonNullable<typeof row> => !!row)
+          .slice(0, limit);
+
+        const enriched = await this.enrichResources(top as Array<Record<string, unknown>>);
+        return enriched as unknown as EducationalResourceResponse[];
+      },
+      'finding popular educational resources',
+      { limit }
+    );
   }
 
   async findById(id: number): Promise<EducationalResourceResponse | null> {

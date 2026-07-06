@@ -39,6 +39,7 @@ export const CACHE_KEYS = {
   EDUCATIONAL_RESOURCE: (id: number) => `${CACHE_PREFIX.EDUCATIONAL_RESOURCE}:${id}`,
   EDUCATIONAL_RESOURCE_LIST: (params: string) => `${CACHE_PREFIX.EDUCATIONAL_RESOURCE}:list:${params}`,
   EDUCATIONAL_RESOURCE_BY_CATEGORY: (categoryId: number) => `${CACHE_PREFIX.EDUCATIONAL_RESOURCE}:category:${categoryId}`,
+  EDUCATIONAL_RESOURCE_POPULAR: (limit: number) => `${CACHE_PREFIX.EDUCATIONAL_RESOURCE}:popular:${limit}`,
   READLIST: (id: number) => `${CACHE_PREFIX.READLIST}:${id}`,
   READLIST_LIST: (params: string) => `${CACHE_PREFIX.READLIST}:list:${params}`,
   READLIST_BY_USER: (userId: number) => `${CACHE_PREFIX.READLIST}:user:${userId}`,

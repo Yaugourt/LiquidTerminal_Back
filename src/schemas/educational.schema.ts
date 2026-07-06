@@ -165,6 +165,13 @@ export const educationalResourcesGetSchema = z.object({
   params: z.object({})
 });
 
+export const educationalResourcesPopularGetSchema = z.object({
+  query: z.object({
+    limit: z.coerce.number().int().positive().max(20).optional().default(5)
+  }),
+  params: z.object({})
+});
+
 export const educationalCategoryByIdGetSchema = z.object({
   query: z.object({}),
   params: z.object({
