@@ -109,10 +109,10 @@ router.get('/my-submissions', validatePrivyToken, requireUser, (async (req: Requ
   }
 }) as RequestHandler);
 
-// Route pour récupérer toutes les ressources éducatives
+// Route pour récupérer toutes les ressources éducatives (public : APPROVED uniquement)
 router.get('/', validateGetRequest(educationalResourcesGetSchema), (async (req: Request, res: Response) => {
   try {
-    const resources = await educationalResourceService.getAll(req.query);
+    const resources = await educationalResourceService.getPublicResources(req.query);
     res.json({
       success: true,
       data: resources.data,

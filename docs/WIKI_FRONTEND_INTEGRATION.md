@@ -6,6 +6,49 @@ Le backend a été mis à jour pour permettre à **tous les utilisateurs connect
 
 ---
 
+## Wiki v2 (juillet 2026)
+
+Contrat révisé pour la refonte du hub /wiki. Résumé des changements :
+
+### 1. `GET /educational/resources` = source unique de la bibliothèque
+
+- **Public : APPROVED uniquement.** Le filtre est forcé côté serveur, plus besoin (ni possibilité) de le passer en query. PENDING/REJETÉ ne sont plus jamais servis sur les routes publiques.
+- **Nouveau param `categoryIds`** : CSV (`?categoryIds=1,2,3`) ou répété (`?categoryIds=1&categoryIds=2`). Remplace le pattern N+1 « une requête par catégorie ».
+- **`search` étendu** : matche désormais l'URL, le titre ET la description de la link preview (insensible à la casse).
+- **`linkPreview` inline** : chaque ressource embarque `linkPreview: { id, title, description, image, siteName, favicon } | null`. Ne plus appeler `/link-preview` pour afficher les cartes.
+
+```typescript
+// GET /educational/resources?categoryIds=1,2&search=hyperliquid&page=1&limit=24
+interface WikiLibraryResponse {
+  success: true;
+  data: EducationalResource[]; // avec linkPreview inline, APPROVED only
+  pagination: BasePagination;
+}
+```
+
+### 2. `GET /educational/categories?withCounts=true`
+
+Ajoute `resourcesCount` (nombre de ressources APPROVED) à chaque catégorie. Un seul groupBy côté serveur, mis en cache. À utiliser pour la rail de catégories.
+
+### 3. Read lists
+
+- `GET /readlists/my-lists`, `GET /readlists` et `GET /readlists/public` : chaque summary embarque `readCount` (items lus) en plus d'`itemsCount`. La barre de progression se calcule avec `readCount / itemsCount`.
+- `GET /readlists/:id/items` : chaque `item.resource` embarque `linkPreview` inline (même shape que ci-dessus). Ne plus appeler `/link-preview/batch` pour les items.
+
+### 4. Compat & dépréciations
+
+- `GET /educational/resources/category/:categoryId` et `GET /educational/categories/:id/resources` : conservés pour le front actuel mais **filtrés APPROVED**. Dépréciés au profit de `?categoryIds=`. Suppression prévue une fois la refonte front shippée.
+- `GET /educational/resources/:id` reste public tous statuts (utilisé nulle part côté public aujourd'hui ; à restreindre si un usage public apparaît).
+- Les caches serveur sont invalidés à chaque approve/reject/assign/remove : une ressource approuvée apparaît immédiatement dans les listings publics.
+
+### Rappels de cohérence front (bugs connus à corriger avec la v2)
+
+- XP soumission ressource = **25** (le toast front affiche 15).
+- XP création read list = **15**, bonus publique = **+10** (le toast front affiche 20 pour une publique).
+- Rate limit soumission = **5/jour** (un message front parle de 10/semaine ; 10/semaine est le cap XP, pas le cap de soumission).
+
+---
+
 ## Nouveaux Endpoints API
 
 ### Base URL: `/api/educational/resources`

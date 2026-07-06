@@ -6,6 +6,17 @@ const educationalUrlSchema = z.string()
   .max(500, 'URL trop longue')
   .regex(/^https:\/\//i, 'Seules les URLs HTTPS sont autorisées');
 
+// Accepts `categoryIds=1,2,3` (CSV) or repeated `categoryIds=1&categoryIds=2`
+// query params and normalizes to a number[] for the repository layer.
+const categoryIdsQuerySchema = z.preprocess(
+  (val) => {
+    if (val === undefined || val === null || val === '') return undefined;
+    const parts = Array.isArray(val) ? val : String(val).split(',');
+    return parts.map((v) => Number(String(v).trim()));
+  },
+  z.array(z.number().int().positive('ID catégorie invalide')).min(1).max(50).optional()
+);
+
 // Schémas de base pour les catégories éducatives
 export const educationalCategoryBaseSchema = z.object({
   name: z.string()
@@ -59,13 +70,17 @@ export const educationalResourceServiceCreateSchema = z.object({
 // Schéma pour la mise à jour de ressource éducative
 export const educationalResourceUpdateSchema = educationalResourceBaseSchema.partial();
 
-// Schéma pour les requêtes de ressources éducatives (simplifié)
+// Schéma pour les requêtes de ressources éducatives (simplifié).
+// `status` is a service-level filter only: routes inject it themselves
+// (public listing forces APPROVED) and never expose it in their GET schema.
 export const educationalResourceQuerySchema = z.object({
   page: z.coerce.number().int().positive().optional().default(1),
   limit: z.coerce.number().int().positive().max(100).optional().default(10),
   sort: z.enum(['createdAt', 'url']).optional().default('createdAt'),
   order: z.enum(['asc', 'desc']).optional().default('desc'),
-  search: z.string().max(100, 'Terme de recherche trop long').optional()
+  search: z.string().max(100, 'Terme de recherche trop long').optional(),
+  categoryIds: categoryIdsQuerySchema,
+  status: z.enum(['PENDING', 'APPROVED', 'REJECTED']).optional()
 });
 
 // Schéma pour assigner une ressource à une catégorie
@@ -132,7 +147,8 @@ export const educationalCategoriesGetSchema = z.object({
     limit: z.coerce.number().int().positive().max(100).optional().default(10),
     sort: z.enum(['createdAt', 'name']).optional().default('createdAt'),
     order: z.enum(['asc', 'desc']).optional().default('desc'),
-    search: z.string().max(100, 'Terme de recherche trop long').optional()
+    search: z.string().max(100, 'Terme de recherche trop long').optional(),
+    withCounts: z.enum(['true', 'false']).optional()
   }),
   params: z.object({})
 });
@@ -143,7 +159,8 @@ export const educationalResourcesGetSchema = z.object({
     limit: z.coerce.number().int().positive().max(100).optional().default(10),
     sort: z.enum(['createdAt', 'url']).optional().default('createdAt'),
     order: z.enum(['asc', 'desc']).optional().default('desc'),
-    search: z.string().max(100, 'Terme de recherche trop long').optional()
+    search: z.string().max(100, 'Terme de recherche trop long').optional(),
+    categoryIds: categoryIdsQuerySchema
   }),
   params: z.object({})
 });

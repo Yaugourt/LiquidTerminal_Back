@@ -125,7 +125,9 @@ export class ReadListItemService extends BaseService<
           throw new ReadListPermissionError();
         }
 
-        return await this.create(data);
+        const item = await this.create(data);
+        await this.invalidateListSummaryCaches(data.readListId!, userId);
+        return item;
       });
     } finally {
       this.repository.resetPrismaClient();
@@ -205,8 +207,9 @@ export class ReadListItemService extends BaseService<
         // Mettre à jour le statut
         const updatedItem = await this.repository.toggleReadStatus(itemId, isRead);
 
-        // Invalider les caches
+        // Invalider les caches (items + summaries qui portent readCount)
         await this.invalidateReadListItemCache(itemId, item.readListId);
+        await this.invalidateListSummaryCaches(item.readListId, userId);
 
         return { updatedItem, wasUnread: !item.isRead };
       });
@@ -308,6 +311,7 @@ export class ReadListItemService extends BaseService<
 
         // Supprimer l'item
         await this.delete(itemId);
+        await this.invalidateListSummaryCaches(item.readListId, userId);
 
         logDeduplicator.info('Read list item deleted successfully', { itemId, userId });
       });
@@ -317,6 +321,20 @@ export class ReadListItemService extends BaseService<
       this.repository.resetPrismaClient();
       readListRepository.resetPrismaClient();
     }
+  }
+
+  /**
+   * List summaries (my-lists, public lists, entity) embed itemsCount and
+   * readCount, so item mutations must flush them too, not only item caches.
+   * userId flushes the owner cache when the mutating user is known.
+   */
+  private async invalidateListSummaryCaches(readListId: number, userId?: number): Promise<void> {
+    await Promise.all([
+      cacheService.invalidate(CACHE_KEYS.READLIST(readListId)),
+      userId ? cacheService.invalidate(CACHE_KEYS.READLIST_BY_USER(userId)) : Promise.resolve(),
+      cacheService.invalidateByPattern(`${CACHE_PREFIX.READLIST}:public:*`),
+      cacheService.invalidateByPattern(`${CACHE_PREFIX.READLIST}:list:*`)
+    ]);
   }
 
   /**

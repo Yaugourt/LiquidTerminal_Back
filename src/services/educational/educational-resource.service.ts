@@ -21,7 +21,6 @@ import {
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
 import {
-  educationalResourceCreateSchema,
   educationalResourceServiceCreateSchema,
   educationalResourceUpdateSchema,
   educationalResourceQuerySchema,
@@ -45,6 +44,8 @@ type EducationalResourceQueryParams = {
   sort?: string;
   order?: 'asc' | 'desc';
   search?: string;
+  categoryIds?: number[];
+  status?: ResourceStatus;
 };
 
 export class EducationalResourceService extends BaseService<
@@ -83,6 +84,19 @@ export class EducationalResourceService extends BaseService<
 
   protected async checkCanDelete(id: number): Promise<void> {
     return;
+  }
+
+  /**
+   * Drops every resource cache entry (lists, per-category, entities) plus the
+   * per-category APPROVED counts. Must run after any mutation that changes what
+   * the public listing returns: approve, reject, assign/remove category.
+   * (BaseService only invalidates on update/delete; moderation bypasses it.)
+   */
+  private async invalidateResourceCaches(): Promise<void> {
+    await Promise.all([
+      cacheService.invalidateByPattern(`${CACHE_PREFIX.EDUCATIONAL_RESOURCE}*`),
+      cacheService.invalidate(CACHE_KEYS.EDUCATIONAL_CATEGORY_COUNTS)
+    ]);
   }
 
   private async validateUrl(url: string): Promise<void> {
@@ -132,7 +146,9 @@ export class EducationalResourceService extends BaseService<
           throw new EducationalResourceCategoryAlreadyExistsError();
         }
 
-        return await this.repository.assignToCategory(validatedData);
+        const assignment = await this.repository.assignToCategory(validatedData);
+        await this.invalidateResourceCaches();
+        return assignment;
       });
     } catch (error) {
       throw error;
@@ -248,6 +264,7 @@ export class EducationalResourceService extends BaseService<
         }
 
         await this.repository.removeFromCategory(resourceId, categoryId);
+        await this.invalidateResourceCaches();
 
         logDeduplicator.info('Resource removed from category successfully', {
           resourceId,
@@ -272,7 +289,8 @@ export class EducationalResourceService extends BaseService<
             throw new EducationalCategoryNotFoundError();
           }
 
-          const resources = await this.repository.findByCategory(categoryId);
+          // Public endpoint: only approved resources are visible.
+          const resources = await this.repository.findByCategory(categoryId, 'APPROVED' as ResourceStatus);
 
           logDeduplicator.info('Resources by category retrieved successfully', {
             categoryId,
@@ -451,6 +469,9 @@ export class EducationalResourceService extends BaseService<
         notes
       );
 
+      // The resource just became publicly visible: flush stale listings.
+      await this.invalidateResourceCaches();
+
       logDeduplicator.info('Resource approved', {
         resourceId,
         reviewerId,
@@ -505,6 +526,8 @@ export class EducationalResourceService extends BaseService<
         notes
       );
 
+      await this.invalidateResourceCaches();
+
       logDeduplicator.info('Resource rejected', {
         resourceId,
         reviewerId,
@@ -519,26 +542,20 @@ export class EducationalResourceService extends BaseService<
   }
 
   /**
-   * Récupère les ressources approuvées uniquement (pour l'affichage public)
+   * Listing public : APPROVED forcé quels que soient les filtres du caller.
+   * Passe par getAll pour conserver la validation Zod et le cache Redis
+   * (la clé de cache inclut le status, donc pas de collision avec la modération).
    */
-  async getApprovedResources(params: {
-    page?: number;
-    limit?: number;
-    search?: string;
-    categoryId?: number;
-  }): Promise<{
+  async getPublicResources(query: Record<string, unknown>): Promise<{
     data: EducationalResourceResponse[];
     pagination: BasePagination;
   }> {
-    try {
-      return await (this.repository as any).findAll({
-        ...params,
-        status: 'APPROVED' as ResourceStatus
-      });
-    } catch (error) {
-      logDeduplicator.error('Error getting approved resources:', { error: error instanceof Error ? error.message : String(error) });
-      throw error;
-    }
+    const result = await this.getAll({
+      ...query,
+      status: 'APPROVED'
+    } as EducationalResourceQueryParams);
+    // CrudRepository types pagination minimally; the repo builds the full shape.
+    return result as { data: EducationalResourceResponse[]; pagination: BasePagination };
   }
 
   /**

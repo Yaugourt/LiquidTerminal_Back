@@ -62,9 +62,13 @@ router.post('/', validatePrivyToken, requireModerator, validateCreateEducational
 }) as RequestHandler);
 
 // Route pour récupérer toutes les catégories éducatives
+// `withCounts=true` ajoute resourcesCount (ressources APPROVED) à chaque catégorie
 router.get('/', validateGetRequest(educationalCategoriesGetSchema), (async (req: Request, res: Response) => {
   try {
-    const categories = await educationalCategoryService.getAll(req.query);
+    const withCounts = req.query.withCounts === 'true';
+    const categories = withCounts
+      ? await educationalCategoryService.getAllWithCounts(req.query)
+      : await educationalCategoryService.getAll(req.query);
     res.json({
       success: true,
       data: categories.data,

@@ -49,6 +49,16 @@ export interface ReadListItemResponse {
       name: string | null;
       email: string | null;
     };
+    // Preview metadata inlined from the Content DB so the frontend
+    // renders item cards without extra /link-preview calls.
+    linkPreview?: {
+      id: string;
+      title: string | null;
+      description: string | null;
+      image: string | null;
+      siteName: string | null;
+      favicon: string | null;
+    } | null;
   };
 }
 
@@ -81,6 +91,8 @@ export interface ReadListSummaryResponse {
     email: string | null;
   };
   itemsCount: number;
+  /** Number of items marked as read (drives the progress bar). */
+  readCount: number;
 }
 
 // Types de réponse API

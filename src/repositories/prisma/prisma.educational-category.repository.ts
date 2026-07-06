@@ -7,6 +7,7 @@ import {
 import { BasePagination } from '../../types/common.types';
 import { BasePrismaRepository } from './base-prisma.repository';
 import { prismaContent } from '../../core/prisma.content.service';
+import { ResourceStatus } from '../../types/prisma-enums';
 import { attachCreator, attachCreatorOne } from '../../utils/cross-db-enrich';
 
 export class PrismaEducationalCategoryRepository extends BasePrismaRepository implements EducationalCategoryRepository {
@@ -171,11 +172,14 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
     );
   }
 
-  async getResourcesByCategory(categoryId: number): Promise<any[]> {
+  async getResourcesByCategory(categoryId: number, status?: ResourceStatus): Promise<any[]> {
     return this.executeWithErrorHandling(
       async () => {
         const resourceCategories = await this.prismaClient.educationalResourceCategory.findMany({
-          where: { categoryId },
+          where: {
+            categoryId,
+            ...(status ? { resource: { status } } : {})
+          },
           include: {
             resource: true
           }
@@ -185,7 +189,28 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
         return await attachCreator(resources as Array<Record<string, unknown>>, 'addedBy');
       },
       'finding resources by educational category',
-      { categoryId }
+      { categoryId, status }
+    );
+  }
+
+  /**
+   * Counts resources per category in a single groupBy query.
+   * With a status filter this feeds the public category rail (APPROVED counts).
+   */
+  async countResourcesByCategory(status?: ResourceStatus): Promise<Map<number, number>> {
+    return this.executeWithErrorHandling(
+      async () => {
+        const grouped = await this.prismaClient.educationalResourceCategory.groupBy({
+          by: ['categoryId'],
+          where: status ? { resource: { status } } : {},
+          _count: { _all: true }
+        });
+        return new Map<number, number>(
+          grouped.map((g: { categoryId: number; _count: { _all: number } }) => [g.categoryId, g._count._all])
+        );
+      },
+      'counting resources by category',
+      { status }
     );
   }
 } 

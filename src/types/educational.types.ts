@@ -13,6 +13,8 @@ export interface EducationalCategoryResponse {
     name: string | null;
     email: string | null;
   };
+  /** Present only when the listing is requested with withCounts=true (APPROVED resources). */
+  resourcesCount?: number;
 }
 
 // Types pour les opérations CRUD des catégories éducatives
@@ -27,6 +29,17 @@ export interface EducationalCategoryUpdateInput {
   description?: string;
 }
 
+// Preview metadata embedded in resource responses (same shape as the
+// repository includeConfig select; the frontend renders cards from this).
+export interface EducationalResourceLinkPreview {
+  id: string;
+  title: string | null;
+  description: string | null;
+  image: string | null;
+  siteName: string | null;
+  favicon: string | null;
+}
+
 // Types de base pour les ressources éducatives
 export interface EducationalResourceResponse {
   id: number;
@@ -34,6 +47,7 @@ export interface EducationalResourceResponse {
   createdAt: Date;
   addedBy: number;
   linkPreviewId?: string;
+  linkPreview?: EducationalResourceLinkPreview | null;
 
   // Moderation fields
   status: ResourceStatus;

@@ -1,12 +1,13 @@
-import { 
-  EducationalResourceResponse, 
-  EducationalResourceCreateInput, 
+import {
+  EducationalResourceResponse,
+  EducationalResourceCreateInput,
   EducationalResourceUpdateInput,
   EducationalResourceCategoryCreateInput,
-  EducationalResourceCategoryResponse 
+  EducationalResourceCategoryResponse
 } from '../../types/educational.types';
 import { BaseRepository } from './base.repository.interface';
 import { BasePagination } from '../../types/common.types';
+import { ResourceStatus } from '../../types/prisma-enums';
 
 export interface EducationalResourceRepository extends BaseRepository {
   /**
@@ -20,6 +21,8 @@ export interface EducationalResourceRepository extends BaseRepository {
     search?: string;
     addedBy?: number;
     categoryId?: number;
+    categoryIds?: number[];
+    status?: ResourceStatus;
   }): Promise<{
     data: EducationalResourceResponse[];
     pagination: BasePagination;
@@ -58,9 +61,9 @@ export interface EducationalResourceRepository extends BaseRepository {
   findByCreator(userId: number): Promise<EducationalResourceResponse[]>;
 
   /**
-   * Récupère les ressources d'une catégorie spécifique
+   * Récupère les ressources d'une catégorie spécifique (optionnellement filtrées par statut)
    */
-  findByCategory(categoryId: number): Promise<EducationalResourceResponse[]>;
+  findByCategory(categoryId: number, status?: ResourceStatus): Promise<EducationalResourceResponse[]>;
 
   /**
    * Assigne une ressource à une catégorie

@@ -1,10 +1,11 @@
-import { 
-  EducationalCategoryResponse, 
-  EducationalCategoryCreateInput, 
+import {
+  EducationalCategoryResponse,
+  EducationalCategoryCreateInput,
   EducationalCategoryUpdateInput
 } from '../../types/educational.types';
 import { BaseRepository } from './base.repository.interface';
 import { BasePagination } from '../../types/common.types';
+import { ResourceStatus } from '../../types/prisma-enums';
 
 export interface EducationalCategoryRepository extends BaseRepository {
   /**
@@ -50,9 +51,14 @@ export interface EducationalCategoryRepository extends BaseRepository {
   existsByName(name: string): Promise<boolean>;
 
   /**
-   * Récupère toutes les ressources d'une catégorie éducative
+   * Récupère toutes les ressources d'une catégorie éducative (optionnellement filtrées par statut)
    */
-  getResourcesByCategory(categoryId: number): Promise<any[]>;
+  getResourcesByCategory(categoryId: number, status?: ResourceStatus): Promise<any[]>;
+
+  /**
+   * Compte les ressources par catégorie (optionnellement filtrées par statut) en un seul groupBy
+   */
+  countResourcesByCategory(status?: ResourceStatus): Promise<Map<number, number>>;
 
   /**
    * Récupère les catégories éducatives créées par un utilisateur

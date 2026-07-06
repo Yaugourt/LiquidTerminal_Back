@@ -29,7 +29,15 @@ export class PrismaReadListItemRepository extends BasePrismaRepository implement
 
     const resources = await prismaContent.educationalResource.findMany({
       where: { id: { in: resourceIds } },
-      select: { id: true, url: true, createdAt: true, addedBy: true }
+      select: {
+        id: true,
+        url: true,
+        createdAt: true,
+        addedBy: true,
+        linkPreview: {
+          select: { id: true, title: true, description: true, image: true, siteName: true, favicon: true }
+        }
+      }
     });
     const enriched = await attachCreator(
       resources as Array<Record<string, unknown>>,

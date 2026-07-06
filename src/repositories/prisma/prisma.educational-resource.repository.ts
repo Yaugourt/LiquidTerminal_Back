@@ -84,6 +84,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
     search?: string;
     addedBy?: number;
     categoryId?: number;
+    categoryIds?: number[];
     status?: ResourceStatus;
   }): Promise<{
     data: EducationalResourceResponse[];
@@ -98,6 +99,7 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         search,
         addedBy,
         categoryId,
+        categoryIds,
         status
       } = params;
 
@@ -105,12 +107,22 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
 
       const where: any = {};
       if (search) {
-        where.url = { contains: search, mode: 'insensitive' };
+        // Search across the raw URL and the fetched preview metadata
+        // (LinkPreview lives in the same Content DB, so a relation filter works).
+        where.OR = [
+          { url: { contains: search, mode: 'insensitive' } },
+          { linkPreview: { title: { contains: search, mode: 'insensitive' } } },
+          { linkPreview: { description: { contains: search, mode: 'insensitive' } } }
+        ];
       }
       if (addedBy) {
         where.addedBy = addedBy;
       }
-      if (categoryId) {
+      if (categoryIds && categoryIds.length > 0) {
+        where.categories = {
+          some: { categoryId: { in: categoryIds } }
+        };
+      } else if (categoryId) {
         where.categories = {
           some: { categoryId }
         };
@@ -237,11 +249,14 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
     );
   }
 
-  async findByCategory(categoryId: number): Promise<EducationalResourceResponse[]> {
+  async findByCategory(categoryId: number, status?: ResourceStatus): Promise<EducationalResourceResponse[]> {
     return this.executeWithErrorHandling(
       async () => {
         const resourceCategories = await this.prismaClient.educationalResourceCategory.findMany({
-          where: { categoryId },
+          where: {
+            categoryId,
+            ...(status ? { resource: { status } } : {})
+          },
           include: {
             resource: {
               include: this.includeConfig

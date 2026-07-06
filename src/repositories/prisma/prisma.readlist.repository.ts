@@ -43,7 +43,15 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
 
     const resources = await prismaContent.educationalResource.findMany({
       where: { id: { in: resourceIds } },
-      select: { id: true, url: true, createdAt: true, addedBy: true }
+      select: {
+        id: true,
+        url: true,
+        createdAt: true,
+        addedBy: true,
+        linkPreview: {
+          select: { id: true, title: true, description: true, image: true, siteName: true, favicon: true }
+        }
+      }
     });
     const enrichedResources = await attachCreator(
       resources as Array<Record<string, unknown>>,
@@ -70,6 +78,29 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
       }
     }
   };
+
+  /**
+   * Attach `readCount` (items marked as read) to summary rows.
+   * Prisma's `_count` cannot hold two differently-filtered counts of the same
+   * relation, so the read counts come from one extra groupBy (never N+1).
+   */
+  private async attachReadCounts(
+    readLists: Array<{ id: number } & Record<string, unknown>>
+  ): Promise<void> {
+    if (readLists.length === 0) return;
+    const ids = readLists.map((l) => l.id);
+    const grouped = await this.prismaClient.readListItem.groupBy({
+      by: ['readListId'],
+      where: { readListId: { in: ids }, isRead: true },
+      _count: { _all: true }
+    });
+    const byId = new Map<number, number>(
+      grouped.map((g: { readListId: number; _count: { _all: number } }) => [g.readListId, g._count._all])
+    );
+    for (const list of readLists) {
+      (list as Record<string, unknown>).readCount = byId.get(list.id) ?? 0;
+    }
+  }
 
   async findAll(params: {
     page?: number;
@@ -113,6 +144,7 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
         itemsCount: readList._count.items,
         _count: undefined
       }));
+      await this.attachReadCounts(data);
 
       return {
         data,
@@ -149,11 +181,14 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
 
         if (!readList) return null;
 
-        return {
+        const summary = {
           ...readList,
           itemsCount: readList._count.items,
+          readCount: 0, // overwritten by attachReadCounts below
           _count: undefined
         };
+        await this.attachReadCounts([summary]);
+        return summary;
       },
       'finding read list summary by ID',
       { id }
@@ -236,11 +271,13 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
           orderBy: { updatedAt: 'desc' }
         });
 
-        return readLists.map((readList: any) => ({
+        const summaries = readLists.map((readList: any) => ({
           ...readList,
           itemsCount: readList._count.items,
           _count: undefined
         }));
+        await this.attachReadCounts(summaries);
+        return summaries;
       },
       'finding read lists by user',
       { userId }

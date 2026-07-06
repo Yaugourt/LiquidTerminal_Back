@@ -1,8 +1,9 @@
-import { 
-  EducationalCategoryCreateInput, 
-  EducationalCategoryUpdateInput, 
+import {
+  EducationalCategoryCreateInput,
+  EducationalCategoryUpdateInput,
   EducationalCategoryResponse
 } from '../../types/educational.types';
+import { BasePagination } from '../../types/common.types';
 import { 
   EducationalCategoryNotFoundError, 
   EducationalCategoryAlreadyExistsError,
@@ -76,9 +77,10 @@ export class EducationalCategoryService extends BaseService<
   }
 
   /**
-   * Vérifie si une catégorie éducative peut être supprimée
-   * @param id ID de la catégorie à supprimer
-   * @throws Erreur si la catégorie ne peut pas être supprimée
+   * Vérifie si une catégorie éducative peut être supprimée.
+   * Intentionally unfiltered: a category holding only PENDING/REJECTED
+   * resources must still be undeletable, otherwise the cascade would
+   * silently drop their assignments.
    */
   protected async checkCanDelete(id: number): Promise<void> {
     const resources = await this.repository.getResourcesByCategory(id);
@@ -105,7 +107,8 @@ export class EducationalCategoryService extends BaseService<
             throw new EducationalCategoryNotFoundError();
           }
 
-          const resources = await this.repository.getResourcesByCategory(categoryId);
+          // Public endpoint: only approved resources are visible.
+          const resources = await this.repository.getResourcesByCategory(categoryId, 'APPROVED');
 
           logDeduplicator.info('Resources by educational category retrieved successfully', { 
             categoryId,
@@ -126,6 +129,39 @@ export class EducationalCategoryService extends BaseService<
   }
 
 
+
+  /**
+   * Liste les catégories avec le nombre de ressources APPROVED de chacune.
+   * Un seul groupBy pour tous les counts, mis en cache sous sa propre clé
+   * (invalidée par le service ressource à chaque approve/reject/assign).
+   */
+  async getAllWithCounts(query: EducationalCategoryQueryParams): Promise<{
+    data: Array<EducationalCategoryResponse & { resourcesCount: number }>;
+    pagination: BasePagination;
+  }> {
+    const [result, counts] = await Promise.all([
+      this.getAll(query),
+      cacheService.getOrSet(
+        CACHE_KEYS.EDUCATIONAL_CATEGORY_COUNTS,
+        async () => {
+          const map = await this.repository.countResourcesByCategory('APPROVED');
+          // Redis serializes to JSON: store as a plain object, rebuild below.
+          return Object.fromEntries(map);
+        },
+        CACHE_TTL.MEDIUM
+      )
+    ]);
+
+    const countsByCategory: Record<string, number> = counts ?? {};
+    return {
+      data: result.data.map((category: EducationalCategoryResponse) => ({
+        ...category,
+        resourcesCount: countsByCategory[String(category.id)] ?? 0
+      })),
+      // CrudRepository types pagination minimally; the repo builds the full shape.
+      pagination: result.pagination as BasePagination
+    };
+  }
 
   /**
    * Invalide le cache spécifique aux catégories éducatives
