@@ -5,7 +5,7 @@ import { publicGoodCreateSchema, publicGoodUpdateSchema, publicGoodReviewSchema,
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { PublicGoodError } from '../../errors/publicgood.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { validatePrivyToken } from '../../middleware/authMiddleware';
+import { validatePrivyToken, optionalPrivyToken } from '../../middleware/authMiddleware';
 import { requireModerator } from '../../middleware/roleMiddleware';
 import { 
   uploadPublicGoodFilesR2, 
@@ -22,9 +22,24 @@ const publicGoodService = new PublicGoodService();
 router.use(marketRateLimiter);
 
 // ========== ROUTE 1: GET /publicgoods - Liste paginée avec filtres ==========
-router.get('/', (async (req: Request, res: Response) => {
+// Non-approved submissions carry personal contact data (submitter email):
+// only moderators/admins may list them. Everyone else is forced to APPROVED.
+router.get('/', optionalPrivyToken, (async (req: Request, res: Response) => {
   try {
-    const publicGoods = await publicGoodService.getAll(req.query);
+    const query = { ...req.query };
+    const requestedStatus = String(query.status || 'approved').toLowerCase();
+    if (requestedStatus !== 'approved') {
+      const privyUserId = req.user?.sub;
+      const user = privyUserId
+        ? await prisma.user.findUnique({ where: { privyUserId } })
+        : null;
+      const isModerator = user?.role === 'MODERATOR' || user?.role === 'ADMIN';
+      if (!isModerator) {
+        query.status = 'approved';
+      }
+    }
+
+    const publicGoods = await publicGoodService.getAll(query);
     res.json({
       success: true,
       data: publicGoods.data,
@@ -119,18 +134,38 @@ router.get('/my-submissions', validatePrivyToken, (async (req: Request, res: Res
 }) as RequestHandler);
 
 // ========== ROUTE 2: GET /publicgoods/:id - Détail d'un projet ==========
-router.get('/:id', (async (req: Request, res: Response) => {
+// Same privacy rule as the list: a non-approved submission is only visible
+// to its submitter and to moderators/admins. Anonymous callers get 404
+// (not 403) so the existence of pending submissions is not disclosed.
+router.get('/:id', optionalPrivyToken, (async (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Invalid ID format', 
-        code: 'INVALID_ID_FORMAT' 
+        error: 'Invalid ID format',
+        code: 'INVALID_ID_FORMAT'
       });
     }
 
     const publicGood = await publicGoodService.getById(id);
+
+    if (publicGood.status !== 'APPROVED') {
+      const privyUserId = req.user?.sub;
+      const user = privyUserId
+        ? await prisma.user.findUnique({ where: { privyUserId } })
+        : null;
+      const isModerator = user?.role === 'MODERATOR' || user?.role === 'ADMIN';
+      const isSubmitter = user !== null && publicGood.submitterId === user.id;
+      if (!isModerator && !isSubmitter) {
+        return res.status(404).json({
+          success: false,
+          error: 'Public good not found',
+          code: 'PUBLIC_GOOD_NOT_FOUND'
+        });
+      }
+    }
+
     res.json({
       success: true,
       data: publicGood

@@ -80,18 +80,9 @@ export class PerpAssetContextService {
       markets.sort((a, b) => {
         const multiplier = sortOrder === 'desc' ? -1 : 1;
         
-        // Tri spécial pour openInterest en dollars
-        if (sortBy === 'openInterest') {
-          const valueA = a.openInterest * a.price;
-          const valueB = b.openInterest * b.price;
-          
-          if (valueA === undefined || valueA === null) return 1;
-          if (valueB === undefined || valueB === null) return -1;
-          
-          return multiplier * (valueA - valueB);
-        }
-        
-        // Pour les autres critères de tri
+        // openInterest is already USD-converted above; the generic numeric
+        // path below sorts it correctly (re-multiplying by price here used
+        // to produce a non-monotonic order).
         const valueA = a[sortBy as keyof PerpMarketData];
         const valueB = b[sortBy as keyof PerpMarketData];
         

@@ -138,13 +138,13 @@ export class ReadListItemService extends BaseService<
   /**
    * Récupère tous les items d'une read list avec vérification des permissions
    * @param readListId ID de la read list
-   * @param userId ID de l'utilisateur demandeur
+   * @param userId ID de l'utilisateur demandeur (null = anonymous, public lists only)
    * @param query Paramètres de requête
    * @returns Liste paginée des items
    */
   async getByReadListWithPermission(
     readListId: number,
-    userId: number,
+    userId: number | null,
     query: ReadListItemQueryParams = {}
   ) {
     try {

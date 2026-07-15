@@ -68,4 +68,35 @@ export const validatePrivyToken = (req: Request, res: Response, next: NextFuncti
         code: 'TOKEN_VALIDATION_ERROR'
       });
     });
-}; 
+};
+
+/**
+ * Optional authentication: resolves req.user when a valid Bearer token is
+ * provided, but lets the request through as anonymous otherwise (missing,
+ * malformed or expired token). Use for routes whose visibility depends on
+ * the resource (e.g. public read lists readable without an account).
+ */
+export const optionalPrivyToken = (req: Request, _res: Response, next: NextFunction): void => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    next();
+    return;
+  }
+
+  const token = authHeader.split(' ')[1];
+  authService.verifyToken(token)
+    .then(payload => {
+      if (payload.sub) {
+        req.user = payload;
+      }
+      next();
+    })
+    .catch(error => {
+      logDeduplicator.warn('Optional token validation failed, continuing as anonymous', {
+        error: error instanceof Error ? error.message : String(error),
+        path: req.path,
+        method: req.method
+      });
+      next();
+    });
+};
