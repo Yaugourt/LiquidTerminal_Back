@@ -13,6 +13,12 @@ const HYPE_DEXER_ENVELOPE_KEYS = new Set([
   'has_more',
   'status',
   'count',
+  // Pagination keys HypeDexer added to /hip4/markets (July 2026); without
+  // them the every() check rejects the envelope and lists collapse to [].
+  'limit',
+  'offset',
+  'next_offset',
+  'total',
 ]);
 
 function isHypeDexerApiEnvelope(o: Record<string, unknown>): boolean {
