@@ -297,7 +297,7 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
     return this.findAll({ ...params, isPublic: true });
   }
 
-  async hasAccess(readListId: number, userId: number): Promise<boolean> {
+  async hasAccess(readListId: number, userId: number | null): Promise<boolean> {
     return this.executeWithErrorHandling(
       async () => {
         const readList = await this.prismaClient.readList.findUnique({
@@ -306,7 +306,7 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
         });
 
         if (!readList) return false;
-        return readList.userId === userId || readList.isPublic;
+        return readList.isPublic || (userId !== null && readList.userId === userId);
       },
       'checking read list access',
       { readListId, userId }

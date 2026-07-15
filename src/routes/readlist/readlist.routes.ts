@@ -2,7 +2,7 @@ import express, { Request, Response, RequestHandler } from "express";
 import { ReadListService } from "../../services/readlist/readlist.service";
 import { ReadListItemService } from "../../services/readlist/readlist-item.service";
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
-import { validatePrivyToken } from '../../middleware/authMiddleware';
+import { validatePrivyToken, optionalPrivyToken } from '../../middleware/authMiddleware';
 import {
   validateUpdateReadList,
   validateCreateReadListItem,
@@ -246,8 +246,11 @@ router.post('/:id/items', validatePrivyToken, validateCreateReadListItem, (async
   }
 }) as RequestHandler);
 
-// Lister les items d'une read list
-router.get('/:id/items', validatePrivyToken, validateReadListItemQuery, (async (req: Request, res: Response) => {
+// Lister les items d'une read list.
+// Auth is optional: anonymous callers can read items of PUBLIC lists
+// (permission is enforced in the service via hasAccess), matching the
+// already-public GET /:id detail route.
+router.get('/:id/items', optionalPrivyToken, validateReadListItemQuery, (async (req: Request, res: Response) => {
   try {
     const readListId = parseInt(String(req.params.id), 10);
     if (isNaN(readListId)) {
@@ -255,17 +258,11 @@ router.get('/:id/items', validatePrivyToken, validateReadListItemQuery, (async (
     }
 
     const privyUserId = req.user?.sub;
-    if (!privyUserId) {
-      return res.status(401).json({ success: false, error: 'User not authenticated', code: 'UNAUTHENTICATED' });
-    }
+    const user = privyUserId
+      ? await prisma.user.findUnique({ where: { privyUserId } })
+      : null;
 
-    // Récupère l'utilisateur depuis la DB
-    const user = await prisma.user.findUnique({ where: { privyUserId } });
-    if (!user) {
-      return res.status(401).json({ success: false, error: 'User not found', code: 'USER_NOT_FOUND' });
-    }
-
-    const items = await readListItemService.getByReadListWithPermission(readListId, user.id, req.query);
+    const items = await readListItemService.getByReadListWithPermission(readListId, user?.id ?? null, req.query);
     res.json({ success: true, data: items.data, pagination: items.pagination });
   } catch (error) {
     logDeduplicator.error('Error fetching items by read list:', { error: error instanceof Error ? error.message : String(error), readListId: req.params.id });

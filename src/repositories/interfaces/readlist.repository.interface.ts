@@ -80,8 +80,9 @@ export interface ReadListRepository extends BaseRepository {
 
   /**
    * Vérifie si un utilisateur a accès à une read list
+   * (userId null = anonymous caller, granted only on public lists)
    */
-  hasAccess(readListId: number, userId: number): Promise<boolean>;
+  hasAccess(readListId: number, userId: number | null): Promise<boolean>;
 
   /**
    * Met à jour le nombre d'items dans une read list
