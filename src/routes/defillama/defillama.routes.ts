@@ -8,12 +8,14 @@ import {
   defillamaSlugParamSchema,
 } from '../../schemas/defillama.schema';
 import { DefiLlamaService } from '../../services/defillama/defillama.service';
+import { DefiLlamaContextService } from '../../services/defillama/defillama-context.service';
 import { DefiLlamaFeesDataType } from '../../clients/defillama/defillama.client';
 import { DefiLlamaError } from '../../errors/defillama.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
 const service = DefiLlamaService.getInstance();
+const contextService = DefiLlamaContextService.getInstance();
 
 /** Run a handler and shape the response; map DefiLlama domain errors to their status. */
 function run(handler: (req: Request) => Promise<unknown>, label: string): RequestHandler {
@@ -52,6 +54,22 @@ router.get(
   marketRateLimiter,
   validateGetRequest(defillamaEmptyQuerySchema),
   run(() => service.getChains(), 'GET /defillama/chains')
+);
+
+// Hyperliquid banner figures (chain TVL, fees 24h, DEX volume 24h, protocols tracked).
+router.get(
+  '/chain-stats',
+  marketRateLimiter,
+  validateGetRequest(defillamaEmptyQuerySchema),
+  run(() => contextService.getChainStats(), 'GET /defillama/chain-stats')
+);
+
+// Light daily TVL series (HL + global), tokens stripped from the upstream payload.
+router.get(
+  '/tvl-history/:slug',
+  marketRateLimiter,
+  validateGetRequest(defillamaSlugParamSchema),
+  run((req) => contextService.getTvlHistory(String(req.params.slug)), 'GET /defillama/tvl-history/:slug')
 );
 
 // Per-project aggregate — the primary source for a project page.

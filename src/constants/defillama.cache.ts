@@ -15,6 +15,11 @@ export const DEFILLAMA_CACHE_KEYS = {
   fees: (slug: string, dataType: string) => `${DEFILLAMA_CACHE_PREFIX}:fees:${slug}:${dataType}`,
   prices: (coins: string) => `${DEFILLAMA_CACHE_PREFIX}:prices:${coins}`,
   overview: (slug: string) => `${DEFILLAMA_CACHE_PREFIX}:overview:${slug}`,
+  hlSnapshot: `${DEFILLAMA_CACHE_PREFIX}:hl:snapshot`,
+  hlFeesRanking: `${DEFILLAMA_CACHE_PREFIX}:hl:fees-ranking`,
+  hlVolumeRanking: `${DEFILLAMA_CACHE_PREFIX}:hl:volume-ranking`,
+  linkedProjects: `${DEFILLAMA_CACHE_PREFIX}:linked-projects`,
+  tvlHistory: (slug: string) => `${DEFILLAMA_CACHE_PREFIX}:tvl-history:${slug}`,
 } as const;
 
 /** TTLs in seconds. */
@@ -27,4 +32,8 @@ export const DEFILLAMA_TTL = {
   fees: 300,
   prices: 60, // 1 min — prices move
   overview: 300,
+  hlSnapshot: 600,
+  ranking: 600,
+  linkedProjects: 300,
+  tvlHistory: 1800, // daily series, refresh twice an hour is plenty
 } as const;

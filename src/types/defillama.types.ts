@@ -18,6 +18,30 @@ export interface DefiLlamaProtocolListItem {
   change_1d: number | null;
   change_7d: number | null;
   mcap: number | null;
+  /** Per-chain TVL map, includes `-borrowed`/`-staking` variants (e.g. "Hyperliquid L1-borrowed"). */
+  chainTvls?: Record<string, number>;
+  /** `parent#<slug>` marker when the protocol is a child of a parent protocol. */
+  parentProtocol?: string | null;
+  /** Bare parent slug (same info as parentProtocol without the prefix). */
+  parentProtocolSlug?: string | null;
+}
+
+/** Protocol entry of `GET /overview/fees/{chain}` and `/overview/dexs/{chain}`. */
+export interface DefiLlamaChainOverviewProtocol {
+  name: string;
+  slug?: string;
+  displayName?: string;
+  category: string | null;
+  total24h: number | null;
+  parentProtocol?: string | null;
+}
+
+/** Response of `GET /overview/{fees|dexs}/{chain}` with charts excluded. */
+export interface DefiLlamaChainOverview {
+  chain?: string;
+  total24h: number | null;
+  protocols: DefiLlamaChainOverviewProtocol[];
+  [key: string]: unknown;
 }
 
 /** Single point of a historical TVL series. */

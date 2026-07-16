@@ -6,6 +6,7 @@ import { DEFILLAMA_API_URL, defillamaJsonHeaders } from './defillama-api.config'
 import { DefiLlamaNotFoundError, DefiLlamaUpstreamError } from '../../errors/defillama.errors';
 import {
   DefiLlamaChain,
+  DefiLlamaChainOverview,
   DefiLlamaProtocolDetail,
   DefiLlamaProtocolListItem,
   DefiLlamaSummary,
@@ -101,6 +102,20 @@ export class DefiLlamaClient extends BaseApiService {
   ): Promise<DefiLlamaSummary> {
     return this.getPath<DefiLlamaSummary>(
       `/summary/fees/${encodeURIComponent(slug)}?dataType=${dataType}`
+    );
+  }
+
+  /** `GET /overview/fees/{chain}` — chain-wide fees ranking, charts excluded. */
+  public getChainFeesOverview(chain: string): Promise<DefiLlamaChainOverview> {
+    return this.getPath<DefiLlamaChainOverview>(
+      `/overview/fees/${encodeURIComponent(chain)}?excludeTotalDataChart=true&excludeTotalDataChartBreakdown=true`
+    );
+  }
+
+  /** `GET /overview/dexs/{chain}` — chain-wide DEX volume ranking, charts excluded. */
+  public getChainDexsOverview(chain: string): Promise<DefiLlamaChainOverview> {
+    return this.getPath<DefiLlamaChainOverview>(
+      `/overview/dexs/${encodeURIComponent(chain)}?excludeTotalDataChart=true&excludeTotalDataChartBreakdown=true`
     );
   }
 }

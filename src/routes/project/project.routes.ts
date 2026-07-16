@@ -11,9 +11,11 @@ import { validatePrivyToken } from '../../middleware/authMiddleware';
 import { requireModerator, requireAdmin } from '../../middleware/roleMiddleware';
 import { uploadProjectFilesR2, validateAndUploadToR2, handleUploadErrorR2, getUploadedUrls } from '../../middleware/upload-r2.middleware';
 import { DefiLlamaService } from '../../services/defillama/defillama.service';
+import { DefiLlamaContextService } from '../../services/defillama/defillama-context.service';
 import { DefiLlamaError } from '../../errors/defillama.errors';
 
 const defillamaService = DefiLlamaService.getInstance();
+const defillamaContextService = DefiLlamaContextService.getInstance();
 
 const router = express.Router();
 const projectService = new ProjectService();
@@ -310,6 +312,37 @@ router.get('/:id/defillama', (async (req: Request, res: Response) => {
       return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
     }
     logDeduplicator.error('Error fetching project DefiLlama overview:', {
+      error: error instanceof Error ? error.message : String(error),
+      projectId: req.params.id,
+    });
+    res.status(500).json({ success: false, error: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
+  }
+}) as RequestHandler);
+
+// Contexte Hyperliquid du projet : position (rang/part/fees rank) + peers + bandeau chain.
+// Fonctionne aussi pour les projets non liés (position null, peers = catégorie DB).
+router.get('/:id/context', (async (req: Request, res: Response) => {
+  try {
+    const projectId = parseInt(String(req.params.id));
+    if (isNaN(projectId)) {
+      return res.status(400).json({ success: false, error: 'ID de projet invalide', code: 'INVALID_PROJECT_ID' });
+    }
+
+    const project = (await projectService.getById(projectId)) as unknown as Project;
+    const context = await defillamaContextService.getProjectContext({
+      id: projectId,
+      defillamaSlug: project.defillamaSlug ?? null,
+      categoryIds: (project.categories ?? []).map((c) => c.id),
+    });
+    res.json({ success: true, data: context });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      return res.status(404).json({ success: false, error: error.message, code: error.code });
+    }
+    if (error instanceof DefiLlamaError) {
+      return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
+    }
+    logDeduplicator.error('Error fetching project context:', {
       error: error instanceof Error ? error.message : String(error),
       projectId: req.params.id,
     });
