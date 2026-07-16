@@ -74,4 +74,18 @@ export class HypeDexerAnalyticsIndexerClient extends HypeDexerBaseClient {
       return this.getUnwrapped<unknown>(path);
     });
   }
+
+  /**
+   * Daily HyperEVM priority-fees burn chart.
+   * Server caps the window around ~42 days regardless of the query.
+   * Returns `{ data: [{ date, fills, fillsWithFee, totalGas, uniqueUsers }] }`
+   * where `totalGas` is the daily HYPE amount burned.
+   */
+  public async getPriorityFeesChartDaily(): Promise<unknown> {
+    return this.circuitBreaker.execute(async () => {
+      const path = `/analytics/priority-fees/chart/daily`;
+      logDeduplicator.info('HypeDexerAnalyticsIndexerClient.getPriorityFeesChartDaily', { path });
+      return this.getUnwrapped<unknown>(path);
+    });
+  }
 }

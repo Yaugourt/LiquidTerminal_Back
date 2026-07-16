@@ -1,56 +1,40 @@
 import { Router } from 'express';
 import { RevenueService } from '../../services/revenue/revenue.service';
+import { RevenueError, RevenueWindow } from '../../types/revenue.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { RevenueError, RevenueWindow, REVENUE_WINDOWS } from '../../types/revenue.types';
 
 const router = Router();
 const revenueService = RevenueService.getInstance();
 
-/**
- * @route GET /market/revenue/history?window=7d|30d|90d|1y|all
- * Daily protocol-revenue breakdown (perp/spot real, other sources pending).
- * Defaults to a 30-day window.
- */
-router.get('/history', async (req, res) => {
-  const rawWindow = typeof req.query.window === 'string' ? req.query.window : '30d';
+const VALID_WINDOWS: RevenueWindow[] = ['7d', '30d', '90d', '1y', 'all'];
 
-  if (!REVENUE_WINDOWS.includes(rawWindow as RevenueWindow)) {
-    res.status(400).json({
+router.get('/history', async (req, res) => {
+  const raw = (req.query.window as string | undefined) ?? '30d';
+  const window = VALID_WINDOWS.includes(raw as RevenueWindow) ? (raw as RevenueWindow) : null;
+
+  if (!window) {
+    return res.status(400).json({
       success: false,
-      error: {
-        message: `Invalid window "${rawWindow}". Expected one of: ${REVENUE_WINDOWS.join(', ')}.`,
-        code: 'REVENUE_INVALID_WINDOW',
-      },
+      error: { message: `Invalid window. Must be one of: ${VALID_WINDOWS.join(', ')}`, code: 'INVALID_WINDOW' },
     });
-    return;
   }
 
   try {
-    const breakdown = await revenueService.getBreakdown(rawWindow as RevenueWindow);
-    res.json({
-      success: true,
-      data: breakdown,
-    });
+    const breakdown = await revenueService.getBreakdown(window);
+    return res.json({ success: true, data: breakdown });
   } catch (error: unknown) {
-    logDeduplicator.error('Error fetching revenue breakdown:', {
-      window: rawWindow,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    logDeduplicator.error('Error fetching revenue breakdown:', { error: error instanceof Error ? error.message : String(error) });
 
     if (error instanceof RevenueError) {
-      res.status(error.statusCode).json({
+      return res.status(error.statusCode).json({
         success: false,
         error: { message: error.message, code: error.code },
       });
-    } else {
-      res.status(500).json({
-        success: false,
-        error: {
-          message: error instanceof Error ? error.message : 'Internal server error',
-          code: 'INTERNAL_SERVER_ERROR',
-        },
-      });
     }
+    return res.status(500).json({
+      success: false,
+      error: { message: error instanceof Error ? error.message : 'Internal server error', code: 'INTERNAL_SERVER_ERROR' },
+    });
   }
 });
 
