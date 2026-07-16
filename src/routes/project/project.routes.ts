@@ -1,5 +1,6 @@
 import express, { Request, Response, RequestHandler, NextFunction } from "express";
 import { ProjectService } from "../../services/project/project.service";
+import { Project } from "../../types/project.types";
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { projectCategoriesUpdateSchema, projectCreateWithUploadSchema } from '../../schemas/project.schema';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
@@ -9,6 +10,10 @@ import { ProjectError } from '../../errors/project.errors';
 import { validatePrivyToken } from '../../middleware/authMiddleware';
 import { requireModerator, requireAdmin } from '../../middleware/roleMiddleware';
 import { uploadProjectFilesR2, validateAndUploadToR2, handleUploadErrorR2, getUploadedUrls } from '../../middleware/upload-r2.middleware';
+import { DefiLlamaService } from '../../services/defillama/defillama.service';
+import { DefiLlamaError } from '../../errors/defillama.errors';
+
+const defillamaService = DefiLlamaService.getInstance();
 
 const router = express.Router();
 const projectService = new ProjectService();
@@ -271,6 +276,44 @@ router.delete('/:id/categories', validatePrivyToken, requireModerator, validateR
       categoryIds: req.body.categoryIds
     });
     res.status(500).json({ message: 'Internal server error' });
+  }
+}) as RequestHandler);
+
+// Route pour enrichir un projet avec ses données DefiLlama (TVL/volume/fees/prix).
+// Le projet doit avoir un `defillamaSlug` renseigné, sinon 404 explicite.
+router.get('/:id/defillama', (async (req: Request, res: Response) => {
+  try {
+    const projectId = parseInt(String(req.params.id));
+    if (isNaN(projectId)) {
+      return res.status(400).json({ success: false, error: 'ID de projet invalide', code: 'INVALID_PROJECT_ID' });
+    }
+
+    // getById returns the Project entity at runtime (typed loosely as the
+    // response wrapper by the generic BaseService); read the slug off it.
+    const project = (await projectService.getById(projectId)) as unknown as Project;
+
+    if (!project.defillamaSlug) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not linked to DefiLlama',
+        code: 'DEFILLAMA_SLUG_NOT_SET',
+      });
+    }
+
+    const overview = await defillamaService.getProjectOverview(project.defillamaSlug);
+    res.json({ success: true, data: overview });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      return res.status(404).json({ success: false, error: error.message, code: error.code });
+    }
+    if (error instanceof DefiLlamaError) {
+      return res.status(error.statusCode).json({ success: false, error: error.message, code: error.code });
+    }
+    logDeduplicator.error('Error fetching project DefiLlama overview:', {
+      error: error instanceof Error ? error.message : String(error),
+      projectId: req.params.id,
+    });
+    res.status(500).json({ success: false, error: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
   }
 }) as RequestHandler);
 

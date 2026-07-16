@@ -128,6 +128,7 @@ export class PrismaProjectRepository extends BasePrismaRepository implements Pro
           discord: projectData.discord,
           telegram: projectData.telegram,
           website: projectData.website,
+          defillamaSlug: projectData.defillamaSlug,
           ...(categoryIds && categoryIds.length > 0 ? {
             categories: {
               create: categoryIds.map(categoryId => ({

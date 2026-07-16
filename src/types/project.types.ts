@@ -12,6 +12,7 @@ export interface Project {
   discord: string | null;
   telegram: string | null;
   website: string | null;
+  defillamaSlug: string | null;
   createdAt: Date;
   updatedAt: Date;
   categories?: CategoryResponse[];
@@ -38,6 +39,7 @@ export interface ProjectCreateInput {
   discord?: string;
   telegram?: string;
   website?: string;
+  defillamaSlug?: string;
   categoryIds?: number[];
 }
 
@@ -52,6 +54,7 @@ export interface ProjectCreateWithUploadInput {
   discord?: string;
   telegram?: string;
   website?: string;
+  defillamaSlug?: string;
   categoryIds?: number[];
 }
 

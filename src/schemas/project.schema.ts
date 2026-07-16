@@ -15,6 +15,10 @@ export const projectBaseSchema = z.object({
   discord: z.string().url('Discord URL must be valid').optional(),
   telegram: z.string().url('Telegram URL must be valid').optional(),
   website: z.string().url('Website URL must be valid').optional(),
+  defillamaSlug: z.string()
+    .max(120, 'DefiLlama slug cannot exceed 120 characters')
+    .regex(/^[a-z0-9][a-z0-9-]*$/, 'Invalid DefiLlama slug')
+    .optional(),
   categoryIds: z.array(z.number().int().positive()).optional()
 });
 
@@ -158,12 +162,16 @@ export const projectCreateSchema = z.object({
   logo: imageUrlSchema.optional(),
   banner: imageUrlSchema.optional(),
   token: z.string().max(255, 'Token cannot exceed 255 characters').optional(),
-  
+
   twitter: urlSchema,
   discord: urlSchema,
   telegram: urlSchema,
   website: urlSchema,
-  
+  defillamaSlug: z.string()
+    .max(120, 'DefiLlama slug cannot exceed 120 characters')
+    .regex(/^[a-z0-9][a-z0-9-]*$/, 'Invalid DefiLlama slug')
+    .optional(),
+
   categoryIds: z.array(z.number().int().positive()).optional()
 });
 

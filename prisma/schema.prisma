@@ -265,6 +265,9 @@ model Project {
   discord    String?   @db.VarChar(255)
   telegram   String?   @db.VarChar(255)
   website    String?   @db.VarChar(255)
+  // DefiLlama protocol slug (e.g. "upshift") used to pull TVL/volume/fees/price
+  // for the project page. Nullable: most ecosystem projects aren't tracked.
+  defillamaSlug String? @db.VarChar(120)
   categories ProjectCategory[]
 }
 
