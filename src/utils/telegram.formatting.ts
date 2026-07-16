@@ -54,8 +54,10 @@ function formatTimeRange(timeRange: [number, number]): string {
  * Format a liquidation alert message for Telegram (HTML parse mode)
  */
 export function formatLiquidationAlert(liq: AggregatedLiquidation): string {
-  const directionEmoji = liq.liq_dir === 'Long' ? '🟢' : '🔴';
-  const trendEmoji = liq.liq_dir === 'Long' ? '📉' : '📈';
+  // null direction: neutral marker rather than defaulting to the Short styling.
+  const directionEmoji = liq.liq_dir === 'Long' ? '🟢' : liq.liq_dir === 'Short' ? '🔴' : '⚪';
+  const trendEmoji = liq.liq_dir === 'Long' ? '📉' : liq.liq_dir === 'Short' ? '📈' : '➖';
+  const directionLabel = liq.liq_dir ?? 'Liquidation';
   const amountFormatted = formatAmount(liq.notional_total);
   const priceFormatted = formatPrice(liq.mark_px);
   const timeFormatted = liq.time.slice(0, 16).replace('T', ' ');
@@ -73,7 +75,7 @@ export function formatLiquidationAlert(liq: AggregatedLiquidation): string {
   return `
 🚨 <b>LIQUIDATION ALERT</b>${aggregationInfo}
 
-${directionEmoji} <b>${escapeHtml(liq.coin)}</b> ${liq.liq_dir}: ${amountFormatted}
+${directionEmoji} <b>${escapeHtml(liq.coin)}</b> ${directionLabel}: ${amountFormatted}
 ${trendEmoji} Mark Price: ${priceFormatted}
 🕐 ${timeFormatted} UTC
 

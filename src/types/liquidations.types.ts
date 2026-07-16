@@ -16,7 +16,7 @@ export interface Liquidation {
   fee_total_liquidated: number; // Liquidation fee
   liquidators: string[];     // List of liquidator addresses
   liquidator_count: number;  // Number of liquidators
-  liq_dir: "Long" | "Short"; // Liquidation direction
+  liq_dir: "Long" | "Short" | null; // Liquidation direction (null when the source has none)
   tid: number;               // Trade ID (unique)
 }
 

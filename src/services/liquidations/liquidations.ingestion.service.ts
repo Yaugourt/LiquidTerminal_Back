@@ -155,8 +155,9 @@ export class LiquidationsIngestionService {
       typeof liq.hash === 'string' && liq.hash.length > 0 &&
       typeof liq.liquidated_user === 'string' && liq.liquidated_user.length > 0 &&
       typeof liq.notional_total === 'number' && Number.isFinite(liq.notional_total) &&
-      typeof liq.mark_px === 'number' && Number.isFinite(liq.mark_px) && liq.mark_px > 0 &&
-      (liq.liq_dir === 'Long' || liq.liq_dir === 'Short')
+      typeof liq.mark_px === 'number' && Number.isFinite(liq.mark_px) && liq.mark_px > 0
+      // liq_dir may be 'Long', 'Short' or null: directionless liquidations are
+      // valid and counted in totals; they just don't add to long/short splits.
     );
   }
 

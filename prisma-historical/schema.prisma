@@ -24,7 +24,7 @@ model RawLiquidation {
   feeTotalLiquidated Decimal  @map("fee_total_liquidated") @db.Decimal(30, 10)
   liquidators        String[]
   liquidatorCount    Int      @map("liquidator_count")
-  liqDir             String   @map("liq_dir") @db.VarChar(10)
+  liqDir             String?  @map("liq_dir") @db.VarChar(10)
   rawData            Json     @map("raw_data")
   ingestedAt         DateTime @default(now()) @map("ingested_at") @db.Timestamptz(3)
 

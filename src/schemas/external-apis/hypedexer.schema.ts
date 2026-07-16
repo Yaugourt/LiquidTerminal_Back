@@ -14,13 +14,14 @@ export const liquidationItemSchema = z.object({
   liquidated_user: z.string(),
   size_total: z.number(),
   notional_total: z.number(),
-  fill_px_vwap: z.number(),
+  fill_px_vwap: z.number().nullable(),
   mark_px: z.number(),
   method: z.string(),
   fee_total_liquidated: z.number(),
   liquidators: z.array(z.string()),
   liquidator_count: z.number(),
-  liq_dir: z.string(),
+  // HypeDexer emits null for liquidations with no resolved direction.
+  liq_dir: z.string().nullable(),
 }).passthrough(); // Allow extra fields we don't use
 
 export const liquidationsResponseSchema = z.object({

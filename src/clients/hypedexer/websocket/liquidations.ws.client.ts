@@ -305,10 +305,12 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
       fee_total_liquidated: raw.fee_total_liquidated,
       liquidators: raw.liquidators,
       liquidator_count: raw.liquidator_count,
-      // Normalize liq_dir to PascalCase (case-insensitive)
-      liq_dir: String(raw.liq_dir).toLowerCase() === 'long' ? 'Long' 
-             : String(raw.liq_dir).toLowerCase() === 'short' ? 'Short' 
-             : 'Short', // Fallback si valeur inattendue
+      // Normalize liq_dir to PascalCase (case-insensitive). Keep null when the
+      // source has no direction instead of fabricating 'Short' (that inflated
+      // the short count and misreported directionless liquidations).
+      liq_dir: String(raw.liq_dir).toLowerCase() === 'long' ? 'Long'
+             : String(raw.liq_dir).toLowerCase() === 'short' ? 'Short'
+             : null,
     };
   }
 

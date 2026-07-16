@@ -201,12 +201,14 @@ export class LiquidationsBackfillService {
         // Reset delay on successful fetch
         this.currentDelayMs = LiquidationsBackfillService.BASE_DELAY_MS;
 
-        // Normalize liq_dir (REST API may send lowercase)
+        // Normalize liq_dir (REST API may send lowercase). Keep null when the
+        // source has no direction instead of writing an invalid value (a null
+        // liq_dir used to crash the whole createMany batch and stall ingestion).
         const normalizedData = response.data.map((liq) => ({
           ...liq,
           liq_dir: (String(liq.liq_dir).toLowerCase() === 'long' ? 'Long'
             : String(liq.liq_dir).toLowerCase() === 'short' ? 'Short'
-            : liq.liq_dir) as 'Long' | 'Short',
+            : null) as 'Long' | 'Short' | null,
         }));
 
         // Insert batch via repository

@@ -19,7 +19,7 @@ export interface RawLiquidationCreateInput {
   feeTotalLiquidated: number;
   liquidators: string[];
   liquidatorCount: number;
-  liqDir: string;
+  liqDir: string | null;
   rawData: Prisma.InputJsonValue;
 }
 

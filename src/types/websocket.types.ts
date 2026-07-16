@@ -52,7 +52,7 @@ export interface HypeDexerWSLiquidation {
   fee_total_liquidated: number;
   liquidators: string[];
   liquidator_count: number;
-  liq_dir: 'long' | 'short'; // Note: lowercase from HypeDexer
+  liq_dir: 'long' | 'short' | null; // Note: lowercase from HypeDexer; null when no direction
 }
 
 /**
@@ -226,7 +226,7 @@ export interface WSLiquidationEvent extends WSServerMessage {
     notional_total: number;
     fill_px_vwap: number;
     mark_px: number;
-    liq_dir: 'Long' | 'Short';  // Normalized to PascalCase
+    liq_dir: 'Long' | 'Short' | null;  // Normalized to PascalCase; null when no direction
     liquidator_count: number;
     aggregation?: {
       isAggregated: boolean;
