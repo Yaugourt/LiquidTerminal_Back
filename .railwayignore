@@ -1,0 +1,12 @@
+.agents
+.cursor
+.gemini
+.gstack
+node_modules
+.git
+dist
+coverage
+logs
+*.log
+logs.*.json*
+*.Zone.Identifier

@@ -28,6 +28,7 @@ import userAuthRoutes from './routes/auth/user.auth.routes';
 
 import marketSpotRoutes from './routes/spot/marketSpot.routes';
 import marketPerpRoutes from './routes/perp/marketPerp.routes';
+import revenueRoutes from './routes/revenue/revenue.routes';
 import globalSpotStatsRoutes from './routes/spot/spotStats.routes';
 import stablecoinsRoutes from './routes/spot/stablecoins.routes';
 import globalPerpStatsRoutes from './routes/perp/perpStats.routes';
@@ -62,6 +63,7 @@ import topTradersRoutes from './routes/toptraders/toptraders.routes';
 import activeUsersRoutes from './routes/activeusers/activeusers.routes';
 import buildersRoutes from './routes/builders/builders.routes';
 import indexerRoutes from './routes/indexer';
+import defillamaRoutes from './routes/defillama/defillama.routes';
 
 const app = express();
 const server = createServer(app);
@@ -130,6 +132,7 @@ app.use('/market/perp', marketPerpRoutes);
 app.use('/market/auction', auctionRoutes);
 app.use('/market/vaults', vaultsRoutes);
 app.use('/market/fees', feesRoutes);
+app.use('/market/revenue', revenueRoutes);
 app.use('/wallet', walletRoutes);
 app.use('/project', projectRoutes);
 app.use('/project/csv', projectCsvRoutes);
@@ -157,6 +160,7 @@ app.use('/top-traders', topTradersRoutes);
 app.use('/active-users', activeUsersRoutes);
 app.use('/builders', buildersRoutes);
 app.use('/indexer', indexerRoutes);
+app.use('/defillama', defillamaRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
