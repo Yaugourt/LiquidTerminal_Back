@@ -64,6 +64,14 @@ router.get(
   run(() => contextService.getChainStats(), 'GET /defillama/chain-stats')
 );
 
+// Batch map for the projects list: HL TVL, ranks and fees rank per linked project.
+router.get(
+  '/projects-map',
+  marketRateLimiter,
+  validateGetRequest(defillamaEmptyQuerySchema),
+  run(() => contextService.getProjectsListMetrics(), 'GET /defillama/projects-map')
+);
+
 // Light daily TVL series (HL + global), tokens stripped from the upstream payload.
 router.get(
   '/tvl-history/:slug',

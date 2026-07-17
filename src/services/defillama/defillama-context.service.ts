@@ -8,6 +8,7 @@ import {
   DefiLlamaTvlHistory,
   HlSnapshotEntry,
   ProjectContext,
+  ProjectListMetric,
   ProjectPeer,
   ProjectPosition,
   SeriesPoint,
@@ -379,6 +380,54 @@ export class DefiLlamaContextService {
       logo: row.logo,
       isCurrent: false,
     }));
+  }
+
+  // ── Batch map for the projects list (cards + TVL sort) ──────────────────
+
+  /**
+   * One row per linked project: HL TVL, chain/category ranks and fees rank,
+   * everything the list page needs to decorate cards and sort — in one call.
+   */
+  public async getProjectsListMetrics(): Promise<ProjectListMetric[]> {
+    const [snapshot, linked, fees] = await Promise.all([
+      this.getHlSnapshot(),
+      this.getLinkedProjects().catch(() => [] as LinkedProjectRow[]),
+      this.getFeesRanking().catch(() => null),
+    ]);
+
+    const categoryRankOf = (entry: HlSnapshotEntry): number | null => {
+      if (!entry.category) return null;
+      const idx = snapshot
+        .filter((e) => e.category === entry.category)
+        .findIndex((e) => e.slug === entry.slug);
+      return idx >= 0 ? idx + 1 : null;
+    };
+
+    return linked.map((row) => {
+      const entry = snapshot.find(
+        (e) => e.slug === row.defillamaSlug || e.memberSlugs.includes(row.defillamaSlug)
+      );
+      const feesIdx = fees
+        ? fees.entries.findIndex(
+            (r) =>
+              r.slug === (entry?.slug ?? row.defillamaSlug) ||
+              r.memberSlugs.includes(row.defillamaSlug) ||
+              (entry?.memberSlugs.some((m) => r.memberSlugs.includes(m)) ?? false)
+          )
+        : -1;
+      return {
+        projectId: row.id,
+        slug: row.defillamaSlug,
+        hlTvl: entry?.hlTvl ?? null,
+        globalTvl: entry?.globalTvl ?? null,
+        hlRank: entry ? snapshot.findIndex((e) => e.slug === entry.slug) + 1 : null,
+        category: entry?.category ?? null,
+        categoryRank: entry ? categoryRankOf(entry) : null,
+        fees24h: feesIdx >= 0 ? fees!.entries[feesIdx].total24h : null,
+        feesRank24h: feesIdx >= 0 ? feesIdx + 1 : null,
+        change7d: entry?.change7d ?? null,
+      };
+    });
   }
 
   // ── Light TVL history ────────────────────────────────────────────────────

@@ -90,6 +90,20 @@ export interface ProjectContext {
   peersScope: 'defillama-category' | 'db-category' | 'none';
 }
 
+/** One row of the batch list map: everything a project card needs to rank itself. */
+export interface ProjectListMetric {
+  projectId: number;
+  slug: string;
+  hlTvl: number | null;
+  globalTvl: number | null;
+  hlRank: number | null;
+  category: string | null;
+  categoryRank: number | null;
+  fees24h: number | null;
+  feesRank24h: number | null;
+  change7d: number | null;
+}
+
 /** Light TVL history extracted from `/protocol/{slug}` (tokens stripped). */
 export interface DefiLlamaTvlHistory {
   slug: string;
