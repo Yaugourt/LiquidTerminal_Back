@@ -40,6 +40,22 @@ export class LiquidationsWebSocketService {
   private static readonly MIN_AGGREGATION_COUNT = 2;
   private static readonly AGGREGATION_WINDOW_MS = 1000; // 1 second window for aggregation
 
+  /**
+   * Max age for a liquidation to still be worth an alert.
+   *
+   * On every (re)subscribe HypeDexer replays a backlog on the same channel:
+   * measured at 76 events aged 97s to 34min, with no `isSnapshot` flag to
+   * distinguish them (the allFills channel has one, this one does not). Without
+   * this cut-off, each reconnect would fire dozens of Telegram alerts for
+   * liquidations that happened half an hour ago.
+   *
+   * Genuinely live events arrive within ~1-3s, so 60s leaves a wide margin
+   * while staying below the observed replay floor. Raw consumers (historical DB
+   * ingestion) are deliberately NOT filtered: there the backlog is real history
+   * and fills the gap left by a disconnect.
+   */
+  private static readonly ALERTABLE_MAX_AGE_MS = 60_000;
+
   // Pending liquidations for aggregation (grouped by user_coin_dir)
   private pendingAggregation: Map<string, Liquidation[]> = new Map();
   private aggregationTimer: NodeJS.Timeout | null = null;
@@ -270,17 +286,34 @@ export class LiquidationsWebSocketService {
     // Sort by time_ms
     result.sort((a, b) => a.time_ms - b.time_ms);
 
-    logDeduplicator.debug('LiquidationsWebSocketService: Broadcasting aggregated liquidations', {
-      count: result.length,
-    });
-
-    // Update last seen tid in Redis
+    // Update last seen tid in Redis (on everything, replay included)
     this.updateLastTid(result);
+
+    // Alert consumers only ever see fresh events, never the replayed backlog.
+    const now = Date.now();
+    const alertable = result.filter(
+      (liq) => now - liq.time_ms <= LiquidationsWebSocketService.ALERTABLE_MAX_AGE_MS
+    );
+
+    if (alertable.length < result.length) {
+      logDeduplicator.info('LiquidationsWebSocketService: Dropped replayed liquidations', {
+        dropped: result.length - alertable.length,
+        kept: alertable.length,
+      });
+    }
+
+    if (alertable.length === 0) {
+      return;
+    }
+
+    logDeduplicator.debug('LiquidationsWebSocketService: Broadcasting aggregated liquidations', {
+      count: alertable.length,
+    });
 
     // Notify all callbacks
     for (const callback of this.processedCallbacks) {
       try {
-        callback(result);
+        callback(alertable);
       } catch (error) {
         logDeduplicator.error('LiquidationsWebSocketService: Callback error', {
           error: error instanceof Error ? error.message : String(error),

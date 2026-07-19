@@ -126,7 +126,7 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
     const message: HypeDexerWSMessage = {
       method: 'subscribe',
       subscription: {
-        type: 'liquidation',
+        type: 'liquidations',
         ...this.subscriptionFilters,
       },
     };
@@ -148,7 +148,7 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
     const message: HypeDexerWSMessage = {
       method: 'unsubscribe',
       subscription: {
-        type: 'liquidation',
+        type: 'liquidations',
       },
     };
 
@@ -204,6 +204,20 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
 
     try {
       const event = data as HypeDexerWSEvent;
+
+      // The subscription ack has no `type`, only `channel`, so it has to be
+      // matched here or it falls through to "Unknown event type" and
+      // `isSubscribed` stays false forever (which also made unsubscribe() a
+      // no-op, since it early-returns on that flag).
+      if ('channel' in event) {
+        if (event.channel === 'subscriptionResponse') {
+          this.isSubscribed = true;
+          logDeduplicator.info('HypeDexerLiquidationsWSClient: Subscription acknowledged', {
+            subscription: event.data?.subscription?.type,
+          });
+        }
+        return;
+      }
 
       switch (event.type) {
         case 'liquidation':

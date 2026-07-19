@@ -13,9 +13,14 @@
 export type HypeDexerWSMethod = 'subscribe' | 'unsubscribe' | 'list_subscriptions';
 
 /**
- * HypeDexer subscription types
+ * HypeDexer subscription types.
+ *
+ * Careful, the upstream API is asymmetric: you SUBSCRIBE with the plural
+ * ('liquidations') but every pushed frame carries the singular
+ * ('type': 'liquidation'). Sending the singular here gets the whole feed
+ * silently rejected with {"type":"error","message":"Unsupported subscription"}.
  */
-export type HypeDexerSubscriptionType = 'liquidation';
+export type HypeDexerSubscriptionType = 'liquidations';
 
 /**
  * HypeDexer subscription request
@@ -90,6 +95,19 @@ export interface HypeDexerWSSubscriptionAdded {
 }
 
 /**
+ * The acknowledgement HypeDexer actually sends today. It is keyed on `channel`
+ * and carries NO `type` field, unlike every other frame, so it has to be
+ * matched before switching on `type`.
+ */
+export interface HypeDexerWSSubscriptionResponse {
+  channel: 'subscriptionResponse';
+  data?: {
+    method?: string;
+    subscription?: HypeDexerWSSubscription;
+  };
+}
+
+/**
  * HypeDexer WebSocket welcome message (sent on connection)
  */
 export interface HypeDexerWSWelcomeEvent {
@@ -113,6 +131,7 @@ export type HypeDexerWSEvent =
   | HypeDexerWSErrorEvent
   | HypeDexerWSSubscriptionConfirm
   | HypeDexerWSSubscriptionAdded
+  | HypeDexerWSSubscriptionResponse
   | HypeDexerWSWelcomeEvent
   | HypeDexerWSPingEvent;
 
