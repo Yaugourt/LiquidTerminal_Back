@@ -240,8 +240,14 @@ export class HypeDexerLiquidationsWSClient extends BaseWebSocketService {
           break;
 
         case 'welcome':
-          // HypeDexer sends a welcome message on connection - ignore it
-          logDeduplicator.info('HypeDexerLiquidationsWSClient: Welcome received');
+        case 'connected':
+          // Greeting frames sent right after the handshake. `connected` is the
+          // one actually observed in production; it used to be logged as an
+          // "Unknown event type" on every reconnect, which is misleading in a
+          // client whose whole failure mode is a rejected subscription.
+          logDeduplicator.info('HypeDexerLiquidationsWSClient: Greeting received', {
+            type: (event as { type?: string }).type,
+          });
           break;
 
         case 'ping':

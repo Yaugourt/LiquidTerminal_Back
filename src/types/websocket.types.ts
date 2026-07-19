@@ -108,6 +108,15 @@ export interface HypeDexerWSSubscriptionResponse {
 }
 
 /**
+ * Greeting frame sent right after the handshake. `connected` is what the
+ * server sends today; `welcome` is kept because older builds sent that.
+ */
+export interface HypeDexerWSConnectedEvent {
+  type: 'connected';
+  message?: string;
+}
+
+/**
  * HypeDexer WebSocket welcome message (sent on connection)
  */
 export interface HypeDexerWSWelcomeEvent {
@@ -132,6 +141,7 @@ export type HypeDexerWSEvent =
   | HypeDexerWSSubscriptionConfirm
   | HypeDexerWSSubscriptionAdded
   | HypeDexerWSSubscriptionResponse
+  | HypeDexerWSConnectedEvent
   | HypeDexerWSWelcomeEvent
   | HypeDexerWSPingEvent;
 
