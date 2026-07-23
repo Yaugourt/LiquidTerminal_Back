@@ -166,12 +166,29 @@ export class RevenueService {
     const lifetime = this.computeLifetime(days);
     const windowed = this.sliceByWindow(days, window);
 
+    // perp/spot come from diffing a cumulative series. If that series stops
+    // advancing, every day past its last point gets a real-looking perp=0,
+    // spot=0 from the `?? { perp: 0, spot: 0 }` fallback above. Detect that by
+    // comparing the last date perp/spot actually covers against the newest
+    // date in the breakdown (auctions/HIP-3/HIP-4 keep advancing), and report
+    // it as stale so the client can warn instead of trusting a zeroed total.
+    const perpSpotDates = Array.from(perpSpotDaily.keys()).sort();
+    const lastPerpSpotDate = perpSpotDates[perpSpotDates.length - 1] ?? null;
+    const latestDate = sortedDates[sortedDates.length - 1] ?? null;
+    const perpSpotStale =
+      lastPerpSpotDate !== null && latestDate !== null && lastPerpSpotDate < latestDate;
+
     const meta: RevenueMeta = {
       spotMultiplier: SPOT_DEPLOYER_MULTIPLIER,
       hypeUsd,
       lastUpdate: Date.now(),
       sourceStatus: {
-        perpSpot: feesResult.status === 'fulfilled' && fees.length > 0 ? 'ok' : 'error',
+        perpSpot:
+          feesResult.status !== 'fulfilled' || fees.length === 0
+            ? 'error'
+            : perpSpotStale
+              ? 'stale'
+              : 'ok',
         hip1: auctionsResult.status === 'fulfilled' ? 'ok' : 'error',
         hip3: this.hip3Status(hip3Result, hypeUsd),
         hip4: hip4Result.status === 'fulfilled' ? 'ok' : 'error',

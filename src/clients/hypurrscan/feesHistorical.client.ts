@@ -24,6 +24,13 @@ export class HypurrscanFeesHistoricalClient extends BaseApiService {
   private static readonly CACHE_KEY = 'fees:historical:raw';
   private static readonly UPDATE_CHANNEL = 'fees:historical:updated';
   private static readonly UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
+  /**
+   * A daily cumulative series must gain a point every day. If the newest point
+   * is older than this, the series is frozen (the poller died or was never
+   * started) and a read must refresh it on the spot. 30h tolerates a UTC-day
+   * boundary plus one missed 6h poll.
+   */
+  private static readonly STALE_AFTER_MS = 30 * 60 * 60 * 1000;
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
@@ -103,13 +110,43 @@ export class HypurrscanFeesHistoricalClient extends BaseApiService {
 
   public async getHistoricalData(): Promise<FeeData[]> {
     const cached = await redisService.get(HypurrscanFeesHistoricalClient.CACHE_KEY);
-    if (cached) return JSON.parse(cached);
+    if (cached) {
+      const parsed = JSON.parse(cached) as FeeData[];
+      if (!HypurrscanFeesHistoricalClient.isStale(parsed)) return parsed;
+
+      // Cache present but frozen: the series stopped advancing, so perp/spot
+      // (diffed from it) silently collapse to 0 on every day past the last
+      // point. Refresh on read so a dead poller can never keep understating
+      // revenue. If the refresh fails, serving the stale copy is still better
+      // than throwing — RevenueService flags perpSpot as stale either way.
+      logDeduplicator.warn('Fees historical cache is stale, refreshing on read', {
+        lastPointTime: parsed[parsed.length - 1]?.time,
+      });
+      try {
+        await this.updateData();
+        const refreshed = await redisService.get(HypurrscanFeesHistoricalClient.CACHE_KEY);
+        if (refreshed) return JSON.parse(refreshed);
+      } catch (error) {
+        logDeduplicator.error('Stale fees historical refresh failed, serving stale', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return parsed;
+    }
 
     logDeduplicator.warn('No historical fees data in cache, forcing update');
     await this.updateData();
     const fresh = await redisService.get(HypurrscanFeesHistoricalClient.CACHE_KEY);
     if (!fresh) throw new Error('Failed to get historical fees data after update');
     return JSON.parse(fresh);
+  }
+
+  /** A cumulative daily series is stale when its newest point is over
+   *  STALE_AFTER_MS old (or the series is empty / malformed). */
+  private static isStale(series: FeeData[]): boolean {
+    const last = series[series.length - 1];
+    if (!last || typeof last.time !== 'number') return true;
+    return Date.now() - last.time * 1000 > HypurrscanFeesHistoricalClient.STALE_AFTER_MS;
   }
 
   public checkRateLimit(ip: string): boolean {
