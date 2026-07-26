@@ -17,6 +17,12 @@ import {
 } from '../../services/export/export.manifest';
 import { ExportService, type ExportQueryParams } from '../../services/export/export.service';
 import { EXPORT_MAX_ROWS, EXPORT_LIMITS } from '../../constants/export.constants';
+import {
+  acquireExportSlot,
+  releaseExportSlot,
+  ExportBusyError,
+  exportConcurrencySnapshot,
+} from '../../services/export/export.concurrency';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
@@ -203,6 +209,37 @@ router.get(
     const columns = parseColumns(req.query);
     const fileName = datasetFileName(dataset, params);
 
+    // Queued behind the global gate. Claimed after the quota so a rejected
+    // caller has not already spent their allowance, and released on every exit
+    // path below.
+    try {
+      await acquireExportSlot();
+    } catch (error) {
+      await releaseExport(userId, req.exportReservation);
+      if (error instanceof ExportBusyError) {
+        logDeduplicator.warn('Export refused, capacity reached', exportConcurrencySnapshot());
+        res.setHeader('Retry-After', String(error.retryAfterSeconds));
+        res.status(429).json({
+          success: false,
+          error: 'Too many exports running right now, try again shortly',
+          code: 'EXPORT_BUSY',
+          details: { retryAfterSeconds: error.retryAfterSeconds },
+        });
+        return;
+      }
+      throw error;
+    }
+
+    // Idempotent: the success path releases before recording the quota, so
+    // anything throwing after that would reach the catch and release a second
+    // time — handing capacity away that was never held.
+    let slotHeld = true;
+    const freeSlot = (): void => {
+      if (!slotHeld) return;
+      slotHeld = false;
+      releaseExportSlot();
+    };
+
     // Nothing is written until the first chunk succeeds, so an upstream error
     // on page 1 can still be reported as JSON with the right status.
     let started = false;
@@ -244,6 +281,7 @@ router.get(
       }
 
       if (aborted) {
+        freeSlot();
         await releaseExport(userId, req.exportReservation);
         // Half a file is not an export: end the response without recording it,
         // so the user keeps the one download they are allowed per day.
@@ -257,6 +295,7 @@ router.get(
       }
 
       if (!started) {
+        freeSlot();
         await releaseExport(userId, req.exportReservation);
         res.status(404).json({
           success: false,
@@ -266,6 +305,7 @@ router.get(
         return;
       }
 
+      freeSlot();
       res.end();
 
       // Recorded last, and only here: a download that failed or was aborted
@@ -285,6 +325,7 @@ router.get(
         error: error instanceof Error ? error.message : String(error),
       });
 
+      freeSlot();
       await releaseExport(userId, req.exportReservation);
 
       if (started) {

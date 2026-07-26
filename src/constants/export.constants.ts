@@ -50,3 +50,24 @@ export const EXPORT_PREVIEW_LIMITS = {
  * ever draining (HypeDexer has done it), so one request cannot loop forever.
  */
 export const EXPORT_MAX_PAGES = Math.ceil(EXPORT_MAX_ROWS / EXPORT_PAGE_SIZE) + 5;
+
+/**
+ * Exports running at once, across the whole process.
+ *
+ * Sized against the shared outbound pool: one export holds a slot of the
+ * process-wide 50 for the ~100 sequential upstream calls it makes, and that
+ * pool's queue has no timeout, so a handful of parallel exports can leave every
+ * other call in the backend waiting indefinitely. Three leaves the pool
+ * essentially untouched while still letting a few people export at once.
+ */
+export const EXPORT_MAX_CONCURRENT = 3;
+
+/** How long a queued export waits for a slot before being told to come back. */
+export const EXPORT_QUEUE_MAX_WAIT_MS = 20_000;
+
+/**
+ * Callers allowed to wait at once. Past this the answer is an immediate 429:
+ * a queue that grows without bound is just held-open connections with extra
+ * steps.
+ */
+export const EXPORT_QUEUE_MAX_DEPTH = 10;
