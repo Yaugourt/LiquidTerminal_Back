@@ -64,6 +64,7 @@ import activeUsersRoutes from './routes/activeusers/activeusers.routes';
 import buildersRoutes from './routes/builders/builders.routes';
 import indexerRoutes from './routes/indexer';
 import defillamaRoutes from './routes/defillama/defillama.routes';
+import exportRoutes from './routes/export/export.routes';
 
 const app = express();
 const server = createServer(app);
@@ -161,6 +162,7 @@ app.use('/active-users', activeUsersRoutes);
 app.use('/builders', buildersRoutes);
 app.use('/indexer', indexerRoutes);
 app.use('/defillama', defillamaRoutes);
+app.use('/export', exportRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
