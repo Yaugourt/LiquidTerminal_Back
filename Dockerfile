@@ -18,9 +18,13 @@ COPY prisma.config.ts ./
 # be set even for `prisma generate`. A dummy value is enough at build time; the
 # real one is injected by Railway as a runtime env var.
 ARG DATABASE_URL=postgresql://build:build@localhost:5432/build
-ENV DATABASE_URL=$DATABASE_URL
 
-RUN npx prisma generate \
+# Scope DATABASE_URL to this single RUN via `export` instead of a persistent
+# `ENV` layer. With `ENV`, a real URL passed as `--build-arg DATABASE_URL=…`
+# would be baked into the image and recoverable forever; here it lives only for
+# the duration of this build step. The real URL is injected by Railway at runtime.
+RUN export DATABASE_URL="$DATABASE_URL" \
+ && npx prisma generate \
  && npx prisma generate --schema ./prisma-historical/schema.prisma \
  && npx prisma generate --schema ./prisma-content/schema.prisma \
  && npx prisma generate --schema ./prisma-telegram/schema.prisma

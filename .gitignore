@@ -37,6 +37,15 @@ logs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+# Railway/production log EXPORTS — these are `logs.<timestamp>.json`, which the
+# `logs/` and `*.log` rules above do NOT match. They carry real chat IDs and
+# were one `git add -A` from being committed to a public repo.
+logs.*.json
+logs.*.json:*
+# Root-level DB backups (the `backup` / `backup_pg14_*.sql` files that were
+# previously committed and are still public by SHA). `*.dump` is covered below.
+backup
+backup*.sql
 
 # Prisma generated clients (ignore both the dir and a symlink named "generated";
 # no trailing slash so a symlink isn't accidentally tracked and broken in CI)
@@ -52,3 +61,4 @@ coverage/
 
 # Local database dumps (pg_dump)
 backups/
+.gstack/
