@@ -3,7 +3,34 @@ import axios from 'axios';
 import { ExtractedPreviewData } from '../../types/linkPreview.types';
 import { LinkPreviewFetchError, LinkPreviewTimeoutError } from '../../errors/linkPreview.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { assertHostnameNotBlocked, SsrfBlockedError } from '../../utils/ssrf';
+import { resolveSafeAddress, SsrfBlockedError } from '../../utils/ssrf';
+
+/**
+ * Bounded concurrency for outbound preview fetches. The batch endpoint is
+ * public and each request can trigger up to 10 fetches of 2 MB each, all via
+ * axios directly (outside the shared outbound pool). Without a cap, a burst
+ * turns into hundreds of concurrent sockets + cheerio parses — an availability
+ * vector independent of the per-IP limiter. This ceiling bounds the whole
+ * process's link-preview outbound work regardless of how many callers arrive.
+ */
+const MAX_CONCURRENT_PREVIEW_FETCHES = 6;
+let activePreviewFetches = 0;
+const previewFetchQueue: Array<() => void> = [];
+
+async function acquirePreviewSlot(): Promise<void> {
+  if (activePreviewFetches < MAX_CONCURRENT_PREVIEW_FETCHES) {
+    activePreviewFetches += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => previewFetchQueue.push(resolve));
+  activePreviewFetches += 1;
+}
+
+function releasePreviewSlot(): void {
+  activePreviewFetches = Math.max(0, activePreviewFetches - 1);
+  const next = previewFetchQueue.shift();
+  if (next) next();
+}
 
 export class LinkPreviewFetcherService {
   private static instance: LinkPreviewFetcherService;
@@ -74,7 +101,20 @@ export class LinkPreviewFetcherService {
     if (!['http:', 'https:'].includes(urlObj.protocol)) {
       throw new LinkPreviewFetchError('Invalid protocol');
     }
-    await assertHostnameNotBlocked(urlObj.hostname);
+
+    // Port allowlist: only the standard web ports. Even on a public-looking IP,
+    // an odd port is almost always an attempt to reach an internal service
+    // (DB, redis, admin panel) rather than a web page.
+    const port = urlObj.port ? Number(urlObj.port) : urlObj.protocol === 'https:' ? 443 : 80;
+    if (port !== 80 && port !== 443) {
+      throw new SsrfBlockedError('Refused to connect to a non-standard port');
+    }
+
+    // Resolve + vet the hostname, then PIN the vetted IP into the connection.
+    // axios re-resolves by default; passing `lookup` forces it to dial exactly
+    // this address, closing the DNS-rebinding TOCTOU. TLS SNI / cert validation
+    // still use the original hostname from `url`, so HTTPS stays correct.
+    const safe = await resolveSafeAddress(urlObj.hostname);
 
     return axios.get(url, {
       headers: {
@@ -88,6 +128,7 @@ export class LinkPreviewFetcherService {
       maxContentLength: this.MAX_CONTENT_LENGTH,
       // Accept 3xx as success so we can handle redirects ourselves.
       validateStatus: (s) => (s >= 200 && s < 300) || (s >= 300 && s < 400),
+      lookup: (async () => [safe.address, safe.family] as [string, number]),
     });
   }
 
@@ -131,11 +172,14 @@ export class LinkPreviewFetcherService {
         lastError = error;
         // SSRF blocks are permanent — never retry them.
         if (error instanceof SsrfBlockedError) {
+          // The reason (which resolved address was blocked) is kept in our logs
+          // only — never relayed to the caller, or the endpoint becomes an
+          // internal port/host scanner.
           logDeduplicator.warn('Preview fetch blocked by SSRF guard', {
             url,
             reason: error.message,
           });
-          throw new LinkPreviewFetchError(error.message);
+          throw new LinkPreviewFetchError('This URL is not allowed');
         }
         logDeduplicator.warn('Preview fetch attempt failed', {
           url,
@@ -159,6 +203,7 @@ export class LinkPreviewFetcherService {
    * Récupère les données d'aperçu d'une URL
    */
   async fetchPreviewData(url: string): Promise<ExtractedPreviewData> {
+    await acquirePreviewSlot();
     try {
       // Valider l'URL
       const urlObj = new URL(url);
@@ -261,7 +306,11 @@ export class LinkPreviewFetcherService {
         }
       }
       
-      throw new LinkPreviewFetchError(`Failed to fetch preview for ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      // Generic on purpose: the raw axios error can carry the dialed IP/port
+      // (e.g. "ECONNREFUSED …:5432"), which must not reach the caller.
+      throw new LinkPreviewFetchError('Failed to fetch preview');
+    } finally {
+      releasePreviewSlot();
     }
   }
 

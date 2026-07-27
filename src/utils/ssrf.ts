@@ -93,21 +93,33 @@ export function isBlockedIp(ip: string): boolean {
   return cidrs.some((cidr) => checker(ip, cidr));
 }
 
+export interface SafeAddress {
+  address: string;
+  family: number;
+}
+
 /**
- * Resolves the hostname and asserts none of the resolved addresses fall in
- * the SSRF blocklist. Returns the resolved address that should be used to
- * connect, OR throws if blocked / unresolvable.
+ * Resolves the hostname, asserts NONE of the resolved addresses fall in the
+ * SSRF blocklist, and returns the vetted address to connect to.
  *
- * Caller responsibility: re-run this check on every redirect, since each hop
- * resolves to a fresh hostname.
+ * The returned address MUST be pinned into the actual connection (e.g. via a
+ * custom `lookup`), otherwise the client re-resolves the hostname at connect
+ * time and a TTL-0 attacker domain can rebind to an internal address between
+ * this check and the connect (DNS rebinding TOCTOU). Every resolved address is
+ * checked — a hostname that resolves to both a public and a private address is
+ * rejected outright rather than gambling on which one gets dialed.
+ *
+ * Caller responsibility: re-run this on every redirect, since each hop resolves
+ * a fresh hostname.
  */
-export async function assertHostnameNotBlocked(hostname: string): Promise<void> {
-  // Reject IP literals in URLs that are already blocked, no DNS needed.
-  if (isIP(hostname) !== 0) {
+export async function resolveSafeAddress(hostname: string): Promise<SafeAddress> {
+  // IP literal in the URL: nothing to resolve, just vet it.
+  const literalFamily = isIP(hostname);
+  if (literalFamily !== 0) {
     if (isBlockedIp(hostname)) {
       throw new SsrfBlockedError(`Refused to connect to blocked address: ${hostname}`);
     }
-    return;
+    return { address: hostname, family: literalFamily };
   }
   let addresses: Array<{ address: string; family: number }>;
   try {
@@ -117,6 +129,9 @@ export async function assertHostnameNotBlocked(hostname: string): Promise<void> 
       `DNS resolution failed for ${hostname}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+  if (addresses.length === 0) {
+    throw new SsrfBlockedError(`No addresses resolved for ${hostname}`);
+  }
   for (const addr of addresses) {
     if (isBlockedIp(addr.address)) {
       throw new SsrfBlockedError(
@@ -124,6 +139,18 @@ export async function assertHostnameNotBlocked(hostname: string): Promise<void> 
       );
     }
   }
+  // All resolved addresses are safe; pin the first so the connection dials a
+  // vetted IP rather than re-resolving.
+  return { address: addresses[0].address, family: addresses[0].family };
+}
+
+/**
+ * Thin void wrapper kept for callers that only need the assertion, not the
+ * pinned address. Prefer {@link resolveSafeAddress} + IP pinning for anything
+ * that actually opens a connection.
+ */
+export async function assertHostnameNotBlocked(hostname: string): Promise<void> {
+  await resolveSafeAddress(hostname);
 }
 
 export class SsrfBlockedError extends Error {
