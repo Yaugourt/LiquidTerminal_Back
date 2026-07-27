@@ -12,7 +12,6 @@ export interface ReadListResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   items: ReadListItemResponse[];
 }
@@ -47,7 +46,6 @@ export interface ReadListItemResponse {
     creator: {
       id: number;
       name: string | null;
-      email: string | null;
     };
     // Preview metadata inlined from the Content DB so the frontend
     // renders item cards without extra /link-preview calls.
@@ -88,7 +86,6 @@ export interface ReadListSummaryResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   itemsCount: number;
   /** Number of items marked as read (drives the progress bar). */

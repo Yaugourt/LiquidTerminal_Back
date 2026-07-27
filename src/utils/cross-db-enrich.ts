@@ -12,12 +12,17 @@
 
 import { prisma } from '../core/prisma.service';
 
-// ---------- User selectors aligned with the frontend contract ------------
+// ---------- User selectors ------------
+// Both are email-free on purpose. Enriched user objects (creator / submittedBy /
+// reviewedBy / item owner) ride along on PUBLIC, unauthenticated list responses,
+// so exposing email here leaked every registered user's address to anonymous
+// scrapers. Moderator tooling that genuinely needs a submitter's contact must
+// go through a separate authenticated endpoint, not this shared projection.
 
-const USER_SELECT_FULL = { id: true, name: true, email: true } as const;
+const USER_SELECT_FULL = { id: true, name: true } as const;
 const USER_SELECT_MINIMAL = { id: true, name: true } as const;
 
-export type UserFull = { id: number; name: string | null; email: string | null };
+export type UserFull = { id: number; name: string | null };
 export type UserMinimal = { id: number; name: string | null };
 
 // ---------- Internal: batched User lookup (deduped, single round-trip) ----

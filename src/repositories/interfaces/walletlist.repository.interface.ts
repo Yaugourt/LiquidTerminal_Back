@@ -84,6 +84,12 @@ export interface WalletListRepository extends BaseRepository {
   hasAccess(walletListId: number, userId: number): Promise<boolean>;
 
   /**
+   * WRITE authorization — true only for the list's owner (ignores isPublic).
+   * Gate mutations with this, never with hasAccess.
+   */
+  isOwner(walletListId: number, userId: number): Promise<boolean>;
+
+  /**
    * Met à jour le nombre d'items dans une wallet list
    */
   updateItemsCount(walletListId: number): Promise<void>;

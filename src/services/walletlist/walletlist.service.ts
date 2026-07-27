@@ -115,6 +115,21 @@ export class WalletListService extends BaseService<
   }
 
   /**
+   * WRITE authorization: the list's owner only (ignores `isPublic`). Use this to
+   * gate every mutation (update/delete list, add/update/remove item). `hasAccess`
+   * grants any public list, which would let anyone edit or delete another user's
+   * public list.
+   */
+  async isOwner(walletListId: number, userId: number): Promise<boolean> {
+    try {
+      return await this.repository.isOwner(walletListId, userId);
+    } catch (error) {
+      logDeduplicator.error('Error checking wallet list ownership:', { error: error instanceof Error ? error.message : String(error), walletListId, userId });
+      return false;
+    }
+  }
+
+  /**
    * Récupère une wallet list avec vérification des permissions
    * @param id ID de la wallet list
    * @param userId ID de l'utilisateur demandeur

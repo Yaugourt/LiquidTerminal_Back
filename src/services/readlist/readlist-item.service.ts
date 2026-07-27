@@ -121,7 +121,8 @@ export class ReadListItemService extends BaseService<
           throw new ReadListNotFoundError();
         }
 
-        if (!await readListRepository.hasAccess(data.readListId!, userId)) {
+        // Adding an item mutates the list — owner only, not "anyone who can see it".
+        if (!await readListRepository.isOwner(data.readListId!, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -199,8 +200,8 @@ export class ReadListItemService extends BaseService<
           throw new ReadListItemNotFoundError();
         }
 
-        // Vérifier l'accès à la read list
-        if (!await readListRepository.hasAccess(item.readListId, userId)) {
+        // Mutation on the item's list — owner only.
+        if (!await readListRepository.isOwner(item.readListId, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -262,8 +263,8 @@ export class ReadListItemService extends BaseService<
         this.repository.setPrismaClient(tx);
         readListRepository.setPrismaClient(tx);
 
-        // Vérifier l'accès à la read list
-        if (!await readListRepository.hasAccess(readListId, userId)) {
+        // Reordering mutates the list — owner only.
+        if (!await readListRepository.isOwner(readListId, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -304,8 +305,8 @@ export class ReadListItemService extends BaseService<
           throw new ReadListItemNotFoundError();
         }
 
-        // Vérifier l'accès à la read list
-        if (!await readListRepository.hasAccess(item.readListId, userId)) {
+        // Mutation on the item's list — owner only.
+        if (!await readListRepository.isOwner(item.readListId, userId)) {
           throw new ReadListPermissionError();
         }
 
@@ -378,6 +379,26 @@ export class ReadListItemService extends BaseService<
       await this.invalidateReadListItemCache(id, existingItem.readListId);
     }
     return result;
+  }
+
+  /**
+   * Updates an item only if `userId` owns its parent list. The plain `update`
+   * has NO ownership gate — the route used to call it directly, letting anyone
+   * with a valid token edit any item by guessing its (sequential) id.
+   */
+  async updateWithPermission(
+    itemId: number,
+    userId: number,
+    data: ReadListItemUpdateInput
+  ): Promise<ReadListItemResponse> {
+    const item = await this.repository.findById(itemId);
+    if (!item) {
+      throw new ReadListItemNotFoundError();
+    }
+    if (!await readListRepository.isOwner(item.readListId, userId)) {
+      throw new ReadListPermissionError();
+    }
+    return this.update(itemId, data);
   }
 
   /**

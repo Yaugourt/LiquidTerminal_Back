@@ -297,6 +297,10 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
     return this.findAll({ ...params, isPublic: true });
   }
 
+  /**
+   * READ visibility: public lists are readable by anyone, private ones only by
+   * their owner. MUST NOT be used to gate writes — see `isOwner`.
+   */
   async hasAccess(readListId: number, userId: number | null): Promise<boolean> {
     return this.executeWithErrorHandling(
       async () => {
@@ -309,6 +313,26 @@ export class PrismaReadListRepository extends BasePrismaRepository implements Re
         return readList.isPublic || (userId !== null && readList.userId === userId);
       },
       'checking read list access',
+      { readListId, userId }
+    );
+  }
+
+  /**
+   * WRITE authorization: true only for the list's owner. `isPublic` is
+   * deliberately ignored — making a list public grants read visibility, never
+   * the right for others to mutate or delete it.
+   */
+  async isOwner(readListId: number, userId: number | null): Promise<boolean> {
+    if (userId === null) return false;
+    return this.executeWithErrorHandling(
+      async () => {
+        const readList = await this.prismaClient.readList.findUnique({
+          where: { id: readListId },
+          select: { userId: true }
+        });
+        return readList !== null && readList.userId === userId;
+      },
+      'checking read list ownership',
       { readListId, userId }
     );
   }

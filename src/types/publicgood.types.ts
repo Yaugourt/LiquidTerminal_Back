@@ -62,12 +62,10 @@ export interface PublicGoodResponse extends PublicGood {
   submittedBy: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   reviewedBy?: {
     id: number;
     name: string | null;
-    email: string | null;
   } | null;
 }
 

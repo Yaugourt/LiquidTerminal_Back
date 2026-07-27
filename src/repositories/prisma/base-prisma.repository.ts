@@ -46,11 +46,13 @@ export abstract class BasePrismaRepository {
    */
   protected defaultPrismaClient: PrismaClient | PrismaTransactionClient = prisma;
 
-  // Constantes communes pour les sélections
+  // Projection used to enrich RELATIONS (readlist/walletlist creator, item owner).
+  // Public by construction — these objects reach unauthenticated list endpoints —
+  // so it must never include email/privyUserId. Anonymous callers were able to
+  // scrape every user's email through creator/submittedBy/owner before this.
   protected static readonly UserSelect = {
     id: true,
-    name: true,
-    email: true
+    name: true
   } as const;
 
   protected static readonly CreatorInclude = {

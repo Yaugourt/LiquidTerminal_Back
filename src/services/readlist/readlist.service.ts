@@ -141,6 +141,30 @@ export class ReadListService extends BaseService<
   }
 
   /**
+   * Loads a read list only if `userId` OWNS it. Use this to gate mutations
+   * (update/delete). `getByIdWithPermission` grants access to any public list,
+   * which is correct for reads but would let anyone edit/delete another user's
+   * public list.
+   */
+  async getByIdWithOwnership(id: number, userId: number): Promise<ReadListResponse> {
+    try {
+      const readList = await this.getById(id);
+
+      if (!await this.repository.isOwner(id, userId)) {
+        throw new ReadListPermissionError();
+      }
+
+      return readList;
+    } catch (error) {
+      if (error instanceof ReadListNotFoundError || error instanceof ReadListPermissionError) {
+        throw error;
+      }
+      logDeduplicator.error('Error fetching read list with ownership:', { error: error instanceof Error ? error.message : String(error), id, userId });
+      throw error;
+    }
+  }
+
+  /**
    * Récupère toutes les read lists d'un utilisateur
    * @param userId ID de l'utilisateur
    * @returns Liste des read lists de l'utilisateur

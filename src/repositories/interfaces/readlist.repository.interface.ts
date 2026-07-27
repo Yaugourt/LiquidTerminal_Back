@@ -85,6 +85,12 @@ export interface ReadListRepository extends BaseRepository {
   hasAccess(readListId: number, userId: number | null): Promise<boolean>;
 
   /**
+   * WRITE authorization — true only for the list's owner (ignores isPublic).
+   * Gate mutations with this, never with hasAccess.
+   */
+  isOwner(readListId: number, userId: number | null): Promise<boolean>;
+
+  /**
    * Met à jour le nombre d'items dans une read list
    */
   updateItemsCount(readListId: number): Promise<void>;

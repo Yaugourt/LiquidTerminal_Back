@@ -237,6 +237,10 @@ export class PrismaWalletListRepository extends BasePrismaRepository implements 
     return this.findAll({ ...params, isPublic: true });
   }
 
+  /**
+   * READ visibility: public lists readable by anyone, private ones by their
+   * owner only. MUST NOT gate writes — see `isOwner`.
+   */
   async hasAccess(walletListId: number, userId: number): Promise<boolean> {
     return this.executeWithErrorHandling(
       async () => {
@@ -249,6 +253,24 @@ export class PrismaWalletListRepository extends BasePrismaRepository implements 
         return walletList.userId === userId || walletList.isPublic;
       },
       'checking wallet list access',
+      { walletListId, userId }
+    );
+  }
+
+  /**
+   * WRITE authorization: the list's owner only. `isPublic` is ignored —
+   * publishing a list never grants others the right to mutate or delete it.
+   */
+  async isOwner(walletListId: number, userId: number): Promise<boolean> {
+    return this.executeWithErrorHandling(
+      async () => {
+        const walletList = await this.prismaClient.walletList.findUnique({
+          where: { id: walletListId },
+          select: { userId: true }
+        });
+        return walletList !== null && walletList.userId === userId;
+      },
+      'checking wallet list ownership',
       { walletListId, userId }
     );
   }

@@ -60,7 +60,11 @@ router.post('/', validatePrivyToken, (async (req: Request, res: Response) => {
 // Lister toutes les wallet lists
 router.get('/', validateWalletListQuery, (async (req: Request, res: Response) => {
   try {
-    const walletLists = await walletListService.getAll(req.query);
+    // Force public-only: this route is UNAUTHENTICATED and getAll honours a
+    // caller-supplied `userId`/`isPublic`, so `?userId=N` used to leak another
+    // user's PRIVATE wallet lists (with names, item counts, creator). Private
+    // lists are reachable only via the owner's authenticated /userlists route.
+    const walletLists = await walletListService.getAll({ ...req.query, isPublic: true });
     res.json({ success: true, data: walletLists.data, pagination: walletLists.pagination });
   } catch (error) {
     logDeduplicator.error('Error fetching wallet lists:', { error: error instanceof Error ? error.message : String(error) });
@@ -129,13 +133,17 @@ router.get('/:id', (async (req: Request, res: Response) => {
       } else {
         walletList = await walletListService.getById(id);
         if (!walletList.isPublic) {
-          return res.status(403).json({ success: false, error: 'Access denied to private wallet list', code: 'ACCESS_DENIED' });
+          // 404, not 403: a private list must not reveal its existence to a
+        // caller who is not its owner.
+        return res.status(404).json({ success: false, error: 'Wallet list not found', code: 'WALLET_LIST_NOT_FOUND' });
         }
       }
     } else {
       walletList = await walletListService.getById(id);
       if (!walletList.isPublic) {
-        return res.status(403).json({ success: false, error: 'Access denied to private wallet list', code: 'ACCESS_DENIED' });
+        // 404, not 403: a private list must not reveal its existence to a
+        // caller who is not its owner.
+        return res.status(404).json({ success: false, error: 'Wallet list not found', code: 'WALLET_LIST_NOT_FOUND' });
       }
     }
 
@@ -169,7 +177,7 @@ router.put('/:id', validatePrivyToken, validateUpdateWalletList, (async (req: Re
     }
 
     // Vérifier que l'utilisateur a accès à la wallet list
-    const hasAccess = await walletListService.hasAccess(id, user.id);
+    const hasAccess = await walletListService.isOwner(id, user.id);
     if (!hasAccess) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
@@ -205,7 +213,7 @@ router.delete('/:id', validatePrivyToken, (async (req: Request, res: Response) =
     }
 
     // Vérifier que l'utilisateur a accès à la wallet list
-    const hasAccess = await walletListService.hasAccess(id, user.id);
+    const hasAccess = await walletListService.isOwner(id, user.id);
     if (!hasAccess) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
@@ -303,8 +311,19 @@ router.post('/:id/items', validatePrivyToken, validateCreateWalletListItem, (asy
     }
 
     // Vérifier que l'utilisateur a accès à la wallet list
-    const hasAccess = await walletListService.hasAccess(walletListId, user.id);
+    const hasAccess = await walletListService.isOwner(walletListId, user.id);
     if (!hasAccess) {
+      return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
+    }
+
+    // The userWallet being added MUST belong to the caller. Without this, any
+    // authenticated user could pass an arbitrary userWalletId and read back the
+    // owner's email + wallet address from the enriched response (IDOR → PII).
+    const userWalletId = Number(req.body.userWalletId);
+    const userWallet = Number.isInteger(userWalletId)
+      ? await prisma.userWallet.findUnique({ where: { id: userWalletId }, select: { userId: true } })
+      : null;
+    if (!userWallet || userWallet.userId !== user.id) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
 
@@ -348,7 +367,7 @@ router.put('/items/:itemId', validatePrivyToken, validateUpdateWalletListItem, (
 
     // Récupérer l'item pour vérifier les permissions
     const existingItem = await walletListItemService.getById(itemId);
-    const hasAccess = await walletListService.hasAccess(existingItem.walletListId, user.id);
+    const hasAccess = await walletListService.isOwner(existingItem.walletListId, user.id);
     if (!hasAccess) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
@@ -385,7 +404,7 @@ router.delete('/items/:itemId', validatePrivyToken, (async (req: Request, res: R
 
     // Récupérer l'item pour vérifier les permissions
     const existingItem = await walletListItemService.getById(itemId);
-    const hasAccess = await walletListService.hasAccess(existingItem.walletListId, user.id);
+    const hasAccess = await walletListService.isOwner(existingItem.walletListId, user.id);
     if (!hasAccess) {
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }

@@ -11,7 +11,6 @@ export interface EducationalCategoryResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   /** Present only when the listing is requested with withCounts=true (APPROVED resources). */
   resourcesCount?: number;
@@ -62,7 +61,6 @@ export interface EducationalResourceResponse {
   creator: {
     id: number;
     name: string | null;
-    email: string | null;
   };
   categories: EducationalResourceCategoryResponse[];
   /** Number of read lists that include this resource (public popularity signal). */
@@ -96,7 +94,6 @@ export interface EducationalResourceCategoryResponse {
   assigner?: {
     id: number;
     name: string | null;
-    email: string | null;
   } | null;
 }
 
