@@ -76,7 +76,24 @@ export class HypeDexerAnalyticsIndexerClient extends HypeDexerBaseClient {
   }
 
   /**
-   * Daily HyperEVM priority-fees burn chart.
+   * Daily HyperCore **order priority** burn chart — not HyperEVM, and not the
+   * whole of priority fees.
+   *
+   * Hyperliquid runs two priority mechanisms, both on HyperCore and both
+   * burning HYPE. This endpoint counts only the first:
+   *  - order priority (write): up to 8 bps of notional, charged from
+   *    undelegated staking balance on filled notional (IOC) or resting
+   *    notional (ALO), deducted whether or not the order fills;
+   *  - gossip priority (read): two Dutch auctions on a three-minute cycle for
+   *    faster market-data reads, charged from spot balance, each auction
+   *    resetting at 10x its last winning bid with a 0.1 HYPE floor.
+   *    Served separately by `/hip3/priority-fees/gossip/*`.
+   *
+   * HyperEVM priority fees are a third, unrelated stream and are not here
+   * either. Anything consuming this as "priority fees" is understating them.
+   *
+   * @see https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/priority-fees
+   *
    * Server caps the window around ~42 days regardless of the query.
    * Returns `{ data: [{ date, fills, fillsWithFee, totalGas, uniqueUsers }] }`
    * where `totalGas` is the daily HYPE amount burned.
