@@ -112,6 +112,10 @@ export class AuthService {
       const { payload } = await jose.jwtVerify(token, signingKey, {
         issuer: "privy.io",
         audience: [process.env.NEXT_PUBLIC_PRIVY_AUDIENCE!, "https://auth.privy.io"],
+        // Pin the algorithm explicitly. Today the EC key type already makes jose
+        // reject HS*/none, but relying on the key type instead of an allowlist is
+        // fragile — an explicit pin closes any future algorithm-substitution gap.
+        algorithms: ["ES256"],
       });
 
       return payload as PrivyPayload;
@@ -128,8 +132,10 @@ export class AuthService {
     const privyUserId = payload.sub;
 
     if (!privyUserId) {
+      // Log only the claim names, never the full payload — it carries linked
+      // social accounts, real names, photo URLs and custom metadata.
       logDeduplicator.error('Missing Privy User ID in token', {
-        payload,
+        payloadKeys: Object.keys(payload ?? {}),
         name
       });
       throw new TokenValidationError("Missing Privy User ID in token");

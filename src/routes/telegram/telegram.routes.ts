@@ -231,8 +231,8 @@ router.post('/verify-link',
         });
       }
 
+      // Do not log the raw link code (live credential during its TTL).
       logDeduplicator.info('POST /telegram/verify-link', {
-        code,
         telegramId,
       });
 

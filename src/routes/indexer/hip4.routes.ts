@@ -28,7 +28,7 @@ function send502(res: Response, code: string, error: unknown): void {
   logDeduplicator.error(`HIP4 ${code}`, { error: error instanceof Error ? error.message : String(error) });
   res.status(502).json({
     success: false,
-    error: error instanceof Error ? error.message : 'Upstream error',
+    error: 'Upstream error',
     code,
   });
 }

@@ -24,7 +24,7 @@ function wrap(handler: () => Promise<unknown>, label: string, errorCode: string)
       logDeduplicator.error(label, { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: errorCode,
       });
     }
@@ -53,7 +53,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_EVM_STATS_DAILY_ERROR',
       });
     }
@@ -80,7 +80,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_EVM_BLOCKS_ERROR',
       });
     }
@@ -112,7 +112,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_EVM_TRANSACTIONS_ERROR',
       });
     }
@@ -139,7 +139,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_EVM_BRIDGE_EVENTS_ERROR',
       });
     }
@@ -166,7 +166,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_EVM_LEDGER_TRANSFERS_ERROR',
       });
     }

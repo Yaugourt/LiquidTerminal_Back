@@ -32,7 +32,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FUNDING_HISTORY_ERROR',
       });
     }
@@ -53,7 +53,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FUNDING_PREDICTED_ERROR',
       });
     }
@@ -80,7 +80,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FUNDING_USER_ERROR',
       });
     }

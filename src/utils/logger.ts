@@ -193,6 +193,24 @@ const baseConfig = {
   base: { service: 'liquidterminal-api' },
   timestamp: pino.stdTimeFunctions.isoTime,
   formatters: { level: (label: string) => ({ level: label }) },
+  // Central redaction backstop. Even when a call site forgets, these keys are
+  // scrubbed before anything is written — Railway logs are readable by anyone
+  // with dashboard access, and the log shape is public. Deliberately narrow:
+  // `code`/`address` are NOT here (error codes and on-chain addresses are not
+  // secrets and redacting them would gut debuggability); the telegram link
+  // `code` and the JWT `payload` are additionally handled at their call sites.
+  redact: {
+    paths: [
+      'email', '*.email',
+      'password', '*.password',
+      'token', '*.token', 'accessToken', 'refreshToken',
+      'authorization', '*.authorization',
+      'payload', '*.payload',
+      'privyUserId', '*.privyUserId',
+      'body',
+    ],
+    censor: '[REDACTED]',
+  },
 };
 
 let infoWarnLogger: pino.Logger;

@@ -63,7 +63,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_COMPLETED_TRADES_SUMMARY_ERROR',
       });
     }
@@ -85,7 +85,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_COMPLETED_TRADE_FILLS_ERROR',
       });
     }
@@ -106,7 +106,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_COMPLETED_TRADES_LIST_ERROR',
       });
     }

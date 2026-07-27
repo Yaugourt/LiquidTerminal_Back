@@ -35,7 +35,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_BUILDERS_LIST_ERROR',
       });
     }
@@ -56,7 +56,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_BUILDERS_STATS_ALL_TF_ERROR',
       });
     }
@@ -77,7 +77,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_BUILDERS_STATS_ERROR',
       });
     }
@@ -103,7 +103,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_BUILDERS_TOP_ERROR',
       });
     }
@@ -127,7 +127,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_BUILDER_DETAIL_STATS_ERROR',
       });
     }
@@ -153,7 +153,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_BUILDER_USERS_ERROR',
       });
     }

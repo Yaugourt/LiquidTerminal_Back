@@ -27,7 +27,7 @@ router.get('/',
     } catch (error) {
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error',
+        error: 'Internal server error',
         code: 'STAKED_HOLDERS_ERROR'
       });
     }
@@ -52,7 +52,7 @@ router.get('/top',
     } catch (error) {
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error',
+        error: 'Internal server error',
         code: 'TOP_HOLDERS_ERROR'
       });
     }
@@ -75,7 +75,7 @@ router.get('/stats',
     } catch (error) {
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error',
+        error: 'Internal server error',
         code: 'HOLDERS_STATS_ERROR'
       });
     }
@@ -108,7 +108,7 @@ router.get('/:address',
     } catch (error) {
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error',
+        error: 'Internal server error',
         code: 'HOLDER_ERROR'
       });
     }

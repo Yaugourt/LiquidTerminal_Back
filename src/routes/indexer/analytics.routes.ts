@@ -29,7 +29,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_ANALYTICS_FILLS_STATS_ERROR',
       });
     }
@@ -54,7 +54,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_ANALYTICS_PRIORITY_FEES_STATS_ERROR',
       });
     }

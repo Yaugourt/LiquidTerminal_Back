@@ -169,7 +169,7 @@ router.get('/chart-data',
       
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error'
+        error: 'Internal server error'
       });
     }
   }) as RequestHandler
@@ -200,7 +200,7 @@ router.get('/data',
       
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error'
+        error: 'Internal server error'
       });
     }
   }) as RequestHandler
@@ -252,7 +252,7 @@ router.get('/analytics/stats',
       
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error'
+        error: 'Internal server error'
       });
     }
   }) as RequestHandler
@@ -476,7 +476,7 @@ router.get('/historical/stats',
 
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error'
+        error: 'Internal server error'
       });
     }
   }) as RequestHandler
@@ -516,7 +516,7 @@ router.get('/historical/chart',
       logDeduplicator.error('Error fetching historical chart:', { error: error instanceof Error ? error.message : String(error) });
       res.status(500).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Internal server error'
+        error: 'Internal server error'
       });
     }
   }) as RequestHandler

@@ -34,7 +34,7 @@ function run(handler: (req: Request) => Promise<unknown>, label: string): Reques
       logDeduplicator.error(label, { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'DEFILLAMA_ERROR',
       });
     }

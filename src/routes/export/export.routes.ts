@@ -12,8 +12,8 @@ import {
 import {
   EXPORT_DATASETS,
   getExportDataset,
-  allowedParamKeys,
   type ExportDataset,
+  type ExportParamSpec,
 } from '../../services/export/export.manifest';
 import { ExportService, type ExportQueryParams } from '../../services/export/export.service';
 import { EXPORT_MAX_ROWS, EXPORT_LIMITS } from '../../constants/export.constants';
@@ -32,17 +32,44 @@ const service = ExportService.getInstance();
 const MAX_REQUESTED_COLUMNS = 200;
 
 /**
- * Keeps only the params the dataset declares, so a caller cannot smuggle
- * arbitrary query keys through to the upstream API. Unknown keys are dropped
- * silently — they carry no meaning for this dataset by definition.
+ * Validates a raw param value against its declared spec. A value that fails is
+ * dropped (never forwarded upstream), matching the silent-drop policy for
+ * unknown keys. `string` is intentionally permissive — HL coin symbols contain
+ * `@`, `/`, `:` etc. — so it only bounds length and blocks control chars; the
+ * value is percent-encoded into the upstream query string regardless.
+ */
+function isValidParamValue(spec: ExportParamSpec, value: string): boolean {
+  switch (spec.type) {
+    case 'enum':
+      return !spec.options || spec.options.includes(value);
+    case 'address':
+      return /^0x[a-fA-F0-9]{40}$/.test(value);
+    case 'datetime':
+      // ISO-8601, or an epoch timestamp in seconds/millis.
+      return !Number.isNaN(Date.parse(value)) || /^\d{1,19}$/.test(value);
+    case 'number':
+      return /^-?\d+(\.\d+)?$/.test(value);
+    case 'string':
+    default:
+      // eslint-disable-next-line no-control-regex
+      return value.length <= 64 && !/[\x00-\x1f\x7f]/.test(value);
+  }
+}
+
+/**
+ * Keeps only the params the dataset declares AND whose value matches the
+ * declared type, so a caller cannot smuggle arbitrary keys or malformed values
+ * through to the upstream API. Unknown keys and invalid values are dropped.
  */
 function pickAllowedParams(dataset: ExportDataset, query: Request['query']): ExportQueryParams {
-  const allowed = allowedParamKeys(dataset);
+  const specByKey = new Map(dataset.params.map((p) => [p.key, p]));
   const params: ExportQueryParams = {};
   for (const [key, value] of Object.entries(query)) {
-    if (!allowed.has(key)) continue;
+    const spec = specByKey.get(key);
+    if (!spec) continue;
     const raw = Array.isArray(value) ? value[0] : value;
     if (typeof raw !== 'string' || raw === '') continue;
+    if (!isValidParamValue(spec, raw)) continue;
     params[key] = raw;
   }
   return params;
@@ -183,6 +210,10 @@ router.get(
   (async (req: Request, res: Response) => {
     const dataset = getExportDataset(String(req.params.dataset));
     if (!dataset) {
+      // Refund the reserved quota — a bad dataset id must not cost the user
+      // their one export of the day. Every other exit path already releases.
+      const uid = req.currentUser?.id;
+      if (uid) await releaseExport(uid, req.exportReservation);
       res.status(404).json({ success: false, error: 'Unknown dataset', code: 'EXPORT_DATASET_NOT_FOUND' });
       return;
     }

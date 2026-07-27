@@ -202,7 +202,15 @@ export class TelegramService {
 
   private static readonly LINK_CODE_PREFIX = 'telegram:link:';
   private static readonly LINK_CODE_TTL = 300; // 5 minutes
-  private static readonly LINK_CODE_LENGTH = 8;
+  /** Bytes of entropy per code. 16 bytes = 128-bit, unguessable within the TTL.
+   * (Was `randomBytes(8).slice(0,8)` = only 32 bits after truncation.) */
+  private static readonly LINK_CODE_BYTES = 16;
+
+  /** Short, non-reversible tag for correlating a link code in logs without
+   * writing the live credential itself. */
+  private static hashCode(code: string): string {
+    return crypto.createHash('sha256').update(code).digest('hex').slice(0, 8);
+  }
 
   /**
    * Generate a temporary link code for a user.
@@ -220,8 +228,8 @@ export class TelegramService {
         throw new TelegramAlreadyLinkedError('Your account is already linked to a Telegram account');
       }
 
-      // Generate a random code
-      const code = crypto.randomBytes(TelegramService.LINK_CODE_LENGTH).toString('hex').slice(0, TelegramService.LINK_CODE_LENGTH).toUpperCase();
+      // Generate a random code (full entropy, no truncation)
+      const code = crypto.randomBytes(TelegramService.LINK_CODE_BYTES).toString('hex').toUpperCase();
 
       // Store in Redis: code -> userId (TTL 5 min)
       const redisKey = `${TelegramService.LINK_CODE_PREFIX}${code}`;
@@ -230,9 +238,11 @@ export class TelegramService {
       const botUsername = process.env.TELEGRAM_BOT_USERNAME || 'LiquidTerminalBot';
       const deepLink = `https://t.me/${botUsername}?start=LINK_${code}`;
 
+      // Never log the live code — anyone reading logs during the TTL could bind
+      // their own Telegram account to this user. Log a hash for correlation.
       logDeduplicator.info('TelegramService: Link code generated', {
         userId,
-        code,
+        codeHash: TelegramService.hashCode(code),
       });
 
       return { code, deepLink };
@@ -306,7 +316,7 @@ export class TelegramService {
       logDeduplicator.info('TelegramService: Account linked via deep link', {
         telegramId: telegramId.toString(),
         userId,
-        code,
+        codeHash: TelegramService.hashCode(code),
       });
 
       return { userId };

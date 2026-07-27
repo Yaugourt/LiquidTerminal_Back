@@ -20,7 +20,7 @@ function wrap(handler: () => Promise<unknown>, label: string): RequestHandler {
       logDeduplicator.error(label, { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_OVERVIEW_ERROR',
       });
     }
@@ -49,7 +49,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_OVERVIEW_ERROR',
       });
     }

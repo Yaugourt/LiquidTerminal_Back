@@ -1,5 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { matchesAnyKey } from '../utils/constant-time-compare';
+
+/** Reject absurdly short keys at boot rather than trusting a weak secret. */
+const MIN_BOT_KEY_LENGTH = 24;
 
 declare global {
   namespace Express {
@@ -22,10 +26,10 @@ export const validateTelegramBotApiKey = (req: Request, res: Response, next: Nex
   const validKeys = [
     process.env.TELEGRAM_BOT_API_KEY,
     process.env.TELEGRAM_BOT_API_KEY_SECONDARY,
-  ].filter(Boolean) as string[];
-  
+  ].filter((k): k is string => k != null && k.length >= MIN_BOT_KEY_LENGTH);
+
   if (validKeys.length === 0) {
-    logDeduplicator.error('TELEGRAM_BOT_API_KEY not configured');
+    logDeduplicator.error('TELEGRAM_BOT_API_KEY not configured or too short');
     res.status(500).json({
       success: false,
       message: 'Server configuration error',
@@ -35,7 +39,7 @@ export const validateTelegramBotApiKey = (req: Request, res: Response, next: Nex
   }
 
   const authHeader = req.headers.authorization;
-  
+
   if (!authHeader?.startsWith('Bot ')) {
     res.status(401).json({
       success: false,
@@ -47,7 +51,9 @@ export const validateTelegramBotApiKey = (req: Request, res: Response, next: Nex
 
   const providedKey = authHeader.slice(4); // Remove 'Bot ' prefix
 
-  if (!validKeys.includes(providedKey)) {
+  // Constant-time comparison: Array.includes short-circuits on the first
+  // differing byte, leaking a timing oracle that can recover the key byte by byte.
+  if (!matchesAnyKey(providedKey, validKeys)) {
     logDeduplicator.warn('Invalid Telegram Bot API key attempt', {
       ip: req.ip,
       path: req.path,
