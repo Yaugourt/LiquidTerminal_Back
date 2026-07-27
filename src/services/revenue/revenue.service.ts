@@ -7,7 +7,6 @@ import {
   RevenueSourceStatus,
   RevenueWindow,
 } from '../../types/revenue.types';
-import { FeeData } from '../../types/fees.types';
 import { AuctionInfo } from '../../types/auction.types';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -16,9 +15,14 @@ import { HypurrscanClient } from '../../clients/hypurrscan/auction.client';
 import { HypeDexerHip3Client } from '../../clients/hypedexer/rest/hip3/hip3.client';
 import { HypeDexerHip4Client } from '../../clients/hypedexer/rest/hip4/hip4.client';
 import { HypeDexerAnalyticsIndexerClient } from '../../clients/hypedexer/rest/analytics/analytics-indexer.client';
+import {
+  SECONDS_PER_DAY,
+  SPOT_DEPLOYER_MULTIPLIER,
+  computePerpSpotDaily,
+  lastPopulatedDate,
+  utcDateKey,
+} from './revenue.daily';
 
-const MICRO_USD_DIVISOR = 1_000_000;
-const SPOT_DEPLOYER_MULTIPLIER = 2;
 
 const HIP3_CACHE_KEY = 'revenue:hip3:auctions';
 const HIP3_CACHE_TTL_SECONDS = 30 * 60;
@@ -51,16 +55,6 @@ const WINDOW_DAYS: Record<Exclude<RevenueWindow, 'all'>, number> = {
   '90d': 90,
   '1y': 365,
 };
-
-/** Format a Date as `YYYY-MM-DD` in UTC. */
-function utcDateKey(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
-/** Convert a unix seconds timestamp to its UTC date key. */
-function secondsToDateKey(seconds: number): string {
-  return utcDateKey(new Date(seconds * 1000));
-}
 
 /** Convert a unix milliseconds timestamp to its UTC date key. */
 function msToDateKey(ms: number): string {
@@ -138,7 +132,8 @@ export class RevenueService {
       throw new RevenueError('No fees historical data available', 503, 'REVENUE_NO_DATA');
     }
 
-    const perpSpotDaily = this.computePerpSpotDaily(fees);
+    const { daily: perpSpotDaily, coverageThrough: perpSpotThrough } =
+      computePerpSpotDaily(fees);
     const hip1Daily = this.bucketHip1ByDay(auctions);
     const hip3Daily = this.bucketHip3ByDay(hip3Rows, hypeUsd);
     const hip4Daily = this.bucketHip4ByDay(hip4Rows);
@@ -151,7 +146,12 @@ export class RevenueService {
       ...hip4Daily.keys(),
       ...priorityDaily.keys(),
     ]);
-    const sortedDates = Array.from(allDates).sort();
+    // Perp and spot are ~97% of the book. An auction or a HIP-4 bucket landing
+    // on a day perp/spot does not cover would render as a near-empty bar rather
+    // than as the absent day it is, so the breakdown ends where perp/spot ends.
+    const sortedDates = Array.from(allDates)
+      .filter((date) => perpSpotThrough === null || date <= perpSpotThrough)
+      .sort();
 
     const days: RevenueDay[] = sortedDates.map((date) => {
       const ps = perpSpotDaily.get(date) ?? { perp: 0, spot: 0 };
@@ -166,76 +166,37 @@ export class RevenueService {
     const lifetime = this.computeLifetime(days);
     const windowed = this.sliceByWindow(days, window);
 
-    // perp/spot come from diffing a cumulative series. If that series stops
-    // advancing, every day past its last point gets a real-looking perp=0,
-    // spot=0 from the `?? { perp: 0, spot: 0 }` fallback above. Detect that by
-    // comparing the last date perp/spot actually covers against the newest
-    // date in the breakdown (auctions/HIP-3/HIP-4 keep advancing), and report
-    // it as stale so the client can warn instead of trusting a zeroed total.
-    const perpSpotDates = Array.from(perpSpotDaily.keys()).sort();
-    const lastPerpSpotDate = perpSpotDates[perpSpotDates.length - 1] ?? null;
-    const latestDate = sortedDates[sortedDates.length - 1] ?? null;
-    const perpSpotStale =
-      lastPerpSpotDate !== null && latestDate !== null && lastPerpSpotDate < latestDate;
+    // A daily feed that stops advancing is indistinguishable from a quiet one
+    // once it is bucketed: both come out as zeros. The only tell is the newest
+    // day each source actually populates. The running UTC day never counts —
+    // no source can have closed it yet — so the bar is yesterday.
+    const expectedThrough = utcDateKey(new Date(Date.now() - SECONDS_PER_DAY * 1000));
+    const priorityThrough = lastPopulatedDate(priorityDaily);
+    const isBehind = (through: string | null): boolean =>
+      through === null || through < expectedThrough;
+
+    const coverage = { perpSpot: perpSpotThrough, priority: priorityThrough };
 
     const meta: RevenueMeta = {
       spotMultiplier: SPOT_DEPLOYER_MULTIPLIER,
       hypeUsd,
       lastUpdate: Date.now(),
+      coverage,
       sourceStatus: {
         perpSpot:
           feesResult.status !== 'fulfilled' || fees.length === 0
             ? 'error'
-            : perpSpotStale
+            : isBehind(perpSpotThrough)
               ? 'stale'
               : 'ok',
         hip1: auctionsResult.status === 'fulfilled' ? 'ok' : 'error',
         hip3: this.hip3Status(hip3Result, hypeUsd),
         hip4: hip4Result.status === 'fulfilled' ? 'ok' : 'error',
-        priority: this.priorityStatus(priorityResult, hypeUsd),
+        priority: this.priorityStatus(priorityResult, hypeUsd, priorityThrough, expectedThrough),
       },
     };
 
     return { window, days: windowed, lifetime, meta };
-  }
-
-  /**
-   * Compute daily perp & spot from the cumulative `/fees` series.
-   *
-   * Hypurrscan returns one cumulative point per ~day. We snap to UTC days by
-   * keeping the LAST point of each day (closest to end-of-day cumulative
-   * total), then diff consecutive days.
-   *
-   * spot is multiplied by SPOT_DEPLOYER_MULTIPLIER to reflect gross-user fees
-   * (Hypurrscan stores the protocol share only — the deployer takes the other
-   * half on HIP-1 spot pairs).
-   */
-  private computePerpSpotDaily(fees: FeeData[]): Map<string, { perp: number; spot: number }> {
-    const lastPerDay = new Map<string, FeeData>();
-    for (const point of fees) {
-      const key = secondsToDateKey(point.time);
-      const prev = lastPerDay.get(key);
-      if (!prev || point.time > prev.time) {
-        lastPerDay.set(key, point);
-      }
-    }
-
-    const sortedDays = Array.from(lastPerDay.entries()).sort(([a], [b]) => a.localeCompare(b));
-    const out = new Map<string, { perp: number; spot: number }>();
-
-    for (let i = 1; i < sortedDays.length; i++) {
-      const [date, curr] = sortedDays[i];
-      const [, prev] = sortedDays[i - 1];
-
-      const totalDelta = (curr.total_fees - prev.total_fees) / MICRO_USD_DIVISOR;
-      const spotProtocolDelta = (curr.total_spot_fees - prev.total_spot_fees) / MICRO_USD_DIVISOR;
-      const perp = Math.max(0, totalDelta - spotProtocolDelta);
-      const spot = Math.max(0, spotProtocolDelta * SPOT_DEPLOYER_MULTIPLIER);
-
-      out.set(date, { perp, spot });
-    }
-
-    return out;
   }
 
   /**
@@ -434,12 +395,21 @@ export class RevenueService {
     return rows;
   }
 
+  /**
+   * The upstream chart answers 200 with a frozen payload when its aggregation
+   * job dies, so settling successfully proves nothing — the priority line read
+   * `ok` through sixteen consecutive days of silent zeros. Judge it on the
+   * newest day it populates instead.
+   */
   private priorityStatus(
     priorityResult: PromiseSettledResult<PriorityFeeRow[]>,
     hypeUsd: number | null,
+    priorityThrough: string | null,
+    expectedThrough: string,
   ): RevenueSourceStatus {
     if (priorityResult.status !== 'fulfilled') return 'error';
     if (hypeUsd === null) return 'stale';
+    if (priorityThrough === null || priorityThrough < expectedThrough) return 'stale';
     return 'ok';
   }
 }
