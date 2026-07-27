@@ -385,7 +385,6 @@ export class XpService {
 
       const leaderboard = users.map((user, index) => ({
         rank: skip + index + 1,
-        userId: user.id,
         name: user.name,
         totalXp: user.totalXp,
         level: user.level,

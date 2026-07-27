@@ -229,9 +229,19 @@ const DENIED_COLUMNS = new Set([
   'reviewedby',
 ]);
 
+/**
+ * Denied if ANY dot-segment of the flattened key matches — not just the leaf.
+ * The old leaf-only check let a sensitive field slip through once its parent
+ * object was renamed (e.g. `reviewer.email`, `submitter.reviewNotes`) or nested
+ * a level deeper. Matching every segment closes that class of gap. It only ever
+ * removes columns whose path contains a denied name, so legitimate data is
+ * never dropped.
+ */
 function isDeniedColumn(key: string): boolean {
-  const leaf = key.slice(key.lastIndexOf('.') + 1).toLowerCase();
-  return DENIED_COLUMNS.has(leaf);
+  return key
+    .toLowerCase()
+    .split('.')
+    .some((segment) => DENIED_COLUMNS.has(segment));
 }
 
 /** Strips denied keys from a flattened row. */

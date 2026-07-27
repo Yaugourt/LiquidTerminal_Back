@@ -23,7 +23,9 @@ export interface UserXpStats {
 
 export interface XpLeaderboardEntry {
   rank: number;
-  userId: number;
+  // Internal sequential User.id intentionally NOT exposed here: a public
+  // leaderboard needs only rank + display name, and leaking the id gave an
+  // enumeration/correlation handle across features.
   name: string | null;
   totalXp: number;
   level: number;

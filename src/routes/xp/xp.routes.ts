@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { validatePrivyToken } from '../../middleware/authMiddleware';
+import { validatePrivyToken, optionalPrivyToken } from '../../middleware/authMiddleware';
 import { requireAdmin } from '../../middleware/roleMiddleware';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -110,7 +110,7 @@ router.get('/history', validatePrivyToken, async (req: Request, res: Response): 
  * GET /xp/leaderboard
  * Récupère le leaderboard XP
  */
-router.get('/leaderboard', async (req: Request, res: Response): Promise<void> => {
+router.get('/leaderboard', optionalPrivyToken, async (req: Request, res: Response): Promise<void> => {
   try {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;

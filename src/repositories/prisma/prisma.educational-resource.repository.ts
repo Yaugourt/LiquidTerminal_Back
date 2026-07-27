@@ -163,7 +163,9 @@ export class PrismaEducationalResourceRepository extends BasePrismaRepository im
         skip,
         take,
         orderBy,
-        include: this.includeConfig
+        include: this.includeConfig,
+        // Unauthenticated wiki listing — internal moderator notes must not ship.
+        omit: { reviewNotes: true }
       });
 
       const enriched = await this.enrichResources(resources as Array<Record<string, unknown>>);

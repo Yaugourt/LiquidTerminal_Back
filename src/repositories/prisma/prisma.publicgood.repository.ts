@@ -86,7 +86,10 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
         where,
         skip,
         take,
-        orderBy
+        orderBy,
+        // reviewNotes = internal moderator notes. findAll is unauthenticated, so
+        // they must never ship here (kept on the moderator/submitter paths).
+        omit: { reviewNotes: true }
       });
 
       const enriched = await this.enrichList(publicGoods as Array<Record<string, unknown>>);
@@ -101,7 +104,9 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
     return this.executeWithErrorHandling(
       async () => {
         const publicGood = await this.prismaClient.publicGood.findUnique({
-          where: { id }
+          where: { id },
+          // Public GET /:id (optional auth) — internal moderator notes must not ship.
+          omit: { reviewNotes: true }
         });
         const enriched = await attachSubmitterAndReviewerOne(
           publicGood as Record<string, unknown> | null,

@@ -82,6 +82,15 @@ describe('redactRow', () => {
     expect(redactRow({ privyUserId: 'did:privy:123', name: 'alice' })).toEqual({ name: 'alice' });
   });
 
+  it('drops a denied name at any path segment, not just the leaf', () => {
+    // A renamed parent (`reviewer.email`) or a denied segment mid-path must not
+    // slip through — the old leaf-only match let these survive.
+    expect(redactRow({ 'reviewer.email': 'mod@x.io', 'reviewer.name': 'bob' })).toEqual({
+      'reviewer.name': 'bob',
+    });
+    expect(redactRow({ 'submitter.reviewNotes.text': 'secret', ok: 1 })).toEqual({ ok: 1 });
+  });
+
   it('keeps everything else untouched', () => {
     const row = { coin: 'HYPE', px: 58.4, 'summary.tvl': 12 };
     expect(redactRow(row)).toEqual(row);
