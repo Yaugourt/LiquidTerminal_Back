@@ -58,27 +58,74 @@ function parseRetryAfterMs(value: string | undefined | null): number | undefined
  * Native fetch has no socket limit: when an upstream slows down, dozens of
  * 30s-timeout requests (plus their retries) pile up and exhaust sockets,
  * which surfaces as "fetch failed" on every client at once.
+ *
+ * The wait queue is BOUNDED and each wait TIMES OUT. Previously a waiter parked
+ * forever, so a burst of user-facing passthrough requests that filled all 50
+ * slots would freeze the background pollers indefinitely (they park behind the
+ * burst and never tick). Now a stuck acquire gives up, the caller fails fast,
+ * and a poller simply skips that tick and retries — the freeze is bounded by
+ * the burst, never permanent.
  */
 const MAX_CONCURRENT_OUTBOUND_REQUESTS = 50;
+const OUTBOUND_ACQUIRE_TIMEOUT_MS = 15_000;
+const OUTBOUND_QUEUE_MAX = 250;
+
+export class OutboundCapacityError extends Error {
+  public readonly code = 'OUTBOUND_CAPACITY';
+  constructor(message = 'Outbound capacity reached') {
+    super(message);
+    this.name = 'OutboundCapacityError';
+  }
+}
+
+interface OutboundWaiter {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+  settled: boolean;
+}
+
 let activeOutboundRequests = 0;
-const outboundWaitQueue: Array<() => void> = [];
+const outboundWaitQueue: OutboundWaiter[] = [];
 
 async function acquireOutboundSlot(): Promise<void> {
   if (activeOutboundRequests < MAX_CONCURRENT_OUTBOUND_REQUESTS) {
     activeOutboundRequests++;
     return;
   }
-  await new Promise<void>((resolve) => outboundWaitQueue.push(resolve));
+  if (outboundWaitQueue.length >= OUTBOUND_QUEUE_MAX) {
+    throw new OutboundCapacityError();
+  }
+  await new Promise<void>((resolve, reject) => {
+    const waiter: OutboundWaiter = {
+      resolve,
+      reject,
+      settled: false,
+      timer: setTimeout(() => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        const idx = outboundWaitQueue.indexOf(waiter);
+        if (idx !== -1) outboundWaitQueue.splice(idx, 1);
+        reject(new OutboundCapacityError('Outbound slot wait timed out'));
+      }, OUTBOUND_ACQUIRE_TIMEOUT_MS),
+    };
+    outboundWaitQueue.push(waiter);
+  });
 }
 
 function releaseOutboundSlot(): void {
-  const next = outboundWaitQueue.shift();
-  if (next) {
-    // Hand the slot directly to the next waiter; activeOutboundRequests unchanged
-    next();
-  } else {
-    activeOutboundRequests--;
+  // Hand the freed slot to the oldest still-waiting caller; skip any that
+  // already timed out (they never took a slot, so accounting stays balanced).
+  while (outboundWaitQueue.length > 0) {
+    const waiter = outboundWaitQueue.shift();
+    if (!waiter || waiter.settled) continue;
+    waiter.settled = true;
+    clearTimeout(waiter.timer);
+    // Slot handed on directly; activeOutboundRequests stays the same.
+    waiter.resolve();
+    return;
   }
+  activeOutboundRequests--;
 }
 
 export abstract class BaseApiService {

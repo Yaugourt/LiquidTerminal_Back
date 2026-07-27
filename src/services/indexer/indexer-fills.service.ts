@@ -9,6 +9,25 @@ import {
 import { HYPEDEXER_CACHE_PREFIX, HYPEDEXER_TTL, HYPEDEXER_USER_CACHE_KEY } from '../../constants/hypedexer.cache';
 
 const FILLS_COUNT_CACHE_KEY = `${HYPEDEXER_CACHE_PREFIX}:fills:count`;
+const FILLS_LIST_CACHE_PREFIX = `${HYPEDEXER_CACHE_PREFIX}:fills:list`;
+
+/** Short TTL for the global fills feeds — real-time-ish, but enough to collapse
+ * repeated identical calls off the paid HypeDexer key and off the outbound pool. */
+const FILLS_LIST_TTL = 10;
+
+/**
+ * Deterministic cache key from a params object: sorted so key order never
+ * changes the key, and scoped by feed name. Every param that changes the
+ * upstream result is included, so distinct queries never collide.
+ */
+function listKey(feed: string, params: Record<string, unknown>): string {
+  const parts = Object.keys(params)
+    .filter((k) => params[k] !== undefined && params[k] !== null && params[k] !== '')
+    .sort()
+    .map((k) => `${k}=${String(params[k])}`)
+    .join('&');
+  return `${FILLS_LIST_CACHE_PREFIX}:${feed}:${parts}`;
+}
 
 /**
  * Passthrough to HypeDexer fills API; optional short cache for global count only.
@@ -25,11 +44,19 @@ export class IndexerFillsService {
   }
 
   public async getFills(params: IndexerFillsQuery): Promise<unknown> {
-    return this.client.getFills(params);
+    return cacheService.getOrSet(
+      listKey('fills', params as Record<string, unknown>),
+      () => this.client.getFills(params),
+      FILLS_LIST_TTL
+    );
   }
 
   public async getFillsRecent(params: IndexerFillsQuery): Promise<unknown> {
-    return this.client.getFillsRecent(params);
+    return cacheService.getOrSet(
+      listKey('recent', params as Record<string, unknown>),
+      () => this.client.getFillsRecent(params),
+      FILLS_LIST_TTL
+    );
   }
 
   public async getUserFills(
@@ -47,7 +74,11 @@ export class IndexerFillsService {
   }
 
   public async getSpotFills(params: IndexerFillsSpotQuery): Promise<unknown> {
-    return this.client.getSpotFills(params);
+    return cacheService.getOrSet(
+      listKey('spot', params as Record<string, unknown>),
+      () => this.client.getSpotFills(params),
+      FILLS_LIST_TTL
+    );
   }
 
   public async getSpotUserFills(

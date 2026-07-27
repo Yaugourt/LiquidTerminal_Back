@@ -115,9 +115,11 @@ app.use(cors({
 // Ajouter les en-têtes de sécurité
 app.use(securityHeaders);
 
-// Parser le body avant la sanitization
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Parser le body avant la sanitization. Explicit limits: JSON bodies here are
+// small (uploads go through multer, not this parser), so a tight cap bounds the
+// per-request work the sanitizer does on the body.
+app.use(express.json({ limit: '100kb' }));
+app.use(express.urlencoded({ extended: true, limit: '100kb', parameterLimit: 100 }));
 
 // Appliquer la sanitization globalement
 app.use(sanitizeInput);

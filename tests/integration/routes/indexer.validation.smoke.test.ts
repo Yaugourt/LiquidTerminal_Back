@@ -11,6 +11,9 @@ jest.mock('../../../src/middleware/apiRateLimiter', () => ({
   marketRateLimiter: (_req: Request, _res: Response, next: NextFunction) => {
     next();
   },
+  passthroughRateLimiter: (_req: Request, _res: Response, next: NextFunction) => {
+    next();
+  },
 }));
 
 jest.mock('../../../src/core/redis.service', () => ({

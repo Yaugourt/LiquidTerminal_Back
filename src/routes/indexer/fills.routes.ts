@@ -1,5 +1,5 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   indexerFillsQuerySchema,
@@ -80,6 +80,7 @@ function spotQueryToParams(query: Request['query']): IndexerFillsSpotQuery {
 router.get(
   '/recent',
   marketRateLimiter,
+  passthroughRateLimiter,
   validateGetRequest(indexerFillsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -89,7 +90,7 @@ router.get(
       logDeduplicator.error('GET /indexer/fills/recent', { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FILLS_RECENT_ERROR',
       });
     }
@@ -108,7 +109,7 @@ router.get(
       logDeduplicator.error('GET /indexer/fills/count', { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FILLS_COUNT_ERROR',
       });
     }
@@ -130,7 +131,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FILLS_SPOT_USER_ERROR',
       });
     }
@@ -140,6 +141,7 @@ router.get(
 router.get(
   '/spot',
   marketRateLimiter,
+  passthroughRateLimiter,
   validateGetRequest(indexerFillsSpotQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -149,7 +151,7 @@ router.get(
       logDeduplicator.error('GET /indexer/fills/spot', { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FILLS_SPOT_ERROR',
       });
     }
@@ -171,7 +173,7 @@ router.get(
       });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FILLS_USER_ERROR',
       });
     }
@@ -181,6 +183,7 @@ router.get(
 router.get(
   '/',
   marketRateLimiter,
+  passthroughRateLimiter,
   validateGetRequest(indexerFillsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -190,7 +193,7 @@ router.get(
       logDeduplicator.error('GET /indexer/fills', { error: error instanceof Error ? error.message : String(error) });
       res.status(502).json({
         success: false,
-        error: error instanceof Error ? error.message : 'Upstream error',
+        error: 'Upstream error',
         code: 'INDEXER_FILLS_ERROR',
       });
     }

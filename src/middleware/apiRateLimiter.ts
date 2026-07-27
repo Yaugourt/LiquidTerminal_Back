@@ -166,4 +166,63 @@ function sendLimitExceededResponse(res: Response, message: string): void {
     message,
     retryAfter: 60 // Suggérer d'attendre 1 minute
   });
-} 
+}
+
+// Tighter limits for uncached HypeDexer passthrough routes. Each such request
+// makes a paid upstream call and holds an outbound slot; the general limiter
+// (1200/min) is far too loose to bound that cost. These endpoints are polled by
+// the UI at most a few times per second, so 20/s burst + 300/min per IP leaves
+// ample headroom while capping the amplification an attacker can drive against
+// the HypeDexer key and the outbound pool.
+const PASSTHROUGH_LIMITS = {
+  BURST: { WINDOW: 1, MAX_REQUESTS: 20 },
+  MINUTE: { WINDOW: 60, MAX_REQUESTS: 300 },
+};
+
+const getPassthroughKeys = (ip: string) => ({
+  burstKey: `ratelimit:pt:${ip}:burst`,
+  minuteKey: `ratelimit:pt:${ip}:minute`,
+});
+
+export const passthroughRateLimiter = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  const ip = req.ip;
+  if (!ip) {
+    res.status(400).json({ error: 'IP address not found', message: 'Could not determine client IP address' });
+    return;
+  }
+
+  const keys = getPassthroughKeys(ip);
+  const now = Math.floor(Date.now() / 1000);
+
+  try {
+    const [burstCount, minuteCount] = await Promise.all([
+      incrementAndGetCount(keys.burstKey, now, PASSTHROUGH_LIMITS.BURST.WINDOW),
+      incrementAndGetCount(keys.minuteKey, now, PASSTHROUGH_LIMITS.MINUTE.WINDOW),
+    ]);
+
+    if (burstCount > PASSTHROUGH_LIMITS.BURST.MAX_REQUESTS) {
+      return sendLimitExceededResponse(res, 'Too many indexer requests per second');
+    }
+    if (minuteCount > PASSTHROUGH_LIMITS.MINUTE.MAX_REQUESTS) {
+      return sendLimitExceededResponse(res, 'Too many indexer requests per minute');
+    }
+    next();
+  } catch (error) {
+    logDeduplicator.error('Passthrough rate limiter Redis error, using in-memory fallback', {
+      error: error instanceof Error ? error.message : String(error),
+      path: req.path,
+      ip,
+    });
+    // Fail-secure, same as the general limiter. Distinct key namespace so the
+    // two fallbacks don't share a counter.
+    if (checkInMemoryFallback(`pt:${ip}`)) {
+      next();
+    } else {
+      sendLimitExceededResponse(res, 'Too many requests (fallback mode)');
+    }
+  }
+};
