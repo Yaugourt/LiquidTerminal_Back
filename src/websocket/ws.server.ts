@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Server as HTTPServer, IncomingMessage } from 'http';
 import { randomUUID } from 'crypto';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { matchesAnyKey } from '../utils/constant-time-compare';
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
 import { AggregatedLiquidation } from '../types/liquidations.types';
@@ -39,6 +40,21 @@ export class InternalWebSocketServer {
   private static readonly MAX_TOTAL_CONNECTIONS = 1000;
   private static readonly MAX_MESSAGES_PER_SECOND = 10;
   private messageCounters: Map<string, { count: number; resetAt: number }> = new Map();
+
+  /**
+   * Subscription types that carry another user's private data (Telegram chat
+   * id, watched wallet addresses, PnL) and must NOT be readable by the public.
+   * Only `liquidation` stays open — it is market data, same as the SSE feed.
+   * A client may subscribe to these only after presenting the bot API key on
+   * the upgrade request.
+   */
+  private static readonly PRIVILEGED_SUBSCRIPTIONS: ReadonlySet<string> = new Set([
+    'wallet_event',
+    'liquidation_alert',
+    'fill_alert',
+    'doc_update_alert',
+    'bot_announcement',
+  ]);
 
   // Heartbeat
   private static readonly HEARTBEAT_INTERVAL_MS = 30000;
@@ -171,19 +187,65 @@ export class InternalWebSocketServer {
   // ============================================================================
 
   /**
+   * Resolve the real client IP behind Railway's single edge proxy.
+   *
+   * The proxy APPENDS the real client address to the right of any
+   * `X-Forwarded-For` the client sent, so the RIGHTMOST entry is the one the
+   * client cannot forge — mirroring the HTTP app's `trust proxy: 1`. The old
+   * code took the leftmost entry, which is fully attacker-controlled and let a
+   * single host masquerade as unlimited distinct IPs to bypass the per-IP cap.
+   */
+  private resolveClientIp(req: IncomingMessage): string {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.length > 0) {
+      const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
+      if (parts.length > 0) return parts[parts.length - 1];
+    }
+    return req.socket.remoteAddress || 'unknown';
+  }
+
+  /**
+   * True when the upgrade request carries a valid bot API key, granting access
+   * to the privileged alert channels. Accepts the same `Authorization: Bot
+   * <key>` scheme the bot already uses for HTTP, plus a `?key=` query fallback
+   * for WS clients that cannot set upgrade headers. Compared in constant time.
+   */
+  private isBotUpgrade(req: IncomingMessage): boolean {
+    const validKeys = [
+      process.env.TELEGRAM_BOT_API_KEY,
+      process.env.TELEGRAM_BOT_API_KEY_SECONDARY,
+    ].filter(Boolean) as string[];
+    if (validKeys.length === 0) return false;
+
+    const authHeader = req.headers['authorization'];
+    let provided: string | undefined;
+    if (typeof authHeader === 'string' && authHeader.startsWith('Bot ')) {
+      provided = authHeader.slice(4);
+    } else if (req.url) {
+      // req.url is path + query only; a fixed base is fine for parsing.
+      const key = new URL(req.url, 'http://localhost').searchParams.get('key');
+      if (key) provided = key;
+    }
+    if (!provided) return false;
+    return matchesAnyKey(provided, validKeys);
+  }
+
+  /**
    * Handle new WebSocket connection
    */
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
-    const forwardedFor = req.headers['x-forwarded-for'];
-    const ip = (typeof forwardedFor === 'string' ? forwardedFor.split(',')[0].trim() : undefined) || 
-               req.socket.remoteAddress || 
-               'unknown';
+    const ip = this.resolveClientIp(req);
 
     // Check connection limits
     if (!this.checkConnectionLimits(ip)) {
       ws.close(1008, 'Connection limit exceeded');
       return;
     }
+
+    // Authenticate the upgrade against the bot API key. The Telegram bot is the
+    // only legitimate consumer of the privileged alert channels; anyone else
+    // connects unauthenticated and is limited to public market data.
+    const isAuthenticated = this.isBotUpgrade(req);
 
     // Create client
     const clientId = randomUUID();
@@ -193,7 +255,7 @@ export class InternalWebSocketServer {
       connectedAt: Date.now(),
       lastActivity: Date.now(),
       subscriptions: [],
-      isAuthenticated: false,
+      isAuthenticated,
     };
 
     this.clients.set(clientId, client);
@@ -297,6 +359,24 @@ export class InternalWebSocketServer {
         error:
           'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Privileged channels carry another user's private data — refuse them to
+    // any client that did not authenticate on the upgrade. `liquidation` (public
+    // market data) is intentionally exempt.
+    if (InternalWebSocketServer.PRIVILEGED_SUBSCRIPTIONS.has(subType) && !client.isAuthenticated) {
+      logDeduplicator.warn('InternalWebSocketServer: Unauthenticated privileged subscription refused', {
+        clientId: client.id,
+        ip: client.ip,
+        subType,
+      });
+      this.sendMessage(ws, {
+        type: 'error',
+        error: 'Authentication required for this subscription',
+        code: 'UNAUTHORIZED',
         timestamp: new Date().toISOString(),
       });
       return;
