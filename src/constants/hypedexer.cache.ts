@@ -104,6 +104,7 @@ export const HYPEDEXER_USER_CACHE_KEY = {
   fills:            (addr: string) => `hypedexer:user:${addr}:fills`,
   spotFills:        (addr: string) => `hypedexer:user:${addr}:spot-fills`,
   userFunding:      (addr: string) => `hypedexer:user:${addr}:funding`,
+  userFundingSummary: (addr: string) => `hypedexer:user:${addr}:funding-summary`,
   coinDistribution: (addr: string) => `hypedexer:user:${addr}:coin-distribution`,
   vaultEquities:    (addr: string) => `hypedexer:user:${addr}:vault-equities`,
   twaps:            (addr: string) => `hypedexer:user:${addr}:twaps`,

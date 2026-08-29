@@ -87,4 +87,31 @@ router.get(
   }) as RequestHandler
 );
 
+router.get(
+  '/userFunding/summary',
+  marketRateLimiter,
+  validateGetRequest(indexerFundingUserFundingQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const { user, startTime, endTime, limit } = req.query;
+      const data = await service.getUserFundingSummary({
+        user: user as string,
+        startTime: typeof startTime === 'string' ? startTime : undefined,
+        endTime: typeof endTime === 'string' ? endTime : undefined,
+        limit: limit !== undefined ? Number(limit) : undefined,
+      });
+      res.json({ success: true, data });
+    } catch (error) {
+      logDeduplicator.error('GET /indexer/funding/userFunding/summary', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(502).json({
+        success: false,
+        error: 'Upstream error',
+        code: 'INDEXER_FUNDING_USER_SUMMARY_ERROR',
+      });
+    }
+  }) as RequestHandler
+);
+
 export default router;
