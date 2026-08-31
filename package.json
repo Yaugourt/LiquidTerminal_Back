@@ -96,7 +96,7 @@
     "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.58.0",
     "@typescript-eslint/parser": "^8.58.0",
-    "eslint": "^9.39.4",
+    "eslint": "^10.8.0",
     "globals": "^17.5.0",
     "jest": "^30.3.0",
     "prettier": "^3.5.3",
