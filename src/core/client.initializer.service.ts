@@ -18,6 +18,7 @@ import { HLIndexerLiquidationsClient } from '../clients/hypedexer/rest/liquidati
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
 import { HLIndexerTopTradersClient } from '../clients/hypedexer/rest/toptraders/toptraders.client';
+import { AggregatePositioningClient } from '../clients/hyperliquid/positioning/aggregate-positioning.client';
 import { HLIndexerActiveUsersClient } from '../clients/hypedexer/rest/activeusers/activeusers.client';
 import { HLIndexerBuildersClient } from '../clients/hypedexer/rest/builders/builders-list-poller.client';
 import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
@@ -179,6 +180,12 @@ export class ClientInitializerService {
       const buildersClient = HLIndexerBuildersClient.getInstance();
       this.clients.set('builders', buildersClient);
       logDeduplicator.info('Builders client initialized successfully');
+
+      // Initialiser le poller Aggregate Positioning (fan-out clearinghouseState over
+      // the top-trader cohort every 60s - client owns cache)
+      const positioningClient = AggregatePositioningClient.getInstance();
+      this.clients.set('aggregatePositioning', positioningClient);
+      logDeduplicator.info('Aggregate positioning client initialized successfully');
 
       // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
       const ingestionService = LiquidationsIngestionService.getInstance();

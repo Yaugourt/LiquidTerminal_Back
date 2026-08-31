@@ -1,6 +1,8 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { TopTradersService } from '../../services/toptraders/toptraders.service';
 import { TopTradersQueryParams, TopTradersError, TopTradersSortType } from '../../types/toptraders.types';
+import { AggregatePositioningService } from '../../services/positioning/aggregate-positioning.service';
+import { PositioningError } from '../../types/positioning.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { topTradersQuerySchema } from '../../schemas/toptraders.schema';
@@ -8,6 +10,7 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
 const topTradersService = TopTradersService.getInstance();
+const positioningService = AggregatePositioningService.getInstance();
 
 /**
  * Parse validated query parameters into TopTradersQueryParams
@@ -82,6 +85,48 @@ router.get('/',
       logDeduplicator.error('Error fetching top traders:', { error: error instanceof Error ? error.message : String(error) });
 
       if (error instanceof TopTradersError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          error: error.message,
+          code: error.code
+        });
+      }
+
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+        code: 'INTERNAL_SERVER_ERROR'
+      });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * GET /top-traders/positioning
+ * Collective open positioning of the smart-money cohort (union of the top
+ * traders by volume and by PnL), aggregated per coin into long/short notionals.
+ *
+ * Response:
+ * {
+ *   success: true,
+ *   data: {
+ *     coins: [{ coin, longNotional, shortNotional, netNotional, longCount, shortCount, traderCount }],
+ *     totals: { longNotional, shortNotional, netNotional, longShare },
+ *     tradersScanned, cohortSize, updatedAt
+ *   },
+ *   metadata: { cachedAt }
+ * }
+ */
+router.get('/positioning',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    try {
+      const response = await positioningService.getPositioning();
+      res.json(response);
+    } catch (error) {
+      logDeduplicator.error('Error fetching aggregate positioning:', { error: error instanceof Error ? error.message : String(error) });
+
+      if (error instanceof PositioningError) {
         return res.status(error.statusCode).json({
           success: false,
           error: error.message,
