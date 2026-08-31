@@ -5,7 +5,9 @@ import { logDeduplicator } from '../utils/logDeduplicator';
 import { matchesAnyKey } from '../utils/constant-time-compare';
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
+import { L4BookService } from '../services/orderbook/l4book.service';
 import { AggregatedLiquidation } from '../types/liquidations.types';
+import { L4BookDeltaPayload, L4BookSnapshotPayload } from '../types/l4book.types';
 import {
   WSClient,
   WSClientMessage,
@@ -56,6 +58,14 @@ export class InternalWebSocketServer {
     'bot_announcement',
   ]);
 
+  /**
+   * L4 books are expensive to mirror (a few MB of resident state each), so a
+   * single client cannot pin an unbounded number of them.
+   */
+  private static readonly MAX_L4_COINS_PER_CLIENT = 4;
+  /** Coin ids across perps (`BTC`), spot (`@107`, `PURR/USDC`), HIP-3 (`xyz:SKHX`) and HIP-4 (`#10250`). */
+  private static readonly L4_COIN_PATTERN = /^[A-Za-z0-9@#:/_.-]{1,32}$/;
+
   // Heartbeat
   private static readonly HEARTBEAT_INTERVAL_MS = 30000;
   private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -63,6 +73,7 @@ export class InternalWebSocketServer {
   // Services
   private liquidationsWSService: LiquidationsWebSocketService | null = null;
   private sseManager: SSEManagerService | null = null;
+  private l4BookService: L4BookService | null = null;
 
   private constructor() {}
 
@@ -108,6 +119,13 @@ export class InternalWebSocketServer {
     // Also subscribe to SSE manager for backward compatibility during migration
     this.sseManager = SSEManagerService.getInstance();
 
+    // L4 order books — fanned out per coin to whoever is watching that coin.
+    // The service itself only mirrors a coin while at least one client holds it.
+    this.l4BookService = L4BookService.getInstance();
+    this.l4BookService.onSnapshot((payload) => this.broadcastL4Snapshot(payload));
+    this.l4BookService.onDelta((payload) => this.broadcastL4Delta(payload));
+    this.l4BookService.onUnavailable((coin) => this.broadcastL4Unavailable(coin));
+
     logDeduplicator.info('InternalWebSocketServer: Initialized', {
       path: '/ws',
       maxPayload: '64KB',
@@ -146,6 +164,10 @@ export class InternalWebSocketServer {
     this.ipConnectionCount.clear();
     this.messageCounters.clear();
 
+    // Drops the mirrored books and the upstream HypeDexer socket with them.
+    this.l4BookService?.shutdown();
+    this.l4BookService = null;
+
     logDeduplicator.info('InternalWebSocketServer: Shutdown complete');
   }
 
@@ -156,6 +178,7 @@ export class InternalWebSocketServer {
     let authenticatedCount = 0;
     const subscriptionCounts: Record<string, number> = {
       liquidation: 0,
+      l4book: 0,
       wallet_event: 0,
       liquidation_alert: 0,
       fill_alert: 0,
@@ -348,6 +371,7 @@ export class InternalWebSocketServer {
     if (
       !subType ||
       (subType !== 'liquidation' &&
+        subType !== 'l4book' &&
         subType !== 'wallet_event' &&
         subType !== 'liquidation_alert' &&
         subType !== 'fill_alert' &&
@@ -357,7 +381,7 @@ export class InternalWebSocketServer {
       this.sendMessage(ws, {
         type: 'error',
         error:
-          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
+          'Invalid subscription type. Supported: liquidation, l4book, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -379,6 +403,13 @@ export class InternalWebSocketServer {
         code: 'UNAUTHORIZED',
         timestamp: new Date().toISOString(),
       });
+      return;
+    }
+
+    // `l4book` is coin-scoped rather than one-per-type: a client holds one
+    // subscription per coin, each reference-counted in the book service.
+    if (subType === 'l4book') {
+      this.handleL4BookSubscribe(ws, client, message.subscription?.coin);
       return;
     }
 
@@ -436,6 +467,7 @@ export class InternalWebSocketServer {
     if (
       !subType ||
       (subType !== 'liquidation' &&
+        subType !== 'l4book' &&
         subType !== 'wallet_event' &&
         subType !== 'liquidation_alert' &&
         subType !== 'fill_alert' &&
@@ -445,16 +477,22 @@ export class InternalWebSocketServer {
       this.sendMessage(ws, {
         type: 'error',
         error:
-          'Invalid subscription type. Supported: liquidation, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
+          'Invalid subscription type. Supported: liquidation, l4book, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement',
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
       return;
     }
 
-    const index = client.subscriptions.findIndex((s) => s.type === subType);
-    if (index >= 0) {
-      client.subscriptions.splice(index, 1);
+    if (subType === 'l4book') {
+      // No coin given ⇒ drop every book this client holds.
+      const coin = message.subscription?.coin;
+      this.releaseL4Books(client, coin);
+    } else {
+      const index = client.subscriptions.findIndex((s) => s.type === subType);
+      if (index >= 0) {
+        client.subscriptions.splice(index, 1);
+      }
     }
 
     this.sendMessage(ws, {
@@ -475,6 +513,10 @@ export class InternalWebSocketServer {
   private handleClose(ws: WebSocket, clientId: string, code: number, reason: string): void {
     const client = this.clients.get(clientId);
     if (!client) return;
+
+    // Release every mirrored book this client held, or the service keeps
+    // paying for upstream feeds nobody is watching.
+    this.releaseL4Books(client);
 
     this.decrementIpCount(client.ip);
     this.clients.delete(clientId);
@@ -578,6 +620,147 @@ export class InternalWebSocketServer {
         clientCount: sentCount,
       });
     }
+  }
+
+  // ============================================================================
+  // L4 ORDER BOOKS
+  // ============================================================================
+
+  /**
+   * Subscribe a client to one coin's L4 book. Answers immediately with a
+   * snapshot when the book is already warm, so a viewer joining a coin someone
+   * else is already watching renders without waiting for upstream.
+   */
+  private handleL4BookSubscribe(ws: WebSocket, client: WSClient, coin?: string): void {
+    if (!coin || !InternalWebSocketServer.L4_COIN_PATTERN.test(coin)) {
+      this.sendMessage(ws, {
+        type: 'error',
+        error: 'l4book requires a valid `coin` (e.g. "BTC", "@107", "xyz:SKHX", "#10250")',
+        code: 'INVALID_COIN',
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const normalized = coin.toLowerCase();
+    const held = client.subscriptions.filter((s) => s.type === 'l4book');
+
+    if (held.some((s) => s.coin?.toLowerCase() === normalized)) {
+      // Already watching this coin — re-send the current book rather than
+      // taking a second reference.
+      const existing = this.l4BookService?.getSnapshot(coin);
+      if (existing) this.sendL4Snapshot(ws, existing);
+      return;
+    }
+
+    if (held.length >= InternalWebSocketServer.MAX_L4_COINS_PER_CLIENT) {
+      this.sendMessage(ws, {
+        type: 'error',
+        error: `At most ${InternalWebSocketServer.MAX_L4_COINS_PER_CLIENT} order books per connection`,
+        code: 'TOO_MANY_BOOKS',
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const service = this.l4BookService ?? L4BookService.getInstance();
+    const snapshot = service.acquire(coin);
+
+    // `acquire` returns null both while the first snapshot is in flight and
+    // when the mirror is at capacity; `books` distinguishes them.
+    if (snapshot === null && !service.getStats().some((s) => s.coin.toLowerCase() === normalized)) {
+      this.sendMessage(ws, {
+        type: 'error',
+        error: 'Order book capacity reached, try again shortly',
+        code: 'BOOK_CAPACITY',
+        timestamp: new Date().toISOString(),
+      });
+      return;
+    }
+
+    client.subscriptions.push({
+      type: 'l4book',
+      filters: {},
+      coin,
+      subscribedAt: Date.now(),
+    });
+
+    this.sendMessage(ws, {
+      type: 'subscribed',
+      data: { type: 'l4book', coin },
+      timestamp: new Date().toISOString(),
+    });
+
+    if (snapshot) this.sendL4Snapshot(ws, snapshot);
+
+    logDeduplicator.info('InternalWebSocketServer: Client subscribed to l4book', {
+      clientId: client.id,
+      coin,
+      warm: snapshot !== null,
+    });
+  }
+
+  /**
+   * Release this client's L4 books — one coin when given, otherwise all of
+   * them (unsubscribe-all, or disconnect).
+   */
+  private releaseL4Books(client: WSClient, coin?: string): void {
+    const service = this.l4BookService;
+    const normalized = coin?.toLowerCase();
+
+    for (let i = client.subscriptions.length - 1; i >= 0; i--) {
+      const sub = client.subscriptions[i];
+      if (sub.type !== 'l4book') continue;
+      if (normalized && sub.coin?.toLowerCase() !== normalized) continue;
+
+      client.subscriptions.splice(i, 1);
+      if (sub.coin) service?.release(sub.coin);
+    }
+  }
+
+  private sendL4Snapshot(ws: WebSocket, payload: L4BookSnapshotPayload): void {
+    this.sendMessage(ws, {
+      type: 'l4book_snapshot',
+      data: payload,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /** Fan a book frame out to every client watching that coin. */
+  private broadcastL4(
+    coin: string,
+    type: 'l4book_snapshot' | 'l4book_delta' | 'l4book_unavailable',
+    data: unknown
+  ): void {
+    if (!this.wss) return;
+
+    const normalized = coin.toLowerCase();
+    const serialized = JSON.stringify({
+      type,
+      data,
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      const client = this.clients.get(clientId);
+      if (!client) continue;
+      if (!client.subscriptions.some((s) => s.type === 'l4book' && s.coin?.toLowerCase() === normalized)) {
+        continue;
+      }
+      this.sendRawMessage(ws, serialized);
+    }
+  }
+
+  private broadcastL4Snapshot(payload: L4BookSnapshotPayload): void {
+    this.broadcastL4(payload.coin, 'l4book_snapshot', payload);
+  }
+
+  private broadcastL4Delta(payload: L4BookDeltaPayload): void {
+    this.broadcastL4(payload.coin, 'l4book_delta', payload);
+  }
+
+  private broadcastL4Unavailable(coin: string): void {
+    this.broadcastL4(coin, 'l4book_unavailable', { coin, reason: 'no_book' });
   }
 
   /**

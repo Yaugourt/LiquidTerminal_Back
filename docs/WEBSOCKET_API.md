@@ -43,6 +43,23 @@ All messages are JSON encoded.
 - `minAmountUsd`: Minimum notional value in USD
 - `wallets`: Array of liquidated wallet addresses
 
+#### Subscribe to an L4 Order Book
+
+```json
+{
+  "method": "subscribe",
+  "subscription": {
+    "type": "l4book",
+    "coin": "BTC"
+  }
+}
+```
+
+`coin` is required and works across every market type: perps (`BTC`), spot
+(`@107`, `PURR/USDC`), HIP-3 assets (`xyz:SKHX`) and HIP-4 outcomes (`#10250`).
+A connection may hold **4 books at once**; each extra coin is a separate
+subscribe.
+
 #### Unsubscribe
 
 ```json
@@ -53,6 +70,9 @@ All messages are JSON encoded.
   }
 }
 ```
+
+For `l4book`, pass the `coin` to drop one book; omitting it drops every book on
+that connection.
 
 #### Ping (keep-alive)
 
@@ -124,6 +144,75 @@ All messages are JSON encoded.
 
 **Note**: When multiple liquidations occur for the same user/coin/direction within 1 second, they are aggregated into a single event with weighted average prices.
 
+#### L4 Order Book Snapshot
+
+Sent once, right after `subscribed`. Levels are tuples — `[price, size,
+restingOrders, uniqueMakers]` — ordered best-first (bids descending, asks
+ascending), capped at `depth` levels per side.
+
+```json
+{
+  "type": "l4book_snapshot",
+  "data": {
+    "coin": "HYPE",
+    "time": 1786105575364,
+    "depth": 100,
+    "bids": [[56.861, 4.38, 1, 1], [56.858, 122.4, 2, 2]],
+    "asks": [[56.866, 18.01, 1, 1]],
+    "totals": {
+      "bidSize": 515432.1, "askSize": 636210.7,
+      "bidNotional": 29300000, "askNotional": 36200000,
+      "bidOrders": 6112, "askOrders": 5365,
+      "bidLevels": 3376, "askLevels": 2772,
+      "makers": 1950
+    }
+  },
+  "timestamp": "2026-08-07T12:00:00.000Z"
+}
+```
+
+`totals` covers the **entire** book, not just the shipped ladder — that is the
+part Hyperliquid's public `l2Book` (20 levels) cannot report at all.
+
+#### L4 Order Book Delta
+
+Sent at most every 250 ms, carrying only the levels that moved. A level with
+size `0` has left the ladder and should be dropped.
+
+```json
+{
+  "type": "l4book_delta",
+  "data": {
+    "coin": "HYPE",
+    "time": 1786105575614,
+    "bids": [[56.861, 9.02, 2, 2], [56.84, 0, 0, 0]],
+    "asks": [],
+    "totals": { "…": "same shape as the snapshot" }
+  },
+  "timestamp": "2026-08-07T12:00:00.250Z"
+}
+```
+
+#### L4 Order Book Unavailable
+
+The coin has no live book (delisted HIP-3 asset, settled HIP-4 outcome).
+
+```json
+{
+  "type": "l4book_unavailable",
+  "data": { "coin": "cash:GOLD", "reason": "no_book" },
+  "timestamp": "2026-08-07T12:00:00.000Z"
+}
+```
+
+**Accuracy note**: the upstream `l4Book` delta stream does not announce every
+departing order (verified 2026-08-07 on HYPE: 10 of 10 resting asks the price
+traded through vanished with no `remove` diff). The server therefore rebuilds
+each watched book from a fresh upstream snapshot every `L4BOOK_RESYNC_MS`
+(default 8 s) and immediately on detecting a crossed book, which it never
+publishes. Clients that need tick-exact top-of-book should still overlay
+Hyperliquid's public `l2Book` for the levels it covers.
+
 #### Heartbeat (response to ping)
 
 ```json
@@ -149,6 +238,9 @@ All messages are JSON encoded.
 - `INVALID_FORMAT`: Message is not valid JSON
 - `UNKNOWN_METHOD`: Unknown method in request
 - `INVALID_SUBSCRIPTION`: Invalid subscription type
+- `INVALID_COIN`: `l4book` subscribe without a usable `coin`
+- `TOO_MANY_BOOKS`: More than 4 `l4book` subscriptions on one connection
+- `BOOK_CAPACITY`: The server is already mirroring its maximum number of books
 
 ## Connection Health
 

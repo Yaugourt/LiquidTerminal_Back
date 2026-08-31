@@ -173,6 +173,7 @@ export interface WSClient {
  */
 export type WSInternalSubscriptionType =
   | 'liquidation'
+  | 'l4book'
   | 'wallet_event'
   | 'liquidation_alert'
   | 'fill_alert'
@@ -183,6 +184,8 @@ export interface WSClientSubscription {
   type: WSInternalSubscriptionType;
   filters: WSLiquidationFilters;
   subscribedAt: number;
+  /** Set on `l4book` only: which coin's order book this subscription watches. */
+  coin?: string;
 }
 
 /**
@@ -207,6 +210,8 @@ export interface WSClientMessage {
   subscription?: {
     type: WSInternalSubscriptionType;
     filters?: WSLiquidationFilters;
+    /** Required for `l4book`: the coin whose book to stream. */
+    coin?: string;
   };
   token?: string;           // Privy JWT for authentication
 }
@@ -220,6 +225,9 @@ export type WSEventType =
   | 'subscribed'
   | 'unsubscribed'
   | 'liquidation'
+  | 'l4book_snapshot'
+  | 'l4book_delta'
+  | 'l4book_unavailable'
   | 'wallet_event'
   | 'liquidation_alert'
   | 'fill_alert'
