@@ -60,6 +60,16 @@ export interface AggregatePositioning {
   updatedAt: string;
 }
 
+/** One stored hourly point of the cohort's net bias, for the history chart. */
+export interface PositioningHistoryPoint {
+  /** Epoch ms of the hour bucket. */
+  time: number;
+  longNotional: number;
+  shortNotional: number;
+  netNotional: number;
+  longShare: number;
+}
+
 /** Response envelope returned by the route. */
 export interface AggregatePositioningResponse {
   success: true;

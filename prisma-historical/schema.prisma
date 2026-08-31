@@ -50,3 +50,22 @@ model IngestionState {
 
   @@map("ingestion_state")
 }
+
+/// Hourly snapshot of the smart-money cohort's aggregate positioning, so the
+/// net long/short bias can be charted over time. No upstream history exists for
+/// open-position state, so we sample and store it ourselves (one row per hour).
+model PositioningSnapshot {
+  id             BigInt   @id @default(autoincrement())
+  /// Hour bucket (floored to the hour). Unique so a repeated poll in the same
+  /// hour overwrites rather than duplicates.
+  time           DateTime @unique @db.Timestamptz(3)
+  longNotional   Decimal  @map("long_notional") @db.Decimal(30, 2)
+  shortNotional  Decimal  @map("short_notional") @db.Decimal(30, 2)
+  netNotional    Decimal  @map("net_notional") @db.Decimal(30, 2)
+  longShare      Decimal  @map("long_share") @db.Decimal(10, 6)
+  tradersScanned Int      @map("traders_scanned")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([time])
+  @@map("positioning_snapshots")
+}

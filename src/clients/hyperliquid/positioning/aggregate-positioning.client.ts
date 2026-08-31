@@ -1,6 +1,7 @@
 import { BaseApiService } from '../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { redisService } from '../../../core/redis.service';
+import { prismaHistorical } from '../../../core/prisma.historical.service';
 import { withDistributedLock } from '../../../utils/distributedLock';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { TopTradersService } from '../../../services/toptraders/toptraders.service';
@@ -8,6 +9,7 @@ import {
   AggregatePositioning,
   ClearinghouseState,
   CoinPositioning,
+  PositioningHistoryPoint,
 } from '../../../types/positioning.types';
 
 const HL_API_URL = (process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info';
@@ -222,6 +224,10 @@ export class AggregatePositioningClient extends BaseApiService {
         UPDATE_CHANNEL,
         JSON.stringify({ type: 'DATA_UPDATED', timestamp: Date.now() })
       );
+
+      // Persist an hourly point so the net bias can be charted over time. There
+      // is no upstream history for open-position state, so we build it here.
+      await this.persistSnapshot(snapshot);
     });
 
     if (!executed) {
@@ -239,5 +245,59 @@ export class AggregatePositioningClient extends BaseApiService {
     if (reRead) return JSON.parse(reRead) as AggregatePositioning;
 
     throw new Error('Aggregate positioning unavailable');
+  }
+
+  /**
+   * Best-effort hourly persistence of the net bias. A missing table (migration
+   * not yet applied) or any DB hiccup must never break the live feature, so
+   * every failure is swallowed with a warning.
+   */
+  private async persistSnapshot(snap: AggregatePositioning): Promise<void> {
+    try {
+      const hour = new Date(snap.updatedAt);
+      hour.setUTCMinutes(0, 0, 0);
+      const row = {
+        longNotional: snap.totals.longNotional,
+        shortNotional: snap.totals.shortNotional,
+        netNotional: snap.totals.netNotional,
+        longShare: snap.totals.longShare,
+        tradersScanned: snap.tradersScanned,
+      };
+      await prismaHistorical.positioningSnapshot.upsert({
+        where: { time: hour },
+        create: { time: hour, ...row },
+        update: row,
+      });
+    } catch (err) {
+      logDeduplicator.warn('Positioning snapshot persist skipped (best-effort)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Net-bias history over the last `hours`, oldest first. Returns [] if the
+   * table does not exist yet (pre-migration) or on any read error.
+   */
+  public async getHistory(hours: number): Promise<PositioningHistoryPoint[]> {
+    try {
+      const since = new Date(Date.now() - hours * 3_600_000);
+      const rows = await prismaHistorical.positioningSnapshot.findMany({
+        where: { time: { gte: since } },
+        orderBy: { time: 'asc' },
+      });
+      return rows.map((r) => ({
+        time: r.time.getTime(),
+        longNotional: Number(r.longNotional),
+        shortNotional: Number(r.shortNotional),
+        netNotional: Number(r.netNotional),
+        longShare: Number(r.longShare),
+      }));
+    } catch (err) {
+      logDeduplicator.warn('Positioning history unavailable (best-effort)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
   }
 }

@@ -1,5 +1,9 @@
 import { AggregatePositioningClient } from '../../clients/hyperliquid/positioning/aggregate-positioning.client';
-import { AggregatePositioningResponse, PositioningError } from '../../types/positioning.types';
+import {
+  AggregatePositioningResponse,
+  PositioningError,
+  PositioningHistoryPoint,
+} from '../../types/positioning.types';
 
 /**
  * Thin service over the aggregate positioning poller: reads the cached snapshot
@@ -36,5 +40,13 @@ export class AggregatePositioningService {
       }
       throw new PositioningError(message);
     }
+  }
+
+  /** Net-bias history over the last `hours` (empty until the table is migrated). */
+  public async getHistory(
+    hours: number
+  ): Promise<{ success: true; data: PositioningHistoryPoint[] }> {
+    const data = await this.client.getHistory(hours);
+    return { success: true, data };
   }
 }

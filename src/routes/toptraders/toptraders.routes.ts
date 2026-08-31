@@ -143,4 +143,24 @@ router.get('/positioning',
   }) as RequestHandler
 );
 
+/**
+ * GET /top-traders/positioning/history?hours=168
+ * Net-bias history of the smart-money cohort (one point per hour), oldest
+ * first. Empty until the historical table is migrated; fills going forward.
+ */
+router.get('/positioning/history',
+  marketRateLimiter,
+  (async (req: Request, res: Response) => {
+    try {
+      const raw = typeof req.query.hours === 'string' ? parseInt(req.query.hours, 10) : NaN;
+      const hours = Number.isFinite(raw) ? Math.min(Math.max(raw, 1), 720) : 168;
+      const response = await positioningService.getHistory(hours);
+      res.json(response);
+    } catch (error) {
+      logDeduplicator.error('Error fetching positioning history:', { error: error instanceof Error ? error.message : String(error) });
+      res.status(500).json({ success: false, error: 'Internal server error', code: 'INTERNAL_SERVER_ERROR' });
+    }
+  }) as RequestHandler
+);
+
 export default router;
