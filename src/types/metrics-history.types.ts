@@ -8,6 +8,7 @@
 export const METRIC = {
   TOTAL_OI: 'total_oi',
   ACTIVE_USERS_24H: 'active_users_24h',
+  TOTAL_FEES_24H: 'total_fees_24h',
 } as const;
 
 export type MetricKey = (typeof METRIC)[keyof typeof METRIC];

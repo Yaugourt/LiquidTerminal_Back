@@ -28,6 +28,26 @@ function readActiveTraders(raw: unknown): { value: number; variationPct: number 
   return null;
 }
 
+/** Narrow the unwrapped total-fees payload to its numeric fields. */
+function readTotalFees(
+  raw: unknown
+): { totalFees: number; feesSpot: number; feesPerpUsdc: number } | null {
+  if (raw && typeof raw === 'object' && 'totalFees' in raw) {
+    const r = raw as { totalFees: unknown; feesSpot?: unknown; feesPerpUsdc?: unknown };
+    const totalFees = Number(r.totalFees);
+    const feesSpot = Number(r.feesSpot ?? 0);
+    const feesPerpUsdc = Number(r.feesPerpUsdc ?? 0);
+    if (Number.isFinite(totalFees)) {
+      return {
+        totalFees,
+        feesSpot: Number.isFinite(feesSpot) ? feesSpot : 0,
+        feesPerpUsdc: Number.isFinite(feesPerpUsdc) ? feesPerpUsdc : 0,
+      };
+    }
+  }
+  return null;
+}
+
 /**
  * Metrics snapshot poller.
  *
@@ -124,6 +144,21 @@ export class MetricsSnapshotClient {
         }
       } catch (err) {
         logDeduplicator.warn('Metrics: active users sample skipped', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      // Total protocol fees over the last 24h, with the spot/perp split kept.
+      try {
+        const fees = readTotalFees(await this.overview.getTotalFees24h());
+        if (fees && fees.totalFees > 0) {
+          await this.upsert(METRIC.TOTAL_FEES_24H, hour, fees.totalFees, {
+            feesSpot: fees.feesSpot,
+            feesPerpUsdc: fees.feesPerpUsdc,
+          });
+        }
+      } catch (err) {
+        logDeduplicator.warn('Metrics: total fees sample skipped', {
           error: err instanceof Error ? err.message : String(err),
         });
       }
