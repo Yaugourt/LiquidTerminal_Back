@@ -19,6 +19,7 @@ import { SSEManagerService } from '../services/liquidations/sse-manager.service'
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
 import { HLIndexerTopTradersClient } from '../clients/hypedexer/rest/toptraders/toptraders.client';
 import { AggregatePositioningClient } from '../clients/hyperliquid/positioning/aggregate-positioning.client';
+import { MetricsSnapshotClient } from '../clients/metrics/metrics-snapshot.client';
 import { HLIndexerActiveUsersClient } from '../clients/hypedexer/rest/activeusers/activeusers.client';
 import { HLIndexerBuildersClient } from '../clients/hypedexer/rest/builders/builders-list-poller.client';
 import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
@@ -186,6 +187,13 @@ export class ClientInitializerService {
       const positioningClient = AggregatePositioningClient.getInstance();
       this.clients.set('aggregatePositioning', positioningClient);
       logDeduplicator.info('Aggregate positioning client initialized successfully');
+
+      // Initialiser le poller Metrics Snapshot (échantillonne OI total + users
+      // actifs 24h toutes les 5 min → 1 point/heure en DB historique, pour les
+      // courbes que personne n'a en amont)
+      const metricsSnapshotClient = MetricsSnapshotClient.getInstance();
+      this.clients.set('metricsSnapshot', metricsSnapshotClient);
+      logDeduplicator.info('Metrics snapshot client initialized successfully');
 
       // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
       const ingestionService = LiquidationsIngestionService.getInstance();

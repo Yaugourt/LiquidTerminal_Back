@@ -69,3 +69,21 @@ model PositioningSnapshot {
   @@index([time])
   @@map("positioning_snapshots")
 }
+
+/// Generic hourly time-series of a scalar metric we sample ourselves because no
+/// upstream endpoint returns its history (total open interest, active users, ...).
+/// One row per (metric, hour); a repeated poll in the same hour overwrites via
+/// the unique key. `meta` carries optional side values for future charts.
+model MetricSnapshot {
+  id        BigInt   @id @default(autoincrement())
+  metric    String   @db.VarChar(64)
+  /// Hour bucket (floored to the hour).
+  time      DateTime @db.Timestamptz(3)
+  value     Decimal  @db.Decimal(30, 4)
+  meta      Json?
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@unique([metric, time])
+  @@index([metric, time])
+  @@map("metric_snapshots")
+}
