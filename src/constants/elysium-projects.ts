@@ -566,6 +566,30 @@ export const ELYSIUM_PROJECTS: ElysiumProject[] = [
         address: '0x848237c145928d744122797108fef43ef1a13e10',
         label: 'ElysiumNoLotRebate',
       },
+      {
+        address: '0xeece6d3985e32dcd0d59c8a95b4a2bef745f506d',
+        label: 'LaunchCampaigns (v2)',
+      },
+      {
+        address: '0x5f2e682c5b60ddedae1a624ffb6f51b15eca215d',
+        label: 'Coordinator (v2)',
+      },
+      {
+        address: '0x9fe6e374f26bc80e5001a000ed6234844b3117b6',
+        label: 'CoinFactory (v2)',
+      },
+      {
+        address: '0x6acc92ba104446facd7aebe113f907b1d0874d0b',
+        label: 'Registry (v2)',
+      },
+      {
+        address: '0xe5a2d6575c63bcf43b044ba6da509bd8d1dd9c60',
+        label: 'BondEscrow (v2)',
+      },
+      {
+        address: '0x1d2da15246f5cb5016f49da0140456a696bd60a4',
+        label: 'CreatorAccountFactory (v2)',
+      },
     ],
   },
   {
