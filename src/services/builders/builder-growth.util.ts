@@ -67,6 +67,8 @@ export interface DayAggregate {
 /**
  * Aggregate one builder-day CSV (header: time,user,coin,side,px,sz,...,builder_fee).
  * Volume is px * sz in the quote asset; fees are the published builder_fee.
+ * The very first file (2024-10-27, 8 fills) predates the builder_fee column:
+ * its fees count as zero, users and volume still count.
  */
 export function aggregateCsv(csv: string): DayAggregate {
   const lines = csv.split('\n');
@@ -75,7 +77,7 @@ export function aggregateCsv(csv: string): DayAggregate {
   const iPx = header.indexOf('px');
   const iSz = header.indexOf('sz');
   const iFee = header.indexOf('builder_fee');
-  if (iUser < 0 || iPx < 0 || iSz < 0 || iFee < 0) {
+  if (iUser < 0 || iPx < 0 || iSz < 0) {
     throw new Error(`Unexpected builder fills header: ${lines[0]?.slice(0, 200)}`);
   }
 
@@ -91,7 +93,7 @@ export function aggregateCsv(csv: string): DayAggregate {
     if (!user || !user.startsWith('0x')) continue;
     const px = Number(cols[iPx]);
     const sz = Number(cols[iSz]);
-    const fee = Number(cols[iFee]);
+    const fee = iFee < 0 ? 0 : Number(cols[iFee]);
     if (Number.isFinite(px) && Number.isFinite(sz)) volume += px * sz;
     if (Number.isFinite(fee)) fees += fee;
     fills += 1;

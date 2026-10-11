@@ -46,6 +46,12 @@ describe('builder-growth.util', () => {
     expect(agg.users).toHaveLength(2);
   });
 
+  it('counts zero fees on the first files, which have no builder_fee column', () => {
+    const agg = aggregateCsv('time,user,coin,side,px,sz\n2024-10-27T10:00:00Z,0x8638fa925e9662e9cf3119176e47563256c049ab,ETH,Bid,10,2\n');
+    expect(agg).toMatchObject({ fills: 1, fees: 0, volume: 20 });
+    expect(agg.users).toHaveLength(1);
+  });
+
   it('refuses a file whose header changed', () => {
     expect(() => aggregateCsv('time,trader,px\n')).toThrow(/header/);
   });
