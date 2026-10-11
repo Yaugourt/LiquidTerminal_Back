@@ -46,3 +46,15 @@ export const buildersStatsQuerySchema = z.object({
 
 export type BuildersListQueryInput = z.infer<typeof buildersListQuerySchema>;
 export type BuildersStatsQueryInput = z.infer<typeof buildersStatsQuerySchema>;
+
+/**
+ * Schema for builder code growth (daily series per builder)
+ * GET /builders/growth
+ */
+export const buildersGrowthQuerySchema = z.object({
+  query: z.object({
+    metric: z.enum(['fees', 'users', 'newUsers', 'volume']).optional().default('fees'),
+    range: z.enum(['30d', '90d', '180d', 'all']).optional().default('90d'),
+  }),
+  params: z.object({}),
+});

@@ -21,6 +21,7 @@ import { HLIndexerTopTradersClient } from '../clients/hypedexer/rest/toptraders/
 import { AggregatePositioningClient } from '../clients/hyperliquid/positioning/aggregate-positioning.client';
 import { MetricsSnapshotClient } from '../clients/metrics/metrics-snapshot.client';
 import { ElysiumIngestionService } from '../services/elysium/elysium-ingestion.service';
+import { BuilderGrowthService } from '../services/builders/builder-growth.service';
 import { ElysiumAnalyticsService } from '../services/elysium/elysium-analytics.service';
 import { ElysiumEcosystemService } from '../services/elysium/elysium-ecosystem.service';
 import { HLIndexerActiveUsersClient } from '../clients/hypedexer/rest/activeusers/activeusers.client';
@@ -209,6 +210,11 @@ export class ClientInitializerService {
         void ElysiumAnalyticsService.getInstance().warmDefaults();
       }, 30_000).unref?.();
       logDeduplicator.info('Elysium ingestion service initialized successfully');
+
+      // Builder code growth (Hyperliquid per-builder daily fill files -> historical DB).
+      // startPolling() is a no-op when BUILDER_GROWTH_ENABLED=false.
+      this.clients.set('builderGrowth', BuilderGrowthService.getInstance());
+      logDeduplicator.info('Builder growth service initialized successfully');
 
       // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
       const ingestionService = LiquidationsIngestionService.getInstance();

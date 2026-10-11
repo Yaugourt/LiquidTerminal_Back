@@ -324,3 +324,55 @@ model ElysiumIngestState {
 
   @@map("elysium_ingest_state")
 }
+
+// ============================================================================
+// Builder code growth
+// Daily revenue and users per builder, aggregated from the per-builder daily
+// fill files Hyperliquid publishes (stats-data.hyperliquid.xyz/Mainnet/
+// builder_fills/<builder>/<YYYYMMDD>.csv.lz4) by BuilderGrowthService.
+// ============================================================================
+
+/// A builder whose daily files we ingest, with its own resume cursor.
+model BuilderTracked {
+  id           Int       @id @default(autoincrement())
+  address      String    @unique @db.VarChar(42)
+  name         String?   @db.VarChar(64)
+  /// Discovery score: sampled compressed bytes of its daily files (activity proxy).
+  score        BigInt    @default(0)
+  /// Last day fully ingested (UTC date); null before the first file.
+  cursor       DateTime? @db.Date
+  backfillDone Boolean   @default(false) @map("backfill_done")
+  lastError    String?   @map("last_error") @db.Text
+  addedAt      DateTime  @default(now()) @map("added_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("builder_tracked")
+}
+
+/// One builder-day aggregate. Days without a file have no row (zero activity).
+model BuilderDaily {
+  builderId Int      @map("builder_id")
+  day       DateTime @db.Date
+  fees      Decimal  @db.Decimal(30, 6)
+  volume    Decimal  @db.Decimal(30, 2)
+  fills     Int
+  users     Int
+  newUsers  Int      @map("new_users")
+
+  @@id([builderId, day])
+  @@index([day])
+  @@map("builder_daily")
+}
+
+/// First day each user traded through a builder, to count new users per day.
+/// `userKey` is the first 8 bytes of the address as a signed int8 (addresses
+/// are uniformly random, so collisions within one builder are negligible).
+model BuilderUser {
+  builderId Int      @map("builder_id")
+  userKey   BigInt   @map("user_key")
+  firstDay  DateTime @map("first_day") @db.Date
+
+  @@id([builderId, userKey])
+  @@index([builderId, firstDay])
+  @@map("builder_user")
+}

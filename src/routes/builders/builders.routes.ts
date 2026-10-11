@@ -3,7 +3,9 @@ import { BuildersService } from '../../services/builders/builders.service';
 import { BuildersQueryParams, BuildersError, BuildersSortField, BuildersSortOrder } from '../../types/builders.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
-import { buildersListQuerySchema, buildersStatsQuerySchema } from '../../schemas/builders.schema';
+import { buildersListQuerySchema, buildersStatsQuerySchema, buildersGrowthQuerySchema } from '../../schemas/builders.schema';
+import { validateGetRequest } from '../../middleware/validation';
+import { BuilderGrowthService, GrowthMetric, GrowthRange } from '../../services/builders/builder-growth.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
@@ -107,6 +109,31 @@ router.get('/stats',
         });
       }
 
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+        code: 'INTERNAL_SERVER_ERROR'
+      });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * GET /builders/growth
+ * Daily revenue / users / new users / volume per builder, from Hyperliquid's
+ * per-builder daily fill files.
+ */
+router.get('/growth',
+  marketRateLimiter,
+  validateGetRequest(buildersGrowthQuerySchema),
+  (async (req: Request, res: Response) => {
+    try {
+      const metric = (req.query.metric ?? 'fees') as GrowthMetric;
+      const range = (req.query.range ?? '90d') as GrowthRange;
+      const data = await BuilderGrowthService.getInstance().getGrowth(metric, range);
+      res.json({ success: true, data });
+    } catch (error) {
+      logDeduplicator.error('Error fetching builder growth:', { error: error instanceof Error ? error.message : String(error) });
       res.status(500).json({
         success: false,
         error: 'Internal server error',
