@@ -2,11 +2,32 @@ import { prismaHistorical } from '../../core/prisma.historical.service';
 import { BRIDGE_TX_TYPES } from '../../services/elysium/elysium-ingest.util';
 import type { BridgeRow, TokenRow, TxRow } from '../../services/elysium/elysium-ingest.util';
 import type { DexPoolRow, DexSwapRow } from '../../services/elysium/elysium-dex.util';
+import type {
+  GraduationRow,
+  LaunchRow,
+  LaunchTradeRow,
+} from '../../services/elysium/elysium-launchpad.util';
 
 /** Constant SQL list of the bridge tx types (no user input involved). */
 const BRIDGE_TYPES_SQL = BRIDGE_TX_TYPES.map((t) => `'${t}'`).join(', ');
 
-export type ElysiumStream = 'tx' | 'bridge' | 'tokens' | 'dex' | 'methods' | 'tokenstats';
+export type ElysiumStream = 'tx' | 'bridge' | 'tokens' | 'dex' | 'methods' | 'tokenstats' | 'launchpad' | 'launchstats';
+
+export interface LaunchMarketDbRow {
+  token: string;
+  launchpad: string;
+  kind: string;
+  curve: string | null;
+  pool: string | null;
+  quote: string;
+}
+
+export interface LaunchStatsTarget {
+  token: string;
+  creator: string | null;
+  curve: string | null;
+  pool: string | null;
+}
 
 export interface ElysiumIngestStateRow {
   stream: string;
@@ -358,6 +379,111 @@ export class ElysiumIngestRepository {
   }
 
   /** Records the last error without moving the watermark. */
+  // ---------------------------------------------------------------------------
+  // Launchpads
+  // ---------------------------------------------------------------------------
+
+  /** Inserts launched tokens (a token launches once, so conflicts are ignored). */
+  public async insertLaunches(rows: LaunchRow[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    const result = await prismaHistorical.$queryRawUnsafe<Array<{ n: number }>>(
+      `
+      WITH ins AS (
+        INSERT INTO elysium_launch (token, launchpad, kind, creator, created_at, block_number, tx_hash,
+          curve, pool, quote, name, symbol)
+        SELECT token, launchpad, kind, creator, created_at, block_number, tx_hash, curve, pool, quote,
+          name, symbol
+        FROM jsonb_to_recordset($1::jsonb) AS r(
+          token text, launchpad text, kind text, creator text, created_at timestamptz,
+          block_number bigint, tx_hash text, curve text, pool text, quote text, name text, symbol text)
+        ON CONFLICT (token) DO NOTHING
+        RETURNING 1
+      )
+      SELECT count(*)::int AS n FROM ins
+      `,
+      JSON.stringify(rows)
+    );
+    return result[0]?.n ?? 0;
+  }
+
+  /** Every known launch market, for the trade decoders. */
+  public async listLaunchMarkets(): Promise<LaunchMarketDbRow[]> {
+    return prismaHistorical.$queryRawUnsafe<LaunchMarketDbRow[]>(
+      `SELECT token, launchpad, kind, curve, pool, quote FROM elysium_launch`
+    );
+  }
+
+  /** Marks curve launches as graduated (first graduation time wins). */
+  public async markGraduated(rows: GraduationRow[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    return prismaHistorical.$executeRawUnsafe(
+      `
+      UPDATE elysium_launch l SET graduated_at = g.graduated_at
+      FROM (
+        SELECT curve, min(graduated_at) AS graduated_at
+        FROM jsonb_to_recordset($1::jsonb) AS r(curve text, graduated_at timestamptz)
+        GROUP BY curve
+      ) g
+      WHERE l.curve = g.curve AND l.graduated_at IS NULL
+      `,
+      JSON.stringify(rows)
+    );
+  }
+
+  /** Inserts launchpad trades, keyed by (tx_hash, log_index). */
+  public async insertLaunchTrades(rows: LaunchTradeRow[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    const result = await prismaHistorical.$queryRawUnsafe<Array<{ n: number }>>(
+      `
+      WITH ins AS (
+        INSERT INTO elysium_launch_trade (tx_hash, log_index, token, venue, block_time, block_number,
+          trader, is_buy, quote_amount, token_amount, price)
+        SELECT tx_hash, log_index, token, venue, block_time, block_number, trader, is_buy,
+          quote_amount, token_amount, price
+        FROM jsonb_to_recordset($1::jsonb) AS r(
+          tx_hash text, log_index int, token text, venue text, block_time timestamptz,
+          block_number bigint, trader text, is_buy boolean, quote_amount numeric,
+          token_amount numeric, price float8)
+        ON CONFLICT (tx_hash, log_index) DO NOTHING
+        RETURNING 1
+      )
+      SELECT count(*)::int AS n FROM ins
+      `,
+      JSON.stringify(rows)
+    );
+    return result[0]?.n ?? 0;
+  }
+
+  /**
+   * Launches whose holder stats are missing or older than `maxAgeS`, oldest
+   * first. The creator falls back to the launch tx sender (Signal curves).
+   */
+  public async listLaunchesForStats(limit: number, maxAgeS: number): Promise<LaunchStatsTarget[]> {
+    return prismaHistorical.$queryRawUnsafe<LaunchStatsTarget[]>(
+      `
+      SELECT l.token, coalesce(l.creator, t.from_addr) AS creator, l.curve, l.pool
+      FROM elysium_launch l
+      LEFT JOIN elysium_tx t ON t.tx_hash = l.tx_hash
+      WHERE l.stats_at IS NULL OR l.stats_at < now() - make_interval(secs => $2::int)
+      ORDER BY l.stats_at ASC NULLS FIRST, l.created_at DESC
+      LIMIT $1::int
+      `,
+      limit,
+      maxAgeS
+    );
+  }
+
+  public async updateLaunchStats(token: string, holders: number, top10Pct: number | null, devPct: number | null): Promise<void> {
+    await prismaHistorical.$executeRawUnsafe(
+      `UPDATE elysium_launch SET holders = $2::int, top10_pct = $3::float8, dev_pct = $4::float8, stats_at = now()
+       WHERE token = $1`,
+      token,
+      holders,
+      top10Pct,
+      devPct
+    );
+  }
+
   public async recordError(stream: ElysiumStream, message: string): Promise<void> {
     await prismaHistorical.$executeRawUnsafe(
       `INSERT INTO elysium_ingest_state (stream, last_error, updated_at)

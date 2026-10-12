@@ -143,6 +143,54 @@ export class CacheService {
   }
   
   /**
+   * Stale-while-revalidate read for slow, recomputable aggregates. The last
+   * value is served at once; once it is older than `freshS`, one caller (Redis
+   * lock) recomputes it in the background while everyone keeps the old value.
+   * Only a cold key (never computed, or idle past `keepS`) waits for `fetchFn`.
+   */
+  async getOrRefresh<T>(key: string, fetchFn: () => Promise<T>, freshS: number, keepS: number): Promise<T> {
+    if (!redisService.isHealthy()) return fetchFn();
+    const swrKey = `${key}:swr`;
+    const store = async (value: T): Promise<void> => {
+      await redisService.set(swrKey, JSON.stringify({ at: Date.now(), value }), keepS);
+    };
+    try {
+      const raw = await redisService.get(swrKey);
+      if (raw) {
+        const entry = JSON.parse(raw) as { at: number; value: T };
+        if (Date.now() - entry.at > freshS * 1000) {
+          const lockKey = `lock:${swrKey}`;
+          const acquired = await redisService.getClient().set(lockKey, '1', 'EX', 120, 'NX');
+          if (acquired) {
+            void fetchFn()
+              .then(store)
+              .catch((error) => {
+                logDeduplicator.warn('Background cache refresh failed', {
+                  key,
+                  errorType: error instanceof Error ? error.name : typeof error,
+                });
+              })
+              .finally(() => void redisService.delete(lockKey));
+          }
+        }
+        return entry.value;
+      }
+      // Cold key: compute once behind the regular stampede lock, then keep it warm.
+      return await this.getOrSet(`${key}:cold`, async () => {
+        const value = await fetchFn();
+        await store(value);
+        return value;
+      }, freshS);
+    } catch (error) {
+      logDeduplicator.warn('Cache error, falling back to direct fetch', {
+        key,
+        errorMessage: error instanceof Error ? error.message : 'Unknown error',
+      });
+      return fetchFn();
+    }
+  }
+
+  /**
    * Invalide une clé de cache
    * @param key Clé de cache à invalider
    */

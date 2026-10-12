@@ -198,6 +198,16 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
     return data as Record<string, unknown>;
   }
 
+  /** Largest holders of a token, by balance (share is 0..1 of supply), for the ingestion service. */
+  public async fetchIngestTokenHolders(address: string, limit: number): Promise<unknown[]> {
+    if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error('Elysium ingest: invalid token address');
+    const data = await this.ingestCircuitBreaker.execute(() =>
+      this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}/tokens/${address}/holders${buildQuery({ limit, offset: 0 })}`)
+    );
+    if (!Array.isArray(data)) throw new Error('Elysium ingest: expected a holder array');
+    return data;
+  }
+
   /**
    * One page of an upstream list for the ingestion service. Returns the bare
    * row array (the envelope is peeled); callers page until a short page.

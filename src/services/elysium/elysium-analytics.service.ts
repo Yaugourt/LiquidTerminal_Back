@@ -14,6 +14,8 @@ import { methodName } from './elysium-dex.util';
 import { errorCategory } from './elysium-analytics.util';
 
 const CACHE_TTL_S = 60;
+/** How long a computed value is kept to be served while it refreshes. */
+const KEEP_S = 6 * 3600;
 const CACHE_PREFIX = 'elysium:analytics';
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -52,8 +54,44 @@ export class ElysiumAnalyticsService {
     return ElysiumAnalyticsService.instance;
   }
 
+  /**
+   * Served from the last computed value and refreshed in the background once
+   * older than CACHE_TTL_S: the heavier aggregates take seconds over the full
+   * tx table, and no visitor should wait for them.
+   */
   private cached<T>(name: string, params: string, fn: () => Promise<T>): Promise<T> {
+    return cacheService.getOrRefresh<T>(`${CACHE_PREFIX}:${name}:${params}`, fn, CACHE_TTL_S, KEEP_S);
+  }
+
+  /** Plain 60s cache for cheap or per-address reads, where a stale answer would mislead. */
+  private cachedFresh<T>(name: string, params: string, fn: () => Promise<T>): Promise<T> {
     return cacheService.getOrSet<T>(`${CACHE_PREFIX}:${name}:${params}`, fn, CACHE_TTL_S);
+  }
+
+  /**
+   * Computes the views the Elysium pages open on, so the first visitor after a
+   * deploy does not wait for them. Sequential to keep the DB load flat.
+   */
+  public async warmDefaults(): Promise<void> {
+    const jobs: Array<() => Promise<unknown>> = [
+      () => this.getDeployments(14),
+      () => this.getContracts('24h'),
+      () => this.getContracts('7d'),
+      () => this.getUsers(14),
+      () => this.getBridge(14),
+      () => this.getEconomics(14),
+      () => this.getMethods('24h'),
+      () => this.getDex(14),
+      () => this.getTokens(14),
+      () => this.getFees('7d'),
+    ];
+    for (const job of jobs) {
+      try {
+        await job();
+      } catch {
+        // A failed warm-up only means the first visitor computes it.
+      }
+    }
   }
 
   /** First day of a `days`-long UTC range ending today. */
@@ -67,7 +105,7 @@ export class ElysiumAnalyticsService {
   // ---------------------------------------------------------------------------
 
   public getStatus(): Promise<{ streams: Array<Record<string, unknown>> }> {
-    return this.cached('status', 'v1', async () => {
+    return this.cachedFresh('status', 'v1', async () => {
       const rows = await ElysiumIngestRepository.getInstance().listStates();
       const now = Date.now();
       return {
@@ -466,7 +504,7 @@ export class ElysiumAnalyticsService {
    * (7d) and 30 min (30d): the 30d window scans every tx of the month.
    */
   public getFees(window: FeesWindow): Promise<unknown> {
-    return cacheService.getOrSet(
+    return cacheService.getOrRefresh(
       `${CACHE_PREFIX}:fees:${window}`,
       async () => {
         const spanMs = (window === '30d' ? 30 : window === '7d' ? 7 : 1) * DAY_MS;
@@ -586,7 +624,8 @@ export class ElysiumAnalyticsService {
         };
       },
       // The window sets the scan size: ~0.5M txs a day, so 30d reads ~15M rows.
-      window === '30d' ? 1800 : window === '7d' ? 600 : 300
+      window === '30d' ? 1800 : window === '7d' ? 600 : 300,
+      24 * 3600
     );
   }
 
@@ -980,7 +1019,7 @@ export class ElysiumAnalyticsService {
   /** Tags and counts for one address, computed from the ingested tables. */
   public getAddress(address: string): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.cached('address', a, async () => {
+    return this.cachedFresh('address', a, async () => {
       const now = new Date();
       const since24h = new Date(now.getTime() - DAY_MS);
       const [seen, act, net, deploys, dex, bridge, methods, names] = await Promise.all([
@@ -1062,7 +1101,7 @@ export class ElysiumAnalyticsService {
    */
   public getContract(address: string): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.cached('contract', a, async () => {
+    return this.cachedFresh('contract', a, async () => {
       const since7d = new Date(Date.now() - 7 * DAY_MS);
       const [dep, token, usage, allTime, methods, asPool, asFactory, inPools, names] = await Promise.all([
         prismaHistorical.$queryRaw<Array<{ deployer: string; deploy_tx: string; deployed_at: number; block_number: bigint }>>`

@@ -42,6 +42,16 @@ jest.mock('../../../src/services/elysium/elysium-analytics.service', () => ({
   ElysiumAnalyticsService: { getInstance: () => mockService },
 }));
 
+// The ecosystem service opens the historical database at import time.
+const mockEcosystem = {
+  getProjects: jest.fn().mockResolvedValue({ projects: [] }),
+  getLaunchpadTokens: jest.fn().mockResolvedValue({ tokens: [] }),
+};
+
+jest.mock('../../../src/services/elysium/elysium-ecosystem.service', () => ({
+  ElysiumEcosystemService: { getInstance: () => mockEcosystem },
+}));
+
 import elysiumAnalyticsRoutes from '../../../src/routes/elysium/elysium-analytics.routes';
 
 function hasBodyValidationError(body: unknown): boolean {

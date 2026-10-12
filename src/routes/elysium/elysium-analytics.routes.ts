@@ -11,10 +11,12 @@ import {
   elysiumAnalyticsStatusSchema,
 } from '../../schemas/elysium-analytics.schema';
 import { ElysiumAnalyticsService } from '../../services/elysium/elysium-analytics.service';
+import { ElysiumEcosystemService } from '../../services/elysium/elysium-ecosystem.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = Router();
 const service = ElysiumAnalyticsService.getInstance();
+const ecosystem = ElysiumEcosystemService.getInstance();
 
 type QuerySchema = z.ZodObject<{ query: z.ZodTypeAny; params: z.ZodTypeAny }>;
 
@@ -90,6 +92,14 @@ register('/fees', elysiumAnalyticsFeesSchema, 'ELYSIUM_ANALYTICS_FEES_ERROR', (q
 register('/dex', elysiumAnalyticsDaysSchema, 'ELYSIUM_ANALYTICS_DEX_ERROR', (q) => service.getDex(q.days));
 
 register('/tokens', elysiumAnalyticsDaysSchema, 'ELYSIUM_ANALYTICS_TOKENS_ERROR', (q) => service.getTokens(q.days));
+
+register('/ecosystem', elysiumAnalyticsStatusSchema, 'ELYSIUM_ANALYTICS_ECOSYSTEM_ERROR', () =>
+  ecosystem.getProjects()
+);
+
+register('/launchpads', elysiumAnalyticsStatusSchema, 'ELYSIUM_ANALYTICS_LAUNCHPADS_ERROR', () =>
+  ecosystem.getLaunchpadTokens()
+);
 
 // Any address is a fresh cache key and ~10 queries: tighter per-IP limit.
 register(
