@@ -32,39 +32,56 @@ export interface GrowthSnapshot {
   metric: GrowthMetric;
   range: GrowthRange;
   days: string[];
+  /** The top builders over the window, largest first. */
   builders: GrowthBuilder[];
+  /** Every other builder with activity in the window, summed. */
+  others: { count: number; total: number; series: number[] } | null;
+  /** All builders summed, one value per day. */
+  total: number[];
   coverage: {
     tracked: number;
+    /** Builders with a non-zero value in the window. */
+    active: number;
     /** Builders whose history is still being ingested. */
     backfilling: number;
     lastDay: string | null;
+    /** Tracked share of all builder-code volume over 30 days; null when unknown. */
+    volumeShare30d: number | null;
   };
   computedAt: string;
 }
 
 const LOCK_KEY = 'poll:builder-growth';
-const LOCK_TTL_S = 330;
+const LOCK_TTL_S = 420;
 /** Work budget per tick so the lock never outlives its TTL. */
 const TICK_BUDGET_MS = 270_000;
 const TICK_INTERVAL_MS = 5 * 60_000;
 /** Gap between ticks while history is still being ingested. */
 const BACKFILL_INTERVAL_MS = 30_000;
 /** Builders ingested in parallel; each one walks its days in order. */
-const INGEST_CONCURRENCY = 4;
+const INGEST_CONCURRENCY = 8;
 const DISCOVERY_CONCURRENCY = 32;
 const FETCH_TIMEOUT_MS = 60_000;
 
-/** Builders kept from the historical sample (catches past leaders). */
-const TRACK_TOP_HISTORIC = 30;
-/** Builders kept from the current 30-day leaderboard by builder fees. */
-const TRACK_TOP_CURRENT = 25;
-const DISCOVERY_KEY = 'builder-growth:discovered-at';
+/** Builders added from the current 30-day leaderboard by builder fees (upstream max). */
+const TRACK_TOP_CURRENT = 100;
+/** Versioned so a change in the tracking rule triggers a new discovery on deploy. */
+const DISCOVERY_KEY = 'builder-growth:discovered-at:v2';
 const DISCOVERY_EVERY_S = 7 * 86_400;
 const CURRENT_TOP_KEY = 'builder-growth:current-top-at';
 const CURRENT_TOP_EVERY_S = 86_400;
 
 const SNAPSHOT_FRESH_S = 600;
 const SNAPSHOT_KEEP_S = 86_400;
+/** Builders returned with their own series; the rest come back summed. */
+const TOP_BUILDERS = 12;
+/** Whitelisted SQL column per metric (interpolated into the query). */
+const METRIC_COLUMN: Record<GrowthMetric, string> = {
+  fees: 'fees',
+  users: 'users',
+  newUsers: 'new_users',
+  volume: 'volume',
+};
 const RANGE_DAYS: Record<Exclude<GrowthRange, 'all'>, number> = { '30d': 30, '90d': 90, '180d': 180 };
 
 interface RegistryRow {
@@ -195,9 +212,11 @@ export class BuilderGrowthService {
   }
 
   /**
-   * Sample every registered builder on the 15th of every other month (HEAD requests:
-   * the compressed size of a day file tracks its activity) and keep the
-   * builders with the largest sampled total, plus the current leaders.
+   * Sample every registered builder on the 15th of every other month (HEAD
+   * requests: the compressed size of a day file tracks its activity) and track
+   * every builder seen active, plus the current leaders. A new builder starts
+   * at the sample before its first active one, which skips the long run of
+   * empty days before it went live.
    */
   private async discover(): Promise<void> {
     const registry = asArray(await this.builders.listBuilders())
@@ -213,23 +232,31 @@ export class BuilderGrowthService {
     sampleDays.push(last);
 
     const scores = new Map<string, number>();
+    const firstHit = new Map<string, number>();
     const probes = registry.flatMap((r) => sampleDays.map((day) => ({ address: r.address, day })));
     await pool(probes, DISCOVERY_CONCURRENCY, async ({ address, day }) => {
       try {
         const res = await fetch(fileUrl(address, day), { method: 'HEAD', signal: AbortSignal.timeout(20_000) });
         if (!res.ok) return;
         const size = Number(res.headers.get('content-length') ?? 0);
-        if (size > 0) scores.set(address, (scores.get(address) ?? 0) + size);
+        if (size > 0) {
+          scores.set(address, (scores.get(address) ?? 0) + size);
+          const i = sampleDays.indexOf(day);
+          if (i < (firstHit.get(address) ?? Infinity)) firstHit.set(address, i);
+        }
       } catch {
         // A failed probe only lowers this builder's sampled score.
       }
     });
 
-    const historic = [...scores.entries()].sort((a, b) => b[1] - a[1]).slice(0, TRACK_TOP_HISTORIC);
-    for (const [address, score] of historic) {
+    const active = [...scores.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [address, score] of active) {
+      const hit = firstHit.get(address) ?? 0;
+      // Cursor = last day already covered, so ingestion starts at the previous sample.
+      const cursor = hit > 0 ? parseDay(addDays(sampleDays[hit - 1], -1)) : null;
       await prismaHistorical.builderTracked.upsert({
         where: { address },
-        create: { address, name: names.get(address) ?? null, score: BigInt(score) },
+        create: { address, name: names.get(address) ?? null, score: BigInt(score), cursor },
         update: { name: names.get(address) ?? undefined, score: BigInt(score) },
       });
     }
@@ -237,8 +264,7 @@ export class BuilderGrowthService {
     logDeduplicator.info('Builder growth discovery done', {
       registry: registry.length,
       probes: probes.length,
-      active: scores.size,
-      kept: historic.length,
+      active: active.length,
     });
   }
 
@@ -338,7 +364,7 @@ export class BuilderGrowthService {
 
   public async getGrowth(metric: GrowthMetric, range: GrowthRange): Promise<GrowthSnapshot> {
     return cacheService.getOrRefresh(
-      `builder-growth:snapshot:${metric}:${range}`,
+      `builder-growth:snapshot:v2:${metric}:${range}`,
       () => this.computeGrowth(metric, range),
       SNAPSHOT_FRESH_S,
       SNAPSHOT_KEEP_S
@@ -346,55 +372,106 @@ export class BuilderGrowthService {
   }
 
   private async computeGrowth(metric: GrowthMetric, range: GrowthRange): Promise<GrowthSnapshot> {
-    const tracked = await prismaHistorical.builderTracked.findMany({
-      select: { id: true, address: true, name: true, backfillDone: true, cursor: true },
-    });
+    const [tracked, backfilling, caughtUp] = await Promise.all([
+      prismaHistorical.builderTracked.count(),
+      prismaHistorical.builderTracked.count({ where: { backfillDone: false } }),
+      prismaHistorical.builderTracked.aggregate({ _max: { cursor: true } }),
+    ]);
     // The window always ends on the last published day, so a partial backfill
     // shows as missing history rather than as a window stuck in the past.
     const end = lastPublishedDay();
-    const lastDay = tracked.some((t) => t.cursor && isoDay(t.cursor) >= end) ? end : null;
+    const maxCursor = caughtUp._max.cursor ? isoDay(caughtUp._max.cursor) : null;
+    const lastDay = maxCursor && maxCursor >= end ? end : null;
+
     const start = range === 'all' ? BUILDER_FILLS_GENESIS : addDays(end, -(RANGE_DAYS[range] - 1));
     const days = daysBetween(start, end);
     const index = new Map(days.map((d, i) => [d, i]));
+    const column = METRIC_COLUMN[metric];
 
-    const rows = await prismaHistorical.builderDaily.findMany({
-      where: { day: { gte: parseDay(start), lte: parseDay(end) } },
-      select: { builderId: true, day: true, fees: true, volume: true, users: true, newUsers: true },
+    // Rank every builder over the window, then pull daily series for the top N
+    // and one summed series for the rest (-1), all in SQL.
+    const totals = await prismaHistorical.$queryRawUnsafe<Array<{ builder_id: number; total: number }>>(
+      `SELECT builder_id, sum(${column})::float8 AS total FROM builder_daily
+        WHERE day BETWEEN $1::date AND $2::date GROUP BY builder_id HAVING sum(${column}) > 0 ORDER BY total DESC`,
+      start,
+      end
+    );
+    const topIds = totals.slice(0, TOP_BUILDERS).map((t) => t.builder_id);
+    const rows = await prismaHistorical.$queryRawUnsafe<Array<{ bid: number; day: string; v: number }>>(
+      `SELECT CASE WHEN builder_id = ANY($3::int[]) THEN builder_id ELSE -1 END AS bid, day::text AS day, sum(${column})::float8 AS v
+         FROM builder_daily WHERE day BETWEEN $1::date AND $2::date GROUP BY 1, 2`,
+      start,
+      end,
+      topIds
+    );
+    const meta = await prismaHistorical.builderTracked.findMany({
+      where: { id: { in: topIds } },
+      select: { id: true, address: true, name: true },
     });
+    const metaById = new Map(meta.map((m) => [m.id, m]));
 
-    const byId = new Map<number, number[]>();
+    const seriesById = new Map<number, number[]>();
+    const total = new Array<number>(days.length).fill(0);
     for (const r of rows) {
-      const i = index.get(isoDay(r.day));
+      const i = index.get(r.day);
       if (i === undefined) continue;
-      let series = byId.get(r.builderId);
+      let series = seriesById.get(r.bid);
       if (!series) {
         series = new Array<number>(days.length).fill(0);
-        byId.set(r.builderId, series);
+        seriesById.set(r.bid, series);
       }
-      series[i] =
-        metric === 'fees' ? Number(r.fees) : metric === 'volume' ? Number(r.volume) : metric === 'users' ? r.users : r.newUsers;
+      series[i] += r.v;
+      total[i] += r.v;
     }
 
-    const builders: GrowthBuilder[] = tracked
-      .filter((b) => byId.has(b.id))
-      .map((b) => {
-        const series = byId.get(b.id) as number[];
-        return { address: b.address, name: b.name, total: series.reduce((s, v) => s + v, 0), series };
-      })
-      .filter((b) => b.total > 0)
-      .sort((a, b) => b.total - a.total);
+    const builders: GrowthBuilder[] = topIds.flatMap((id, rank) => {
+      const m = metaById.get(id);
+      if (!m) return [];
+      return [{ address: m.address, name: m.name, total: totals[rank].total, series: seriesById.get(id) ?? new Array<number>(days.length).fill(0) }];
+    });
+    const rest = totals.slice(TOP_BUILDERS);
+    const others =
+      rest.length > 0
+        ? {
+            count: rest.length,
+            total: rest.reduce((sum, t) => sum + t.total, 0),
+            series: seriesById.get(-1) ?? new Array<number>(days.length).fill(0),
+          }
+        : null;
 
     return {
       metric,
       range,
       days,
       builders,
+      others,
+      total,
       coverage: {
-        tracked: tracked.length,
-        backfilling: tracked.filter((b) => !b.backfillDone).length,
+        tracked,
+        active: totals.length,
+        backfilling,
         lastDay,
+        volumeShare30d: await this.volumeShare30d(end),
       },
       computedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Share of all builder-code volume over the last 30 days that the tracked
+   * builders account for, against the provider's global builder stats.
+   * Null when the provider is unavailable.
+   */
+  private async volumeShare30d(end: string): Promise<number | null> {
+    try {
+      const raw = (await this.builders.getGlobalStats('30d')) as { current?: { totalVolume?: unknown } } | null;
+      const global = Number(raw?.current?.totalVolume);
+      if (!Number.isFinite(global) || global <= 0) return null;
+      const [{ v }] = await prismaHistorical.$queryRaw<Array<{ v: number | null }>>`
+        SELECT sum(volume)::float8 AS v FROM builder_daily WHERE day BETWEEN ${addDays(end, -29)}::date AND ${end}::date`;
+      return v == null ? null : Math.min(1, v / global);
+    } catch {
+      return null;
+    }
   }
 }
