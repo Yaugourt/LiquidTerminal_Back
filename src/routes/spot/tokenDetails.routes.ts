@@ -5,6 +5,7 @@ import {
   TokenDetailsUnavailableError,
   UnknownTokenIdError,
 } from '../../services/spot/tokenDetails.service';
+import { rateLimitKeyForIp } from '../../utils/client-ip';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 const router = express.Router();
@@ -30,7 +31,9 @@ router.get('/:tokenId',
     }
 
     try {
-      const { details, lastUpdate } = await tokenDetailsService.getTokenDetails(tokenId);
+      // Budget key for the caller: its IP, or its /64 on IPv6 (`trust proxy` is set in app.ts).
+      const client = rateLimitKeyForIp(req.ip || req.socket.remoteAddress || 'unknown');
+      const { details, lastUpdate } = await tokenDetailsService.getTokenDetails(tokenId, client);
       res.json({ success: true, data: details, lastUpdate });
     } catch (error) {
       if (error instanceof UnknownTokenIdError) {

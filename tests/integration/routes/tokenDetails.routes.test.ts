@@ -64,7 +64,7 @@ describe('GET /market/token-details/:tokenId', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: details, lastUpdate: 1_800_000_000_000 });
-    expect(getTokenDetails).toHaveBeenCalledWith('0x0D01DC56DCAACA66AD901C959B4011EC');
+    expect(getTokenDetails).toHaveBeenCalledWith('0x0D01DC56DCAACA66AD901C959B4011EC', expect.any(String));
   });
 
   it('answers 404 for an id that is not a spot token', async () => {

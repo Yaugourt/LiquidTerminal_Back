@@ -117,7 +117,12 @@ export function summarizeTokenDetails(raw: RawTokenDetails): TokenDetailsSummary
  * FRESH_MS whatever the number of readers. Only listed spot tokens are read,
  * and at most MAX_READS_PER_MINUTE times a minute in all: a crawl through
  * every token id can't spend the backend's Hyperliquid weight budget (20 per
- * read, 1200 a minute per IP).
+ * read, 1200 a minute per IP). Within that budget:
+ * - refreshes of held summaries leave RESERVED_FIRST_READS to first reads:
+ *   a held summary can wait (it is served stale for MAX_STALE_MS), a token
+ *   page with nothing to show can't;
+ * - one client starts at most MAX_FIRST_READS_PER_CLIENT first reads a
+ *   minute, so a single crawler can't leave the other pages with nothing.
  */
 export class TokenDetailsService {
   private static instance: TokenDetailsService;
@@ -127,8 +132,21 @@ export class TokenDetailsService {
   private static readonly MAX_STALE_MS = 10 * 60_000;
   /** Tokens whose summary is held at once; the least recently read one goes first. */
   private static readonly MAX_TOKENS = 64;
-  /** Hyperliquid reads allowed per minute, all tokens together. */
-  private static readonly MAX_READS_PER_MINUTE = 20;
+  /**
+   * Hyperliquid reads allowed per minute, all tokens together (weight 20
+   * each). Worst case of the server IP, out of 1,200 a minute: the pollers
+   * spend ~720 (spot, perp, validatorSummaries and globalStats at 20 every
+   * 10 s = 480, HLP vault 60, positioning up to 160, reserve-yield ledger
+   * 20), the bridge-reserve scan up to 180, the TWAP metas and the AF running
+   * day ~40: 940, plus 10 x 20 = 200 here → 1,140. (The AF buyback backfill,
+   * up to 300 a minute while missing days are read after a cold Redis, is a
+   * one-off on top.)
+   */
+  private static readonly MAX_READS_PER_MINUTE = 10;
+  /** Reads of the minute only first reads (no summary held) may take. */
+  private static readonly RESERVED_FIRST_READS = 4;
+  /** First reads one client may start per minute. */
+  private static readonly MAX_FIRST_READS_PER_CLIENT = 3;
 
   private static readonly SPOT_META_CACHE_KEY = 'spot:raw_data';
   private static readonly KNOWN_TOKENS_TTL_MS = 60_000;
@@ -140,6 +158,8 @@ export class TokenDetailsService {
   private knownTokens: { ids: Set<string>; loadedAt: number } | null = null;
   private knownTokensLoad: Promise<void> | null = null;
   private readsWindow = { startedAt: 0, count: 0 };
+  /** First reads started per client in the current one-minute window. */
+  private clientFirstReads = { startedAt: 0, counts: new Map<string, number>() };
 
   private constructor() {}
 
@@ -150,11 +170,18 @@ export class TokenDetailsService {
     return TokenDetailsService.instance;
   }
 
-  /** `tokenId`: 0x + 32 hex digits, any case. */
-  public async getTokenDetails(tokenId: string): Promise<TokenDetailsSnapshot> {
+  /** `tokenId`: 0x + 32 hex digits, any case. `client`: the caller's rate-limit key (IP). */
+  public async getTokenDetails(tokenId: string, client: string): Promise<TokenDetailsSnapshot> {
     const id = tokenId.toLowerCase();
     if (!(await this.isKnownToken(id))) {
       throw new UnknownTokenIdError(tokenId);
+    }
+
+    // No summary held: this read may go to Hyperliquid, on the client's share.
+    const held = this.snapshots.get(id);
+    if (!held?.getFetchedAt() && !this.takeClientFirstRead(client)) {
+      logDeduplicator.warn('Token details: first-read share of a client spent for this minute', { tokenId: id });
+      throw new TokenDetailsUnavailableError(tokenId);
     }
 
     const snapshot = await this.snapshotOf(id).get();
@@ -170,10 +197,15 @@ export class TokenDetailsService {
       // Re-insert: Map order is the recency order.
       this.snapshots.delete(tokenId);
     } else {
-      snapshot = new OnDemandSnapshot(() => this.fetchSnapshot(tokenId), {
-        freshMs: TokenDetailsService.FRESH_MS,
-        maxStaleMs: TokenDetailsService.MAX_STALE_MS,
-      });
+      const created: OnDemandSnapshot<TokenDetailsSnapshot> = new OnDemandSnapshot(
+        // Nothing held yet (or expired): a first read, not a refresh.
+        () => this.fetchSnapshot(tokenId, created.getFetchedAt() === 0),
+        {
+          freshMs: TokenDetailsService.FRESH_MS,
+          maxStaleMs: TokenDetailsService.MAX_STALE_MS,
+        }
+      );
+      snapshot = created;
     }
     this.snapshots.set(tokenId, snapshot);
 
@@ -185,9 +217,9 @@ export class TokenDetailsService {
     return snapshot;
   }
 
-  private async fetchSnapshot(tokenId: string): Promise<TokenDetailsSnapshot> {
-    if (!this.takeRead()) {
-      logDeduplicator.warn('Token details: Hyperliquid read budget spent for this minute', { tokenId });
+  private async fetchSnapshot(tokenId: string, firstRead: boolean): Promise<TokenDetailsSnapshot> {
+    if (!this.takeRead(firstRead)) {
+      logDeduplicator.warn('Token details: Hyperliquid read budget spent for this minute', { tokenId, firstRead });
       throw new Error('Token details read budget spent');
     }
     try {
@@ -203,14 +235,32 @@ export class TokenDetailsService {
     }
   }
 
-  /** Fixed one-minute window over every token's Hyperliquid reads. */
-  private takeRead(): boolean {
+  /**
+   * Fixed one-minute window over every token's Hyperliquid reads; refreshes
+   * stop RESERVED_FIRST_READS short of the cap.
+   */
+  private takeRead(firstRead: boolean): boolean {
     const now = Date.now();
     if (now - this.readsWindow.startedAt >= 60_000) {
       this.readsWindow = { startedAt: now, count: 0 };
     }
-    if (this.readsWindow.count >= TokenDetailsService.MAX_READS_PER_MINUTE) return false;
+    const cap = firstRead
+      ? TokenDetailsService.MAX_READS_PER_MINUTE
+      : TokenDetailsService.MAX_READS_PER_MINUTE - TokenDetailsService.RESERVED_FIRST_READS;
+    if (this.readsWindow.count >= cap) return false;
     this.readsWindow.count++;
+    return true;
+  }
+
+  /** Fixed one-minute window over each client's first reads (the map is reset with it). */
+  private takeClientFirstRead(client: string): boolean {
+    const now = Date.now();
+    if (now - this.clientFirstReads.startedAt >= 60_000) {
+      this.clientFirstReads = { startedAt: now, counts: new Map() };
+    }
+    const count = this.clientFirstReads.counts.get(client) ?? 0;
+    if (count >= TokenDetailsService.MAX_FIRST_READS_PER_CLIENT) return false;
+    this.clientFirstReads.counts.set(client, count + 1);
     return true;
   }
 
