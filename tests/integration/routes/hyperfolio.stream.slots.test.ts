@@ -1,7 +1,8 @@
 /**
- * The positions stream caps connections per IP (3). A client that disconnects
+ * The positions stream caps connections per IP (10). A client that disconnects
  * before or while the upstream stream opens must not keep its slot — otherwise
- * a few aborted requests lock the IP (and 200 of them, everyone) out.
+ * a few aborted requests lock the IP (and 500 of them, everyone) out. Past the
+ * cap the route answers 503 with a short Retry-After, so the front retries.
  */
 import type { NextFunction, Request, Response } from 'express';
 import express from 'express';
@@ -52,6 +53,10 @@ jest.mock('../../../src/clients/hyperfolio/hyperfolio.client', () => ({
 }));
 
 import hyperfolioRoutes from '../../../src/routes/hyperfolio/hyperfolio.routes';
+import { HYPERFOLIO_STREAM } from '../../../src/constants/hyperfolio.cache';
+
+/** One more aborted request than the per-IP cap: a leaked slot would refuse the next stream. */
+const PAST_CAP = HYPERFOLIO_STREAM.MAX_CONNECTIONS_PER_IP + 1;
 
 const ADDRESS = '0x32309802C8feb2306240893BD79A2E4ba5314e55';
 const PATH = `/hyperfolio/wallet/${ADDRESS}/positions/stream`;
@@ -144,7 +149,7 @@ describe('GET /hyperfolio/.../positions/stream — slot release', () => {
   }
 
   it('does not leak a slot when the client leaves during the cache peek', async () => {
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < PAST_CAP; i += 1) {
       const peek = deferred<null>();
       const called = deferred<void>();
       mockService.peekPositions.mockImplementationOnce(() => {
@@ -167,7 +172,7 @@ describe('GET /hyperfolio/.../positions/stream — slot release', () => {
   it('does not leak a slot when the client leaves while the upstream opens', async () => {
     mockService.peekPositions.mockResolvedValue(null);
     const cancels: jest.Mock[] = [];
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < PAST_CAP; i += 1) {
       const open = deferred<ReadableStream<Uint8Array>>();
       const called = deferred<void>();
       mockClient.openPositionsStream.mockImplementationOnce(() => {
@@ -188,5 +193,39 @@ describe('GET /hyperfolio/.../positions/stream — slot release', () => {
     const res = await fullRequest();
     expect(res.status).toBe(200);
     expect(res.body).toContain('"type":"complete"');
+  });
+
+  it('answers 503 with Retry-After past the per-IP cap, and serves again once a slot frees', async () => {
+    mockService.peekPositions.mockResolvedValue(null);
+    const opens = Array.from({ length: HYPERFOLIO_STREAM.MAX_CONNECTIONS_PER_IP }, () => deferred<ReadableStream<Uint8Array>>());
+    const called: Array<Promise<void>> = [];
+    for (const open of opens) {
+      const started = deferred<void>();
+      called.push(started.promise);
+      mockClient.openPositionsStream.mockImplementationOnce(() => {
+        started.resolve();
+        return open.promise;
+      });
+    }
+    const held = opens.map(() => fullRequest());
+    await Promise.all(called);
+
+    const refused = await new Promise<{ status: number; retryAfter?: string; body: string }>((resolve, reject) => {
+      http
+        .get({ host: '127.0.0.1', port, path: PATH, agent: false }, (res) => {
+          let body = '';
+          res.on('data', (c) => (body += c));
+          res.on('end', () =>
+            resolve({ status: res.statusCode ?? 0, retryAfter: res.headers['retry-after'] as string, body })
+          );
+        })
+        .on('error', reject);
+    });
+    expect(refused.status).toBe(503);
+    expect(refused.retryAfter).toBe(String(HYPERFOLIO_STREAM.RETRY_AFTER_S));
+    expect(JSON.parse(refused.body).code).toBe('SSE_CONNECTION_LIMIT');
+
+    opens.forEach((open) => open.resolve(completeStream()));
+    for (const res of await Promise.all(held)) expect(res.status).toBe(200);
   });
 });

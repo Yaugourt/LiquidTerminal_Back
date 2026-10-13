@@ -11,7 +11,7 @@ import {
   hyperfolioYieldQuerySchema,
   hyperfolioYieldSchema,
 } from '../../schemas/hyperfolio.schema';
-import { HyperfolioService } from '../../services/hyperfolio/hyperfolio.service';
+import { HyperfolioRead, HyperfolioService } from '../../services/hyperfolio/hyperfolio.service';
 import { HyperfolioClient } from '../../clients/hyperfolio/hyperfolio.client';
 import { isHyperfolioConfigured } from '../../clients/hyperfolio/hyperfolio-api.config';
 import {
@@ -36,12 +36,16 @@ const client = HyperfolioClient.getInstance();
 
 const DEFAULT_HISTORY_DAYS = 30;
 
-/** Run a handler and shape the response; map Hyperfolio domain errors to their status. */
-function run(handler: (req: Request) => Promise<unknown>, label: string): RequestHandler {
+/**
+ * Run a handler and shape the response; map Hyperfolio domain errors to their
+ * status. `stale: true` marks the last copy served because a refresh was
+ * refused or failed.
+ */
+function run(handler: (req: Request) => Promise<HyperfolioRead<unknown>>, label: string): RequestHandler {
   return (async (req: Request, res: Response) => {
     try {
-      const data = await handler(req);
-      res.json({ success: true, data });
+      const { data, stale } = await handler(req);
+      res.json({ success: true, data, ...(stale ? { stale: true } : {}) });
     } catch (error) {
       if (error instanceof HyperfolioError) {
         if (error.statusCode === 429) {
@@ -215,7 +219,7 @@ class SseBlockParser {
  * Guarded like the JSON routes: marketRateLimiter counts the open (not its
  * duration), an upstream open spends the caller's per-IP budget — so an
  * open/abort loop cannot fan out fresh 30-protocol scans — and concurrent
- * streams are capped per IP and in total.
+ * streams are capped per IP and in total (503 + Retry-After past them).
  */
 router.get(
   '/wallet/:address/positions/stream',
@@ -246,7 +250,10 @@ router.get(
       perIp >= HYPERFOLIO_STREAM.MAX_CONNECTIONS_PER_IP ||
       totalStreams >= HYPERFOLIO_STREAM.MAX_TOTAL_CONNECTIONS
     ) {
-      return res.status(429).json({
+      // Temporary: a slot frees as soon as a stream completes. 503 + a short
+      // Retry-After so the front retries instead of showing no positions.
+      res.setHeader('Retry-After', String(HYPERFOLIO_STREAM.RETRY_AFTER_S));
+      return res.status(503).json({
         success: false,
         error: 'Connection limit reached',
         code: 'SSE_CONNECTION_LIMIT',

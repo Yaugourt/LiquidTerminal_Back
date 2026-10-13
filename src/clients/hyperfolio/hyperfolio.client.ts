@@ -158,7 +158,14 @@ function isErrorBody(payload: unknown): payload is HyperfolioErrorBody {
 export class HyperfolioClient extends BaseApiService {
   private static instance: HyperfolioClient;
   private static readonly REQUEST_WEIGHT = 10;
-  private static readonly MAX_WEIGHT_PER_MINUTE = 300;
+  /**
+   * 120 upstream misses a minute per IP: a wallet page costs ~6 (composition,
+   * positions, history, transactions, nfts, points), so ~20 uncached wallets
+   * a minute behind one address (CGNAT, offices). The ceilings that protect
+   * the key are the process-wide 8/s and the daily budget; past this one the
+   * service serves the last copy instead of an error.
+   */
+  private static readonly MAX_WEIGHT_PER_MINUTE = 1_200;
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
@@ -184,7 +191,7 @@ export class HyperfolioClient extends BaseApiService {
   }
 
   /**
-   * Per-IP budget of upstream (cache-missing) lookups — 30 per minute with the
+   * Per-IP budget of upstream (cache-missing) lookups — 120 per minute with the
    * weights above. Cache hits never reach this, so browsing cached wallets is
    * free; only fan-out that actually costs Hyperfolio quota is metered.
    */

@@ -50,6 +50,12 @@ function signature(query: object): string {
   return createHash('sha1').update(JSON.stringify(entries)).digest('hex').slice(0, 16);
 }
 
+/** A Hyperfolio answer, and whether it is the last copy served because a refresh was refused or failed. */
+export interface HyperfolioRead<T> {
+  data: T;
+  stale: boolean;
+}
+
 /**
  * Thin, Redis-cached service over HyperfolioClient. Every read is served from
  * cache for its TTL so a busy wallet page costs one upstream call per panel.
@@ -71,22 +77,20 @@ export class HyperfolioService {
    * gated three ways: the shared cooldown opened by an upstream throttle
    * (cached answers are still served meanwhile; only an upstream throttle
    * arms it), the caller's per-IP budget, and (in the client) the
-   * process-wide upstream budget.
+   * process-wide upstream budget and the daily quota.
    *
-   * cacheService.getOrSet calls `fetchFn` a second time when the first call
-   * throws (its catch-all "fall back to direct fetch"). Here that would double
-   * every failed upstream call — a 45 s transactions timeout would hold the
-   * request 90 s — so the first failure is memoised and replayed instead.
+   * A miss those guards refuse, or that Hyperfolio fails, is answered with
+   * the key's last copy (kept by cacheService about 10 TTLs, at most 10 min:
+   * CACHE_LAST_COPY_MAX_S) flagged `stale`: the paid-quota guards stay
+   * invisible to normal browsing. A wallet never read before, or not read for
+   * longer than its copy is kept, gets the error.
    */
-  private async cached<T>(key: string, ttl: number, ip: string, fetchFn: () => Promise<T>): Promise<T> {
-    let failure: unknown = null;
-    const result = await cacheService.getOrSet<T | BadInputMarker>(key, async () => {
-      if (failure) throw failure;
+  private async cached<T>(key: string, ttl: number, ip: string, fetchFn: () => Promise<T>): Promise<HyperfolioRead<T>> {
+    const { data, stale } = await cacheService.getOrSetWithMeta<T | BadInputMarker>(key, async () => {
       // Outside the try: a miss refused by the cooldown must not re-arm it,
       // or steady traffic would keep it open forever.
       if (Date.now() < this.rateLimitedUntil) {
-        failure = new HyperfolioRateLimitedError();
-        throw failure;
+        throw new HyperfolioRateLimitedError();
       }
       try {
         if (!this.client.checkRateLimit(ip)) {
@@ -101,17 +105,16 @@ export class HyperfolioService {
           this.rateLimitedUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
           logDeduplicator.warn('Hyperfolio rate limited, cooling down', { key });
         }
-        failure = error;
         throw error;
       }
     }, ttl);
-    if (isBadInputMarker(result)) {
+    if (isBadInputMarker(data)) {
       throw new HyperfolioBadInputError();
     }
-    return result;
+    return { data, stale };
   }
 
-  public getComposition(address: string, ip: string): Promise<HyperfolioCompositionResponse> {
+  public getComposition(address: string, ip: string): Promise<HyperfolioRead<HyperfolioCompositionResponse>> {
     return this.cached(
       HYPERFOLIO_CACHE_KEYS.composition(address),
       HYPERFOLIO_TTL.composition,
@@ -120,7 +123,7 @@ export class HyperfolioService {
     );
   }
 
-  public getPositions(address: string, ip: string): Promise<HyperfolioPositionsResponse> {
+  public getPositions(address: string, ip: string): Promise<HyperfolioRead<HyperfolioPositionsResponse>> {
     return this.cached(
       HYPERFOLIO_CACHE_KEYS.positions(address),
       HYPERFOLIO_TTL.positions,
@@ -170,7 +173,7 @@ export class HyperfolioService {
     address: string,
     days: number,
     ip: string
-  ): Promise<HyperfolioPortfolioHistoryResponse> {
+  ): Promise<HyperfolioRead<HyperfolioPortfolioHistoryResponse>> {
     return this.cached(
       HYPERFOLIO_CACHE_KEYS.history(address, days),
       HYPERFOLIO_TTL.history,
@@ -183,7 +186,7 @@ export class HyperfolioService {
     address: string,
     query: HyperfolioTransactionsQuery,
     ip: string
-  ): Promise<HyperfolioTransactionsResponse> {
+  ): Promise<HyperfolioRead<HyperfolioTransactionsResponse>> {
     return this.cached(
       HYPERFOLIO_CACHE_KEYS.transactions(address, signature(query)),
       HYPERFOLIO_TTL.transactions,
@@ -192,7 +195,7 @@ export class HyperfolioService {
     );
   }
 
-  public getNfts(address: string, query: HyperfolioNftsQuery, ip: string): Promise<HyperfolioNftsResponse> {
+  public getNfts(address: string, query: HyperfolioNftsQuery, ip: string): Promise<HyperfolioRead<HyperfolioNftsResponse>> {
     return this.cached(
       HYPERFOLIO_CACHE_KEYS.nfts(address, signature(query)),
       HYPERFOLIO_TTL.nfts,
@@ -201,7 +204,7 @@ export class HyperfolioService {
     );
   }
 
-  public getPoints(address: string, ip: string): Promise<HyperfolioPointsResponse> {
+  public getPoints(address: string, ip: string): Promise<HyperfolioRead<HyperfolioPointsResponse>> {
     return this.cached(
       HYPERFOLIO_CACHE_KEYS.points(address),
       HYPERFOLIO_TTL.points,
@@ -210,7 +213,7 @@ export class HyperfolioService {
     );
   }
 
-  public getYield(query: HyperfolioYieldQuery, ip: string): Promise<HyperfolioYieldResponse> {
+  public getYield(query: HyperfolioYieldQuery, ip: string): Promise<HyperfolioRead<HyperfolioYieldResponse>> {
     return this.cached(
       HYPERFOLIO_CACHE_KEYS.yield(signature(query)),
       HYPERFOLIO_TTL.yield,

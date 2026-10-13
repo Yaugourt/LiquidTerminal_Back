@@ -103,8 +103,9 @@ describe('HyperfolioService guards', () => {
     getComposition: jest.fn(),
     getYield: jest.fn(),
   };
-  /** The cache behind cacheService.getOrSet. */
+  /** The cache behind cacheService.getOrSetWithMeta, and the last copies it keeps. */
   const cache = new Map<string, unknown>();
+  const lastCopies = new Map<string, unknown>();
 
   let HyperfolioService: typeof import('../../../src/services/hyperfolio/hyperfolio.service').HyperfolioService;
   let errs: typeof import('../../../src/errors/hyperfolio.errors');
@@ -115,27 +116,29 @@ describe('HyperfolioService guards', () => {
     clientMock.getComposition.mockReset();
     clientMock.getYield.mockReset();
     cache.clear();
+    lastCopies.clear();
     jest.doMock('../../../src/core/redis.service', () => ({
       redisService: { get: jest.fn(), set: jest.fn(), delete: jest.fn(), getClient: jest.fn() },
     }));
     jest.doMock('../../../src/clients/hyperfolio/hyperfolio.client', () => ({
       HyperfolioClient: { getInstance: () => clientMock },
     }));
-    // Same semantics as the real cacheService.getOrSet: a hit is served
-    // without fetchFn, and a throwing fetchFn is called a second time by its
-    // catch-all fallback.
+    // Same semantics as the real cacheService.getOrSetWithMeta: a hit is
+    // served without fetchFn; a throwing fetchFn runs once and its error goes
+    // out, unless the key has a last copy (`lastCopies`), served stale.
     jest.doMock('../../../src/core/cache.service', () => ({
       cacheService: {
-        getOrSet: async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
-          if (cache.has(key)) return cache.get(key) as T;
-          let value: T;
+        getOrSetWithMeta: async <T>(key: string, fn: () => Promise<T>): Promise<{ data: T; stale: boolean }> => {
+          if (cache.has(key)) return { data: cache.get(key) as T, stale: false };
           try {
-            value = await fn();
-          } catch {
-            value = await fn();
+            const value = await fn();
+            cache.set(key, value);
+            lastCopies.set(key, value);
+            return { data: value, stale: false };
+          } catch (error) {
+            if (lastCopies.has(key)) return { data: lastCopies.get(key) as T, stale: true };
+            throw error;
           }
-          cache.set(key, value);
-          return value;
         },
       },
     }));
@@ -166,7 +169,25 @@ describe('HyperfolioService guards', () => {
     await expect(service.getComposition(ADDRESS, '6.6.6.6')).rejects.toBeInstanceOf(errs.HyperfolioThrottledError);
     expect(clientMock.getComposition).not.toHaveBeenCalled();
     expect(service.isRateLimited()).toBe(false);
-    await expect(service.getComposition(ADDRESS, '1.1.1.1')).resolves.toEqual({ data: { tokens: [] } });
+    await expect(service.getComposition(ADDRESS, '1.1.1.1')).resolves.toEqual({ data: { data: { tokens: [] } }, stale: false });
+  });
+
+  it('serves the last copy, flagged stale, when a refresh is refused or fails', async () => {
+    const service = HyperfolioService.getInstance();
+    clientMock.getComposition.mockResolvedValueOnce({ data: { tokens: ['old'] } });
+    await service.getComposition(ADDRESS, '1.1.1.1');
+    cache.clear(); // the TTL ran out
+
+    // Over the caller's budget: the last copy, not a 429.
+    clientMock.checkRateLimit.mockReturnValueOnce(false);
+    await expect(service.getComposition(ADDRESS, '6.6.6.6')).resolves.toEqual({
+      data: { data: { tokens: ['old'] } },
+      stale: true,
+    });
+    // Upstream down: same.
+    clientMock.getComposition.mockRejectedValueOnce(new errs.HyperfolioUpstreamError());
+    await expect(service.getComposition(ADDRESS, '1.1.1.1')).resolves.toMatchObject({ stale: true });
+    expect(clientMock.getComposition).toHaveBeenCalledTimes(2);
   });
 
   it('opens the shared cooldown on a real upstream throttle', async () => {
@@ -188,7 +209,10 @@ describe('HyperfolioService guards', () => {
     await expect(service.getComposition(OTHER, '1.1.1.1')).rejects.toBeInstanceOf(errs.HyperfolioRateLimitedError);
     expect(service.isRateLimited()).toBe(true);
 
-    await expect(service.getComposition(ADDRESS, '2.2.2.2')).resolves.toEqual({ data: { tokens: ['cached'] } });
+    await expect(service.getComposition(ADDRESS, '2.2.2.2')).resolves.toEqual({
+      data: { data: { tokens: ['cached'] } },
+      stale: false,
+    });
     await expect(service.getComposition(OTHER, '2.2.2.2')).rejects.toBeInstanceOf(errs.HyperfolioRateLimitedError);
     expect(clientMock.getComposition).toHaveBeenCalledTimes(2);
   });
@@ -214,7 +238,7 @@ describe('HyperfolioService guards', () => {
       now += 2_000;
       expect(service.isRateLimited()).toBe(false);
       clientMock.getComposition.mockResolvedValueOnce({ data: { tokens: [] } });
-      await expect(service.getComposition(other, '2.2.2.2')).resolves.toEqual({ data: { tokens: [] } });
+      await expect(service.getComposition(other, '2.2.2.2')).resolves.toEqual({ data: { data: { tokens: [] } }, stale: false });
       expect(clientMock.getComposition).toHaveBeenCalledTimes(2);
     } finally {
       nowSpy.mockRestore();
@@ -233,7 +257,7 @@ describe('HyperfolioService guards', () => {
     });
     const service = HyperfolioService.getInstance();
 
-    const res = await service.getYield({ page: 1, page_size: 25 }, '1.1.1.1');
+    const { data: res } = await service.getYield({ page: 1, page_size: 25 }, '1.1.1.1');
     expect(res.data.map((r) => r.id)).toEqual(['real', 'lending', 'edge']);
     expect(res.metadata.totals).toEqual({ total_value_usd: 4.2e13, total_apy: 12, opportunity_count: 4 });
     expect(res.metadata.totals_untrusted).toBe(true);
@@ -253,7 +277,7 @@ describe('HyperfolioService guards', () => {
         totals: { total_value_usd: 50_000_000_000, total_apy: 8, opportunity_count: 1 },
       },
     });
-    const res = await HyperfolioService.getInstance().getYield({}, '1.1.1.1');
+    const { data: res } = await HyperfolioService.getInstance().getYield({}, '1.1.1.1');
     expect(res.data).toHaveLength(1);
     expect(res.metadata.totals_untrusted).toBeUndefined();
   });

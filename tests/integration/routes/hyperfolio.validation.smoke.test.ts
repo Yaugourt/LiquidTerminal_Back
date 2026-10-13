@@ -25,14 +25,17 @@ jest.mock('../../../src/core/redis.service', () => ({
   },
 }));
 
+/** The service answers `{ data, stale }`. */
+const fresh = (data: unknown) => ({ data, stale: false });
+
 const mockService = {
-  getComposition: jest.fn().mockResolvedValue({ data: { tokens: [] } }),
-  getPositions: jest.fn().mockResolvedValue({ data: { protocols: [] } }),
-  getPortfolioHistory: jest.fn().mockResolvedValue({ snapshots: [], summary: {} }),
-  getTransactions: jest.fn().mockResolvedValue({ transactions: [] }),
-  getNfts: jest.fn().mockResolvedValue({ data: { nfts: [] } }),
-  getPoints: jest.fn().mockResolvedValue({ data: [] }),
-  getYield: jest.fn().mockResolvedValue({ data: [] }),
+  getComposition: jest.fn().mockResolvedValue(fresh({ data: { tokens: [] } })),
+  getPositions: jest.fn().mockResolvedValue(fresh({ data: { protocols: [] } })),
+  getPortfolioHistory: jest.fn().mockResolvedValue(fresh({ snapshots: [], summary: {} })),
+  getTransactions: jest.fn().mockResolvedValue(fresh({ transactions: [] })),
+  getNfts: jest.fn().mockResolvedValue(fresh({ data: { nfts: [] } })),
+  getPoints: jest.fn().mockResolvedValue(fresh({ data: [] })),
+  getYield: jest.fn().mockResolvedValue(fresh({ data: [] })),
   peekPositions: jest.fn().mockResolvedValue(null),
   isRateLimited: jest.fn().mockReturnValue(false),
 };
@@ -68,6 +71,13 @@ describe('GET /hyperfolio/* validation smoke', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ success: true, data: { data: { tokens: [] } } });
     expect(mockService.getComposition).toHaveBeenCalledWith(ADDRESS, expect.any(String));
+  });
+
+  it('flags the last copy served when a refresh was refused or failed', async () => {
+    mockService.getComposition.mockResolvedValueOnce({ data: { data: { tokens: ['old'] } }, stale: true });
+    const res = await request(app).get(`/hyperfolio/wallet/${ADDRESS}/composition`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { data: { tokens: ['old'] } }, stale: true });
   });
 
   it('accepts .hl names on wallet endpoints', async () => {
