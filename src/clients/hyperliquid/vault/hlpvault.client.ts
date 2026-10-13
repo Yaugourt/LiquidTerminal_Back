@@ -14,7 +14,8 @@ export class HyperliquidVaultClient extends BaseApiService {
   private static readonly HLP_VAULT_ADDRESS = '0xdfc24b077bc1425ad1dea75bcb6f8158e10df303';
   private static readonly CACHE_KEY = 'vault:hlp:tvl';
   private static readonly UPDATE_CHANNEL = 'vault:hlp:updated';
-  private static readonly UPDATE_INTERVAL = 20000; // 20 secondes
+  // 30 s (weight 20 → 40 a minute): HLP TVL, APR and PnL move slowly.
+  private static readonly UPDATE_INTERVAL = 30000;
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;

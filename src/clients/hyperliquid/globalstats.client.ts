@@ -21,7 +21,9 @@ export class HyperliquidGlobalStatsClient extends BaseApiService {
   private readonly CACHE_KEY = 'global_stats';
   private readonly CACHE_DURATION = 60 * 5; // 5 minutes
   private readonly UPDATE_CHANNEL = 'global:stats:updated';
-  private readonly UPDATE_INTERVAL = 10000; // 10 seconds
+  // 15 s (weight 20 → 80 a minute): the dashboard's live stats stay within
+  // 15 s, and the weight saved goes to on-demand reads (token details).
+  private readonly UPDATE_INTERVAL = 15000;
   private lastUpdate: number = 0;
   private pollingInterval: NodeJS.Timeout | null = null;
 

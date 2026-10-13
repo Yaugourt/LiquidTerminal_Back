@@ -14,7 +14,10 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
 
   private readonly CACHE_KEY = 'spot:deploy:state';
   private readonly UPDATE_CHANNEL = 'spot:deploy:updated';
-  private readonly UPDATE_INTERVAL = 10000; // 10 secondes
+  // 20 s (weight 20 → 60 a minute; counted in the backend's Hyperliquid
+  // budget, as api-ui may share api.hyperliquid.xyz's per-IP weight): the
+  // front polls every 30 s and the Dutch-auction price moves on a schedule.
+  private readonly UPDATE_INTERVAL = 20000;
   private lastUpdate: number = 0;
   private pollingInterval: NodeJS.Timeout | null = null;
 

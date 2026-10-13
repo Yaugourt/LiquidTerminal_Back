@@ -14,7 +14,9 @@ export class ValidatorClient extends BaseApiService {
 
   private readonly CACHE_KEY = 'staking:validators:raw_data';
   private readonly UPDATE_CHANNEL = 'staking:validators:updated';
-  private readonly UPDATE_INTERVAL = 10000; // 10 secondes
+  // 30 s (weight 20 → 40 a minute): stake, commission and APR barely move
+  // in a minute, and the front polls every 30 s.
+  private readonly UPDATE_INTERVAL = 30000;
   private lastUpdate: number = 0;
   private pollingInterval: NodeJS.Timeout | null = null;
 
