@@ -17,6 +17,7 @@ import {
   WSInternalSubscriptionType,
 } from '../types/websocket.types';
 import { CompletedTrade } from '../types/wallet-events.types';
+import { positiveIntEnv } from '../utils/env';
 
 /**
  * Internal WebSocket Server
@@ -43,9 +44,14 @@ export class InternalWebSocketServer {
   private authenticatedSockets: Set<WebSocket> = new Set();
   private ipConnectionCount: Map<string, number> = new Map();
 
-  // Rate limiting
-  private static readonly MAX_CONNECTIONS_PER_IP = 5;
-  private static readonly MAX_TOTAL_CONNECTIONS = 1000;
+  // Rate limiting. The caps are sized for an audience: an idle socket costs
+  // tens of KB and the feeds are fan-outs of one upstream (liquidations ~1
+  // message a minute), so thousands of viewers are cheap, and a shared IP
+  // (CGNAT, office) carries many people. Abuse is bounded by the per-socket
+  // message rate and buffered-bytes guard. Env: WS_MAX_CONNECTIONS_PER_IP,
+  // WS_MAX_TOTAL_CONNECTIONS.
+  private static readonly MAX_CONNECTIONS_PER_IP = positiveIntEnv('WS_MAX_CONNECTIONS_PER_IP', 200);
+  private static readonly MAX_TOTAL_CONNECTIONS = positiveIntEnv('WS_MAX_TOTAL_CONNECTIONS', 10_000);
   private static readonly MAX_MESSAGES_PER_SECOND = 10;
   private messageCounters: Map<string, { count: number; resetAt: number }> = new Map();
 
