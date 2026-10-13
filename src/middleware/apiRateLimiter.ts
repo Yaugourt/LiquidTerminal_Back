@@ -1,35 +1,52 @@
 import { Request, Response, NextFunction } from 'express';
 import { redisService } from '../core/redis.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { positiveIntEnv } from '../utils/env';
 
 // Configuration des limites
+//
+// Per IP, and many visitors share one: mobile carriers (CGNAT), offices and
+// universities put dozens of people behind a single address. A single tab
+// makes ~15 requests in its first second and 20-40 a minute while polling, so
+// the old 1,200 a minute 429'd every widget for everyone behind an IP once
+// 30-50 tabs were open there. These routes are Redis/memory reads; what costs
+// upstream has its own budget (passthrough limiter, Hyperfolio misses,
+// token-details reads). The limits only stop floods.
 const RATE_LIMITS = {
   // Limites par seconde pour prévenir les bursts
   BURST_LIMIT: {
     WINDOW: 1,
-    // Measured in a real browser on 2026-07-26: a single page load of
-    // /dashboard/market fires 15 requests inside its first second, /dashboard
-    // 13. The previous value of 20 was written while the counter was broken and
-    // never enforced anything; switching it on at 20 would have thrown 429s at
-    // anyone with two tabs open. 60 leaves ~4x headroom over a real page while
-    // still stopping a scripted flood, which runs in the hundreds per second.
-    MAX_REQUESTS: 60
+    // A page load fires ~15 requests in its first second (measured
+    // 2026-07-26): 200 lets a dozen people behind one IP open pages together,
+    // while a scripted flood runs in the hundreds or thousands per second.
+    MAX_REQUESTS: positiveIntEnv('RATE_LIMIT_BURST', 200)
   },
   // Limites par minute pour le moyen terme
   MINUTE_LIMIT: {
     WINDOW: 60,       // 60 secondes
-    MAX_REQUESTS: 1200 // 20 req/sec en moyenne sur la minute
+    MAX_REQUESTS: positiveIntEnv('RATE_LIMIT_MINUTE', 6000) // ~150-300 tabs behind one IP
   },
   // Limites par heure pour détecter les abus
   HOUR_LIMIT: {
     WINDOW: 3600,      // 3600 secondes
-    MAX_REQUESTS: 72000 // 20 req/sec en moyenne sur l'heure
+    MAX_REQUESTS: positiveIntEnv('RATE_LIMIT_HOUR', 300000) // ~83 req/s sustained for an hour
   }
 };
 
 interface RateWindow {
   name: string;
   seconds: number;
+}
+
+/**
+ * Seconds until the fixed window that refused a request rolls over: what a
+ * limited client is told to wait (Retry-After). A fixed 5 s let a client
+ * over its minute or hour budget retry every 5 s and stay refused (refused
+ * requests are counted too) until the window rolled over anyway.
+ */
+function secondsUntilRollover(windowSeconds: number): number {
+  const now = Math.floor(Date.now() / 1000);
+  return Math.max(1, windowSeconds - (now % windowSeconds));
 }
 
 // Fenêtres de temps, dans l'ordre des compteurs renvoyés par countRequest
@@ -79,10 +96,11 @@ async function countRequest(prefix: string, windows: readonly RateWindow[]): Pro
 const inMemoryCounters = new Map<string, { count: number; resetAt: number }>();
 // Was 10 — below the 15 req/s a single page load actually makes, so a Redis
 // outage would have 429'd every normal user. Aligned with the burst limit.
-const FALLBACK_MAX_PER_SECOND = 60;
+const FALLBACK_MAX_PER_SECOND = RATE_LIMITS.BURST_LIMIT.MAX_REQUESTS;
 const FALLBACK_MAX_IPS = 10000;
 
-function checkInMemoryFallback(ip: string): boolean {
+/** One-second window per key; `maxPerSecond` is the limiter's own burst. */
+function checkInMemoryFallback(ip: string, maxPerSecond: number = FALLBACK_MAX_PER_SECOND): boolean {
   const now = Date.now();
   const counter = inMemoryCounters.get(ip);
 
@@ -96,7 +114,7 @@ function checkInMemoryFallback(ip: string): boolean {
     return true;
   }
 
-  if (counter.count >= FALLBACK_MAX_PER_SECOND) {
+  if (counter.count >= maxPerSecond) {
     return false;
   }
 
@@ -131,15 +149,15 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
 
     // Vérification des limites
     if (burstCount > RATE_LIMITS.BURST_LIMIT.MAX_REQUESTS) {
-      return sendLimitExceededResponse(res, 'Too many requests per second');
+      return sendLimitExceededResponse(res, 'Too many requests per second', RATE_LIMITS.BURST_LIMIT.WINDOW);
     }
 
     if (minuteCount > RATE_LIMITS.MINUTE_LIMIT.MAX_REQUESTS) {
-      return sendLimitExceededResponse(res, 'Too many requests per minute');
+      return sendLimitExceededResponse(res, 'Too many requests per minute', RATE_LIMITS.MINUTE_LIMIT.WINDOW);
     }
 
     if (hourCount > RATE_LIMITS.HOUR_LIMIT.MAX_REQUESTS) {
-      return sendLimitExceededResponse(res, 'Too many requests per hour');
+      return sendLimitExceededResponse(res, 'Too many requests per hour', RATE_LIMITS.HOUR_LIMIT.WINDOW);
     }
 
     next();
@@ -153,30 +171,36 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
     if (checkInMemoryFallback(ip)) {
       next();
     } else {
-      sendLimitExceededResponse(res, 'Too many requests (fallback mode)');
+      // The fallback counts one-second windows.
+      sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
     }
   }
 };
 
-function sendLimitExceededResponse(res: Response, message: string): void {
+/** 429 with Retry-After set to the rollover of the window that refused it. */
+function sendLimitExceededResponse(res: Response, message: string, windowSeconds: number): void {
+  const retryAfter = secondsUntilRollover(windowSeconds);
+  res.setHeader('Retry-After', String(retryAfter));
   res.status(429).json({
     error: 'Rate limit exceeded',
     message,
-    retryAfter: 60 // Suggérer d'attendre 1 minute
+    retryAfter
   });
 }
 
 // Tighter limits for the /indexer/* routes a request can make reach HypeDexer
 // (uncached, or cached under a key the caller picks: address, coin, limit,
-// time range). Each miss is a paid upstream call and holds an outbound slot;
-// the general limiter (1200/min) is far too loose to bound that cost. The
-// minute cap is what bounds it: a heavy page stays under ~60 indexer requests
-// in its first minute (sweep of 22 pages, 2026-09-25). The burst matches the
-// general limiter's because page loads fan out: a settled HIP-4 question with
-// 29 outcomes fires ~45 indexer requests in its first second, /market/hip4 18.
+// time range). Each miss is a paid upstream call and holds an outbound slot.
+// They count every request, cache hits included (a hit costs nothing
+// upstream), so they are sized for several people behind one IP: a heavy page
+// makes ~60 indexer requests in its first minute (sweep of 22 pages,
+// 2026-09-25) and a settled HIP-4 question with 29 outcomes ~45 in its first
+// second. An open HIP-4 page keeps making ~80 a minute (its volume fan-out
+// alone is ~17 chunks every 15 s), a dashboard or market page ~50. 4,000 a
+// minute is ~50 HIP-4 tabs or ~80 dashboard tabs behind one IP.
 const PASSTHROUGH_LIMITS = {
-  BURST: { WINDOW: 1, MAX_REQUESTS: 60 },
-  MINUTE: { WINDOW: 60, MAX_REQUESTS: 300 },
+  BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('PASSTHROUGH_RATE_LIMIT_BURST', 300) },
+  MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('PASSTHROUGH_RATE_LIMIT_MINUTE', 4000) },
 };
 
 interface IpLimits {
@@ -203,10 +227,10 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
     try {
       const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${ip}`, windows);
       if (burstCount > limits.BURST.MAX_REQUESTS) {
-        return sendLimitExceededResponse(res, `Too many ${what} requests per second`);
+        return sendLimitExceededResponse(res, `Too many ${what} requests per second`, limits.BURST.WINDOW);
       }
       if (minuteCount > limits.MINUTE.MAX_REQUESTS) {
-        return sendLimitExceededResponse(res, `Too many ${what} requests per minute`);
+        return sendLimitExceededResponse(res, `Too many ${what} requests per minute`, limits.MINUTE.WINDOW);
       }
       next();
     } catch (error) {
@@ -216,12 +240,12 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
         path: req.path,
         ip,
       });
-      // Fail-secure, same as the general limiter. Distinct key namespace so the
-      // fallbacks don't share a counter.
-      if (checkInMemoryFallback(`${namespace}:${ip}`)) {
+      // Fail-secure, same as the general limiter, at this limiter's own burst.
+      // Distinct key namespace so the fallbacks don't share a counter.
+      if (checkInMemoryFallback(`${namespace}:${ip}`, limits.BURST.MAX_REQUESTS)) {
         next();
       } else {
-        sendLimitExceededResponse(res, 'Too many requests (fallback mode)');
+        sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
       }
     }
   };
@@ -232,11 +256,27 @@ export const passthroughRateLimiter = createIpLimiter('pt', PASSTHROUGH_LIMITS, 
 /**
  * Per-address lookups (Elysium address / contract profiles, per-user indexer
  * pass-through). Any valid address is a fresh cache key, so each request can
- * run a batch of SQL or a paid upstream call: a page view makes 1-4 of them,
- * 60/min per IP is ample for people and caps a scripted sweep.
+ * run a batch of SQL or a paid upstream call: a page view makes 1-4 of them.
+ * 300 a minute per IP (20 a second) lets dozens of people behind one address
+ * browse profiles and still caps a scripted sweep.
  */
 export const addressLookupRateLimiter = createIpLimiter(
   'addr',
-  { BURST: { WINDOW: 1, MAX_REQUESTS: 8 }, MINUTE: { WINDOW: 60, MAX_REQUESTS: 60 } },
+  {
+    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('ADDRESS_LOOKUP_RATE_LIMIT_BURST', 20) },
+    MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('ADDRESS_LOOKUP_RATE_LIMIT_MINUTE', 300) },
+  },
   'address lookup'
+);
+
+/**
+ * Account and write routes (auth, CSV uploads): stacked on the general
+ * limiter, whose ceilings are sized for read traffic. These are the limits
+ * the general limiter used to apply to them (60 a second, 1,200 a minute per
+ * IP), in their own counters so browsing never spends them.
+ */
+export const accountRateLimiter = createIpLimiter(
+  'acct',
+  { BURST: { WINDOW: 1, MAX_REQUESTS: 60 }, MINUTE: { WINDOW: 60, MAX_REQUESTS: 1200 } },
+  'account'
 );

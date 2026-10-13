@@ -16,7 +16,7 @@ import { addressLookupRateLimiter, marketRateLimiter } from '../../../src/middle
 function run(limiter: (req: Request, res: Response, next: NextFunction) => Promise<void>, ip: string, n: number) {
   let passed = 0;
   let limited = 0;
-  const res = { status: () => ({ json: () => { limited++; } }) } as unknown as Response;
+  const res = { setHeader: () => undefined, status: () => ({ json: () => { limited++; } }) } as unknown as Response;
   return (async () => {
     for (let i = 0; i < n; i++) await limiter({ ip, path: '/x' } as Request, res, () => { passed++; });
     return { passed, limited };
@@ -25,9 +25,9 @@ function run(limiter: (req: Request, res: Response, next: NextFunction) => Promi
 
 describe('rate limiters with Redis down', () => {
   it('fall back to the in-memory limit instead of letting everything through', async () => {
-    const r = await run(marketRateLimiter, '203.0.113.7', 100);
-    expect(r.passed).toBe(60);
-    expect(r.limited).toBe(40);
+    const r = await run(marketRateLimiter, '203.0.113.7', 250);
+    expect(r.passed).toBe(200);
+    expect(r.limited).toBe(50);
   });
 
   it('the address-lookup limiter also blocks a burst', async () => {

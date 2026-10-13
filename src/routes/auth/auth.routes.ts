@@ -5,7 +5,7 @@ import { TelegramService } from "../../services/telegram/telegram.service";
 import { userRepository } from "../../repositories/user.repository";
 import { validatePrivyToken } from "../../middleware/authMiddleware";
 import { validateLogin, validateUserParams } from "../../middleware/validation/authValidation.middleware";
-import { marketRateLimiter } from "../../middleware/apiRateLimiter";
+import { accountRateLimiter, marketRateLimiter } from "../../middleware/apiRateLimiter";
 import { UserNotFoundError } from "../../errors/auth.errors";
 import { TelegramError } from "../../errors/telegram.errors";
 import { logDeduplicator } from "../../utils/logDeduplicator";
@@ -16,7 +16,7 @@ const referralService = ReferralService.getInstance();
 const telegramService = TelegramService.getInstance();
 
 // Appliquer le rate limiting à toutes les routes d'authentification
-router.use(marketRateLimiter);
+router.use(marketRateLimiter, accountRateLimiter);
 
 // Route de connexion
 router.post("/login", validatePrivyToken, validateLogin, (req: Request, res: Response): void => {

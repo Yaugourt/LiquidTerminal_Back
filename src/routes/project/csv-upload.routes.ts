@@ -1,6 +1,6 @@
 import express, { Request, Response, RequestHandler } from "express";
 import { CsvProjectService } from "../../services/project/csv-project.service";
-import { marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { accountRateLimiter, marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validatePrivyToken } from '../../middleware/authMiddleware';
 import { requireModerator } from '../../middleware/roleMiddleware';
 import { 
@@ -17,7 +17,7 @@ const router = express.Router();
 const csvProjectService = new CsvProjectService();
 
 // Appliquer le rate limiting à toutes les routes
-router.use(marketRateLimiter);
+router.use(marketRateLimiter, accountRateLimiter);
 
 // Route pour uploader un fichier CSV de projets
 router.post('/upload', 
