@@ -10,12 +10,14 @@ import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 const CACHE_KEY = 'builders:all';
 const UPDATE_CHANNEL = 'builders:updated';
-// The list only changes when a builder registers, and each refresh costs
-// ~150 credits (1 400+ rows): 15 min instead of 5 saves ~27k credits a day.
-const UPDATE_INTERVAL = 15 * 60_000;
+// Every minute: each row carries the builder's activity (volume, fees,
+// trades, users), which /market/builders shows as live. One poller for every
+// visitor (distributed lock), ~145 credits a call (1,400+ rows, the upstream
+// ignores limit): ~209k credits a day; 120 s halves it if ever needed.
+const UPDATE_INTERVAL = 60_000;
 // Outlives the period so the key never goes cold between two polls (at 290 s
 // for a 300 s period, every cycle left a gap that readers refilled upstream).
-const CACHE_TTL = 20 * 60;
+const CACHE_TTL = 120;
 
 /**
  * Redis-backed poller for GET /builders/list (full list, cached).

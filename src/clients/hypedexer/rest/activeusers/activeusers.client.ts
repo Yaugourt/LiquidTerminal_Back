@@ -14,15 +14,15 @@ import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 const CACHE_KEY_PREFIX = 'activeusers';
 const UPDATE_CHANNEL = 'activeusers:updated';
-// Every 5 min (was 2): each cycle is 4 calls of 100 rows (~48 credits) for
-// rolling windows of 1 to 24 h, so 2 min cost ~34k credits a day for no
-// visible change.
-const UPDATE_INTERVAL = 300000;
-// TTL must outlive the poll cycle (300s) so the scheduled poll always rewrites the
-// key before it expires. A shorter TTL left a ~65s cold window each cycle during which
+// Every minute, the front's poll: each cycle is 4 calls of 100 rows (~48
+// credits) for rolling windows of 1 to 24 h, one poller for every visitor
+// (~69k credits a day).
+const UPDATE_INTERVAL = 60_000;
+// TTL must outlive the poll cycle so the scheduled poll always rewrites the
+// key before it expires. A shorter TTL left a cold window each cycle during which
 // incoming requests cache-missed and triggered on-demand refreshes (4 HypeDexer calls
 // each), amplifying upstream 429s. Freshness stays governed by the poll, not the TTL.
-const CACHE_TTL = 330;
+const CACHE_TTL = 90;
 const HOURS_TO_CACHE = [1, 4, 12, 24];
 
 /**
