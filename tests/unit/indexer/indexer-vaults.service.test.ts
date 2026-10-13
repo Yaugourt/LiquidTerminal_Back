@@ -108,7 +108,10 @@ describe('IndexerVaultsIndexerService caching', () => {
     await svc.getVaultLedger({ vaultAddress: HLP, limit: 2000 });
     await svc.getVaultLedger({ vaultAddress: other, limit: 2000 });
 
-    const ttls = [...mockRedis.ttls.entries()].filter(([k]) => k.startsWith('hypedexer:vaults:vaultLedger'));
+    // Without the last copies cacheService keeps beside each entry.
+    const ttls = [...mockRedis.ttls.entries()].filter(
+      ([k]) => k.startsWith('hypedexer:vaults:vaultLedger') && !k.endsWith(':last')
+    );
     expect(ttls).toHaveLength(2);
     expect(ttls.find(([k]) => k.includes(HLP))?.[1]).toBe(HYPEDEXER_TTL.vaultLedgerEmpty);
     expect(ttls.find(([k]) => k.includes(other))?.[1]).toBe(HYPEDEXER_TTL.vaultLedger);
