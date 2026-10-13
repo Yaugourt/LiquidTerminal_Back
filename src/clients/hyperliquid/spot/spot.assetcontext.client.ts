@@ -15,6 +15,8 @@ export class HyperliquidSpotClient extends BaseApiService {
   private static readonly MAX_WEIGHT_PER_MINUTE = 1200;
 
   private readonly CACHE_KEY_RAW = 'spot:raw_data';
+  /** Epoch ms of the last write of CACHE_KEY_RAW: readers can tell frozen data from live data. */
+  private readonly CACHE_KEY_RAW_UPDATED_AT = 'spot:raw_data:updated_at';
   private readonly CACHE_KEY_MARKETS = 'spot:markets';
   private readonly CACHE_KEY_TOKENS = 'spot:tokens:without_pairs';
   private readonly UPDATE_CHANNEL = 'spot:data:updated';
@@ -127,6 +129,7 @@ export class HyperliquidSpotClient extends BaseApiService {
       logDeduplicator.info('Caching data to Redis...');
       await Promise.all([
         redisService.set(this.CACHE_KEY_RAW, JSON.stringify([spotContext, assetContexts])),
+        redisService.set(this.CACHE_KEY_RAW_UPDATED_AT, String(Date.now())),
         redisService.set(this.CACHE_KEY_MARKETS, JSON.stringify(markets)),
         redisService.set(this.CACHE_KEY_TOKENS, JSON.stringify(tokensWithoutPairs))
       ]);

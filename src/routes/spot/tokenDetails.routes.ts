@@ -21,7 +21,14 @@ const TOKEN_ID_RE = /^0x[0-9a-fA-F]{32}$/;
  * Hyperliquid `tokenDetails` of a spot token without its address lists:
  * supply, prices and deploy record as Hyperliquid sends them, plus the length
  * of each list (genesisUserCount, genesisExistingTokenCount,
- * nonCirculatingUserCount). Read from Hyperliquid at most once a minute.
+ * nonCirculatingUserCount). Prices and supplies are the spot poller's (10 s);
+ * the rest is read from Hyperliquid at most once an hour.
+ *
+ * `partial: true`: the summary could not be read in time. `data` is then null
+ * (the front's existing contract: no details, so it falls back to its own
+ * figures instead of reading null fields as zeros), and `live` carries the
+ * name, decimals, prices and supplies with every other field null. The next
+ * poll gets the whole summary.
  */
 router.get('/:tokenId',
   (async (req: Request, res: Response) => {
@@ -33,7 +40,11 @@ router.get('/:tokenId',
     try {
       // Budget key for the caller: its IP, or its /64 on IPv6 (`trust proxy` is set in app.ts).
       const client = rateLimitKeyForIp(req.ip || req.socket.remoteAddress || 'unknown');
-      const { details, lastUpdate } = await tokenDetailsService.getTokenDetails(tokenId, client);
+      const { details, lastUpdate, partial } = await tokenDetailsService.getTokenDetails(tokenId, client);
+      if (partial) {
+        res.json({ success: true, data: null, partial: true, live: details, lastUpdate });
+        return;
+      }
       res.json({ success: true, data: details, lastUpdate });
     } catch (error) {
       if (error instanceof UnknownTokenIdError) {

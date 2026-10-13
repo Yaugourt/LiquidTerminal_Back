@@ -67,6 +67,16 @@ describe('GET /market/token-details/:tokenId', () => {
     expect(getTokenDetails).toHaveBeenCalledWith('0x0D01DC56DCAACA66AD901C959B4011EC', expect.any(String));
   });
 
+  it('flags a partial answer: no data (the front falls back), live fields apart', async () => {
+    const details = { name: 'HYPE', markPx: '90.5', maxSupply: null, genesisUserCount: null };
+    getTokenDetails.mockResolvedValue({ details, lastUpdate: 0, partial: true });
+
+    const res = await request(buildApp()).get(`/market/token-details/${HYPE}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: null, partial: true, live: details, lastUpdate: 0 });
+  });
+
   it('answers 404 for an id that is not a spot token', async () => {
     getTokenDetails.mockRejectedValue(new UnknownTokenIdError(HYPE));
     const res = await request(buildApp()).get(`/market/token-details/${HYPE}`);
