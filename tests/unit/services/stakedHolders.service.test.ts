@@ -2,12 +2,23 @@
  * HYPE stakers come from Hypurrscan's /holders/stakedHYPE, downloaded only
  * while someone reads them (no poller) and sorted once per download:
  * - pages, top holders, stats and address lookups keep their former output;
- * - concurrent readers share one download, a list is reused for 3 minutes
- *   then served stale while one refresh runs;
+ * - concurrent readers share one download, a list is reused for 10 minutes
+ *   then served stale (up to 6 hours) while one refresh runs;
+ * - the last list is kept in Redis: a restart serves it without a download;
  * - an empty upstream list is never served as "nobody stakes".
  */
 jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+}));
+
+const redisData = new Map<string, string>();
+jest.mock('../../../src/core/redis.service', () => ({
+  redisService: {
+    get: jest.fn(async (key: string) => redisData.get(key) ?? null),
+    set: jest.fn(async (key: string, value: string) => {
+      redisData.set(key, value);
+    }),
+  },
 }));
 
 const payload = (holders: Record<string, number>, lastUpdate = 1_791_297_085): unknown => ({
@@ -36,14 +47,16 @@ describe('StakedHoldersService', () => {
   let fetchMock: jest.Mock;
   let now: number;
   let StakedHoldersService: typeof import('../../../src/services/staking/stakedHolders.service').StakedHoldersService;
+  let StakedHoldersUnavailableError: typeof import('../../../src/services/staking/stakedHolders.service').StakedHoldersUnavailableError;
 
   beforeEach(() => {
     jest.resetModules();
+    redisData.clear();
     now = 1_800_000_000_000;
     jest.spyOn(Date, 'now').mockImplementation(() => now);
     fetchMock = jest.fn(async () => json(payload(HOLDERS)));
     global.fetch = fetchMock as unknown as typeof fetch;
-    StakedHoldersService = require('../../../src/services/staking/stakedHolders.service').StakedHoldersService;
+    ({ StakedHoldersService, StakedHoldersUnavailableError } = require('../../../src/services/staking/stakedHolders.service'));
   });
 
   afterEach(() => {
@@ -121,7 +134,7 @@ describe('StakedHoldersService', () => {
     expect(await service.getHoldersStats()).toBe(stats);
   });
 
-  it('shares one download between concurrent readers and reuses it for 3 minutes', async () => {
+  it('shares one download between concurrent readers and reuses it for 10 minutes', async () => {
     let release!: () => void;
     fetchMock.mockImplementationOnce(
       () => new Promise<Response>((resolve) => { release = () => resolve(json(payload(HOLDERS))); })
@@ -138,7 +151,7 @@ describe('StakedHoldersService', () => {
     await Promise.all(calls);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    now += 2 * 60_000;
+    now += 9 * 60_000;
     await service.getStakedHolders(1, 2);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -148,12 +161,13 @@ describe('StakedHoldersService', () => {
     await service.getStakedHolders(1, 1);
 
     fetchMock.mockImplementation(async () => json(payload({ '0x999': 7 }, 1_791_297_700)));
-    now += 3 * 60_000 + 1;
+    now += 10 * 60_000 + 1;
     const stale = await service.getStakedHolders(1, 1);
     expect(stale.holders).toEqual([{ address: '0xbbb', amount: 250_000 }]);
+    // The refresh first checks Redis for a fresher list, then downloads.
+    for (let i = 0; i < 5; i++) await flush();
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    await flush();
     const fresh = await service.getStakedHolders(1, 1);
     expect(fresh.holders).toEqual([{ address: '0x999', amount: 7 }]);
     expect(fresh.metadata.lastUpdate).toBe(1_791_297_700);
@@ -163,14 +177,35 @@ describe('StakedHoldersService', () => {
   it('never serves an empty upstream list, and keeps the stale one when a refresh comes back empty', async () => {
     fetchMock.mockImplementationOnce(async () => json(payload({})));
     const service = StakedHoldersService.getInstance();
-    await expect(service.getStakedHolders(1, 10)).rejects.toThrow('Staked holders unavailable');
+    await expect(service.getStakedHolders(1, 10)).rejects.toBeInstanceOf(StakedHoldersUnavailableError);
 
     await service.getStakedHolders(1, 10);
     fetchMock.mockImplementation(async () => json({ token: 'stakedHYPE' }));
-    now += 3 * 60_000 + 1;
+    now += 10 * 60_000 + 1;
     await service.getStakedHolders(1, 10);
     await flush();
     const page = await service.getStakedHolders(1, 10);
     expect(page.pagination.total).toBe(6);
+  });
+
+  it('keeps the last list in Redis: a restart serves it, lookups included, without a download', async () => {
+    await StakedHoldersService.getInstance().getStakedHolders(1, 1);
+    for (let i = 0; i < 50 && !redisData.has('staking:holders:view'); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(redisData.has('staking:holders:view')).toBe(true);
+
+    jest.resetModules(); // a restart (also clears the fetch mock's calls)
+    fetchMock.mockImplementation(async () => json(null, 500));
+    const restarted = require('../../../src/services/staking/stakedHolders.service').StakedHoldersService.getInstance();
+    now += 60 * 60_000;
+    // An hour old: served at once, its refresh fails, it stays.
+    const page = await restarted.getStakedHolders(1, 2);
+    expect(page.holders).toEqual([
+      { address: '0xbbb', amount: 250_000 },
+      { address: '0xfff', amount: 1_200 },
+    ]);
+    await expect(restarted.getHolderByAddress('0xDDD')).resolves.toEqual({ address: '0xDDD', amount: 12 });
+    expect((await restarted.getHoldersStats()).totalHolders).toBe(6);
   });
 });

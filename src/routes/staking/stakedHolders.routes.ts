@@ -1,5 +1,5 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { StakedHoldersService } from '../../services/staking/stakedHolders.service';
+import { StakedHoldersService, StakedHoldersUnavailableError } from '../../services/staking/stakedHolders.service';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 
 const router = Router();
@@ -7,6 +7,19 @@ const stakedHoldersService = StakedHoldersService.getInstance();
 
 // Middleware global pour rate limiting
 router.use(marketRateLimiter);
+
+/**
+ * The list can't be read from Hypurrscan and nothing is kept (Redis keeps the
+ * last one for 6 h): a temporary condition, so 503 with a short Retry-After.
+ */
+function sendUnavailable(res: Response): void {
+  res.setHeader('Retry-After', '30');
+  res.status(503).json({
+    success: false,
+    error: 'Staked holders temporarily unavailable',
+    code: 'STAKED_HOLDERS_UNAVAILABLE'
+  });
+}
 
 /**
  * GET /api/staking/holders
@@ -25,6 +38,7 @@ router.get('/',
         data: result
       });
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) return sendUnavailable(res);
       res.status(500).json({
         success: false,
         error: 'Internal server error',
@@ -50,6 +64,7 @@ router.get('/top',
         data: holders
       });
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) return sendUnavailable(res);
       res.status(500).json({
         success: false,
         error: 'Internal server error',
@@ -73,6 +88,7 @@ router.get('/stats',
         data: stats
       });
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) return sendUnavailable(res);
       res.status(500).json({
         success: false,
         error: 'Internal server error',
@@ -106,6 +122,7 @@ router.get('/:address',
         data: holder
       });
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) return sendUnavailable(res);
       res.status(500).json({
         success: false,
         error: 'Internal server error',

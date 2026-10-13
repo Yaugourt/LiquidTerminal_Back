@@ -2,6 +2,7 @@ import { HypurrscanTokenHoldersClient } from '../../clients/hypurrscan/tokenHold
 import { StakedHolder } from '../../types/staking.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { OnDemandSnapshot } from '../../utils/onDemandSnapshot';
+import { redisSnapshotStore } from '../../utils/redisSnapshotStore';
 
 interface StakedHoldersStats {
   totalHolders: number;
@@ -19,6 +20,14 @@ interface StakedHoldersStats {
     totalStaked: number;
     percentage: number;
   }[];
+}
+
+/** No stakers list could be read or held: the routes answer 503. */
+export class StakedHoldersUnavailableError extends Error {
+  constructor() {
+    super('Staked holders unavailable');
+    this.name = 'StakedHoldersUnavailableError';
+  }
 }
 
 /** Hypurrscan's stakedHYPE list, sorted once per download. */
@@ -48,24 +57,58 @@ const RANGES = [
 
 const TOP_COUNTS = [10, 50, 100, 500, 1000, 5000, 10000];
 
+/** What Redis keeps of a view: the sorted list as [address, amount] pairs (the map and stats are rebuilt). */
+interface StoredStakedHoldersView {
+  token: string;
+  lastUpdate: number;
+  holdersCount: number;
+  rows: Array<[string, number]>;
+}
+
+function encodeView(view: StakedHoldersView): StoredStakedHoldersView {
+  return {
+    token: view.token,
+    lastUpdate: view.lastUpdate,
+    holdersCount: view.holdersCount,
+    rows: view.sorted.map((h) => [h.address, h.amount]),
+  };
+}
+
+function decodeView(stored: StoredStakedHoldersView): StakedHoldersView {
+  const sorted = stored.rows.map(([address, amount]) => ({ address, amount }));
+  const amounts: Record<string, number> = {};
+  for (const { address, amount } of sorted) amounts[address] = amount;
+  return { token: stored.token, lastUpdate: stored.lastUpdate, holdersCount: stored.holdersCount, sorted, amounts };
+}
+
 /**
  * HYPE stakers, read from Hypurrscan's `/holders/stakedHYPE` (2.8 MB, ~49k
  * addresses, regenerated every ~10 min). A poller used to download it every
  * 50 s into Redis, whether or not anyone opened the stakers table, and each
  * request re-parsed and re-sorted the whole list. The list is now downloaded
  * only while someone reads it (OnDemandSnapshot) and sorted once per download.
+ * The last list is also kept in Redis (gzipped) for MAX_STALE_MS, so a
+ * restart, another instance or a Hypurrscan outage serves it instead of an
+ * error.
  */
 export class StakedHoldersService {
   private static instance: StakedHoldersService;
 
   /** Same windows as the token holders views: the upstream list moves every ~10 min. */
-  private static readonly FRESH_MS = 3 * 60_000;
-  private static readonly MAX_STALE_MS = 15 * 60_000;
+  private static readonly FRESH_MS = 10 * 60_000;
+  private static readonly MAX_STALE_MS = 6 * 60 * 60_000;
+  private static readonly STORE_KEY = 'staking:holders:view';
 
   private readonly client = HypurrscanTokenHoldersClient.getInstance();
   private readonly snapshot = new OnDemandSnapshot(() => this.fetchView(), {
     freshMs: StakedHoldersService.FRESH_MS,
     maxStaleMs: StakedHoldersService.MAX_STALE_MS,
+    store: redisSnapshotStore<StakedHoldersView, StoredStakedHoldersView>(StakedHoldersService.STORE_KEY, {
+      ttlS: StakedHoldersService.MAX_STALE_MS / 1000,
+      compress: true,
+      encode: encodeView,
+      decode: decodeView,
+    }),
   });
 
   private constructor() {}
@@ -128,6 +171,7 @@ export class StakedHoldersService {
         }
       };
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) throw error;
       throw new Error(`Failed to fetch staked holders: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -151,6 +195,7 @@ export class StakedHoldersService {
 
       return null;
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) throw error;
       throw new Error(`Failed to fetch holder by address: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -167,6 +212,7 @@ export class StakedHoldersService {
       const result = await this.getStakedHolders(1, limit);
       return result.holders;
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) throw error;
       throw new Error(`Failed to fetch top holders: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -180,6 +226,7 @@ export class StakedHoldersService {
       view.stats ??= computeStats(view);
       return view.stats;
     } catch (error) {
+      if (error instanceof StakedHoldersUnavailableError) throw error;
       throw new Error(`Failed to fetch holders stats: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -187,7 +234,7 @@ export class StakedHoldersService {
   private async view(): Promise<StakedHoldersView> {
     const view = await this.snapshot.get();
     if (!view) {
-      throw new Error('Staked holders unavailable');
+      throw new StakedHoldersUnavailableError();
     }
     return view;
   }
