@@ -144,6 +144,11 @@ router.get('/:id', (async (req: Request, res: Response) => {
     
     res.json(project);
   } catch (error) {
+    // getById throws on an unknown id rather than returning null.
+    if (error instanceof ProjectNotFoundError) {
+      logDeduplicator.warn('Project not found', { projectId: req.params.id });
+      return res.status(404).json({ message: "Projet non trouvé" });
+    }
     logDeduplicator.error('Error fetching project:', { error: error instanceof Error ? error.message : String(error), projectId: req.params.id });
     res.status(500).json({ message: 'Internal server error' });
   }
