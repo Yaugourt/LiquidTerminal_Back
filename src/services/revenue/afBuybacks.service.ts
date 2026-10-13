@@ -210,6 +210,8 @@ export class AfBuybacksService {
     let run = await this.runningDay.get();
     if (run && run.start !== todayStart) {
       // The day turned: the previous day's running total is not today's.
+      // clear() also detaches a refresh started before midnight, so this
+      // get() reads today instead of joining it.
       this.runningDay.clear();
       run = await this.runningDay.get();
     }
@@ -379,22 +381,38 @@ export class AfBuybacksService {
     if (wait > 0) await sleep(wait);
   }
 
-  /** Kept days from Redis, once (fails open: the days are read again). */
+  /**
+   * Kept days from Redis, once Redis could be read: while it can't, the next
+   * request tries again (meanwhile the days are read from Hyperliquid, as far
+   * as its horizon allows).
+   */
   private loadStore(): Promise<void> {
     if (!this.storeLoad) {
       this.storeLoad = this.readStoredDays().then((stored) => {
-        for (const [start, totals] of stored) {
-          if (!this.days.has(start)) this.days.set(start, totals);
+        if (!stored) {
+          this.storeLoad = null;
+          return;
         }
+        this.adoptDays(stored);
       });
     }
     return this.storeLoad;
   }
 
-  private async readStoredDays(): Promise<Map<number, AfBuybackTotals>> {
+  /** Stored days not held in memory. */
+  private adoptDays(stored: Map<number, AfBuybackTotals>): void {
+    for (const [start, totals] of stored) {
+      if (!this.days.has(start)) this.days.set(start, totals);
+    }
+  }
+
+  /** The kept days; null when Redis can't be read (mget tells it apart from nothing stored). */
+  private async readStoredDays(): Promise<Map<number, AfBuybackTotals> | null> {
+    const values = await redisService.mget([AfBuybacksService.STORE_KEY]);
+    if (!values) return null;
     const stored = new Map<number, AfBuybackTotals>();
     try {
-      const raw = await redisService.get(AfBuybacksService.STORE_KEY);
+      const raw = values[0];
       if (!raw) return stored;
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       for (const [key, value] of Object.entries(parsed)) {
@@ -411,13 +429,20 @@ export class AfBuybacksService {
     return stored;
   }
 
-  /** Kept days merged with what is in Redis (another instance may have read some). */
+  /**
+   * Kept days merged with what is in Redis (another instance may have read
+   * some, or the boot read failed). Skipped while Redis can't be read: the
+   * days stay in memory and go with the next save.
+   */
   private async saveStore(): Promise<void> {
+    const stored = await this.readStoredDays();
+    if (!stored) {
+      logDeduplicator.warn('AfBuybacksService: Redis unreadable, kept days not saved');
+      return;
+    }
+    this.adoptDays(stored);
     const cutoff = utcDayStart(Date.now()) - AfBuybacksService.KEEP_DAYS * DAY_MS;
     const merged: Record<string, AfBuybackTotals> = {};
-    for (const [start, totals] of await this.readStoredDays()) {
-      if (start >= cutoff) merged[start] = totals;
-    }
     for (const [start, totals] of this.days) {
       if (start >= cutoff) merged[start] = totals;
       else this.days.delete(start);

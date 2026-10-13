@@ -8,20 +8,27 @@
  * - completed days are read in the background, newest first, paced to 300
  *   weight a minute, and kept in Redis so a restart doesn't read them again;
  * - the running day is read incrementally, at most once a minute, and starts
- *   over at UTC midnight.
+ *   over at UTC midnight;
+ * - kept days unreadable at boot (Redis down) are read again by a later
+ *   request, and a save never replaces them while Redis can't be read.
  */
 jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
 const redisStore = new Map<string, string>();
-const redisGet = jest.fn(async (key: string) => redisStore.get(key) ?? null);
+
 const redisSet = jest.fn(async (key: string, value: string) => {
   redisStore.set(key, value);
 });
+/** Redis unreadable: get answers null (as for a missing key), mget null overall. */
+let redisDown = false;
+const redisGet = jest.fn(async (key: string) => (redisDown ? null : redisStore.get(key) ?? null));
+const redisMget = jest.fn(async (keys: string[]) => (redisDown ? null : keys.map((k) => redisStore.get(k) ?? null)));
 jest.mock('../../../src/core/redis.service', () => ({
   redisService: {
     get: (key: string) => redisGet(key),
+    mget: (keys: string[]) => redisMget(keys),
     set: (key: string, value: string) => redisSet(key, value),
   },
 }));
@@ -143,6 +150,8 @@ describe('AfBuybacksService', () => {
     redisStore.clear();
     redisGet.mockClear();
     redisSet.mockClear();
+    redisMget.mockClear();
+    redisDown = false;
     fakeHyperliquid.mockClear();
     // 2026-09-25 … 2026-10-07: small days, one of 4,500 buys (three pages), and today so far.
     fills = [];
@@ -243,6 +252,66 @@ describe('AfBuybacksService', () => {
     const completedReads = bodies().filter((b) => b.startTime > 0 && b.startTime < TODAY);
     expect(completedReads.map((b) => b.startTime)).toEqual([TODAY - 12 * DAY, TODAY - 13 * DAY]);
     expect(bodies().filter((b) => b.startTime === 0)).toHaveLength(2);
+  });
+
+  it('reads the kept days again once Redis is back, and saves nothing while it is down', async () => {
+    await mod.AfBuybacksService.getInstance().getBuybacks();
+    await run(30 * MIN);
+    const stored = redisStore.get('hype:af-buybacks:days:v1');
+    expect(Object.keys(JSON.parse(stored ?? '{}'))).toHaveLength(11);
+
+    // A restart while Redis is unreadable: Hyperliquid's horizon has moved
+    // (2 days left), the older kept days can only come from Redis.
+    horizon = TODAY - 2 * DAY;
+    redisDown = true;
+    load();
+    redisSet.mockClear();
+    const service = mod.AfBuybacksService.getInstance();
+    const during = await service.getBuybacks();
+    expect(during.days).toEqual([]);
+    await run(30 * MIN);
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(redisStore.get('hype:af-buybacks:days:v1')).toBe(stored);
+
+    redisDown = false;
+    const after = await service.getBuybacks();
+    expect(after.days).toHaveLength(11);
+    expect(after.days[0].time).toBe(TODAY - 11 * DAY);
+  });
+
+  it('answers the first request after midnight while a refresh started before it is still running', async () => {
+    jest.setSystemTime(at('2026-10-08T23:58:00Z'));
+    const service = mod.AfBuybacksService.getInstance();
+    await service.getBuybacks();
+
+    // Running-day reads made before midnight hang until released.
+    const real = fakeHyperliquid.getMockImplementation();
+    if (!real) throw new Error('fake Hyperliquid has no implementation');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fakeHyperliquid.mockImplementation(async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      if (body.startTime >= TODAY && Date.now() < TODAY + DAY) await gate;
+      return real(url, init);
+    });
+    try {
+      await jest.advanceTimersByTimeAsync(90_000); // 23:59:30: stale, one refresh starts and hangs
+      expect((await service.getBuybacks()).today.time).toBe(TODAY);
+      await jest.advanceTimersByTimeAsync(40_000); // 00:00:10
+
+      const afterMidnight = await service.getBuybacks();
+      expect(afterMidnight.today.time).toBe(TODAY + DAY);
+
+      // The pre-midnight refresh lands late and is not kept.
+      release();
+      await flush();
+      expect((await service.getBuybacks()).today.time).toBe(TODAY + DAY);
+    } finally {
+      release();
+      fakeHyperliquid.mockImplementation(real);
+    }
   });
 
   it('reads the running day incrementally, at most once a minute', async () => {
