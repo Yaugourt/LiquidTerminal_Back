@@ -28,29 +28,32 @@ interface QueuedDownload {
 
 /**
  * Hypurrscan holder lists, fetched on demand by TokenHoldersService and
- * StakedHoldersService (no polling, nothing stored in Redis). These payloads
- * are huge — HYPE 14.9 MB, stakedHYPE 2.8 MB, USDC ~70 MB (2026-10) — so
- * downloads run one at a time: two parsed lists in memory at once is the peak
- * this process accepts.
+ * StakedHoldersService (no polling; the services keep the views they build).
+ * These payloads are huge — HYPE 14.9 MB, stakedHYPE 2.8 MB, USDC ~70 MB
+ * (2026-10) — so downloads run one at a time: two parsed lists in memory at
+ * once is the peak this process accepts.
  *
  * The queue is bounded so a client cycling through tokens can't pile up
- * downloads: past MAX_QUEUED waiting downloads a new one is refused, and one
- * that waited MAX_WAIT_MS, or whose view was evicted meanwhile, is dropped
- * when its turn comes (its reader gets "holders unavailable"). Priority
- * downloads (the stakedHYPE table, one snapshot) go first and are never
- * refused.
+ * downloads: a token view waits up to its own deadline for two free slots
+ * (getTokenLists) and is refused past it; one that waited MAX_WAIT_MS in the
+ * queue, or whose view was evicted meanwhile, is dropped when its turn comes.
+ * Queued entries hold no memory until they run, so the bound only caps how
+ * long the queue can get. Priority downloads (the stakedHYPE table, one
+ * snapshot) go first and are never refused.
  */
 export class HypurrscanTokenHoldersClient extends BaseApiService {
   private static instance: HypurrscanTokenHoldersClient;
   private static readonly API_URL = process.env.HYPURRSCAN_API_URL || 'https://api.hypurrscan.io';
-  /** Regular downloads waiting (the running one excluded): three token views, two lists each. */
-  private static readonly MAX_QUEUED = 6;
+  /** Regular downloads waiting (the running one excluded): six token views, two lists each. */
+  private static readonly MAX_QUEUED = 12;
   /** A regular download that waited this long is dropped: its reader has given up. */
   private static readonly MAX_WAIT_MS = 30_000;
 
   private readonly circuitBreaker: CircuitBreakerService;
   private readonly waiting: QueuedDownload[] = [];
   private running = false;
+  /** Woken whenever a queued download leaves the queue (a slot frees up). */
+  private slotWaiters: Array<() => void> = [];
 
   private constructor() {
     super(HypurrscanTokenHoldersClient.API_URL);
@@ -72,6 +75,31 @@ export class HypurrscanTokenHoldersClient extends BaseApiService {
   /** `/holders/staked{token}` — `{}` for a token nobody stakes. */
   public getStakedHolders(token: string, options: HoldersDownloadOptions = {}): Promise<RawTokenHolders> {
     return this.enqueue(`/holders/staked${encodeURIComponent(token)}`, options);
+  }
+
+  /**
+   * Both lists of a token view (`/holders/{token}` and `/holders/staked{token}`),
+   * queued together or not at all: waits up to `maxWaitMs` for two free
+   * slots, then is refused (HoldersQueueError) — half a view is a wasted
+   * download.
+   */
+  public async getTokenLists(
+    token: string,
+    { maxWaitMs, stillWanted }: { maxWaitMs: number; stillWanted?: () => boolean }
+  ): Promise<[RawTokenHolders, RawTokenHolders]> {
+    const deadline = Date.now() + maxWaitMs;
+    while (this.freeSlots() < 2) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || (stillWanted && !stillWanted())) {
+        throw new HoldersQueueError('queue full');
+      }
+      await this.slotFreed(remaining);
+    }
+    // Same tick as the check above: no other view can take these slots.
+    return Promise.all([
+      this.getHolders(token, { stillWanted }),
+      this.getStakedHolders(token, { stillWanted }),
+    ]);
   }
 
   /** Free slots for regular downloads (a token view needs two). */
@@ -97,6 +125,23 @@ export class HypurrscanTokenHoldersClient extends BaseApiService {
     });
   }
 
+  /** Resolves when a queued download leaves the queue, or after `timeoutMs`. */
+  private slotFreed(timeoutMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const wake = (): void => {
+        clearTimeout(timer);
+        this.slotWaiters = this.slotWaiters.filter((w) => w !== wake);
+        resolve();
+      };
+      const timer = setTimeout(wake, timeoutMs);
+      this.slotWaiters.push(wake);
+    });
+  }
+
+  private wakeSlotWaiters(): void {
+    for (const wake of [...this.slotWaiters]) wake();
+  }
+
   /** Runs the waiting downloads one at a time. */
   private async drain(): Promise<void> {
     if (this.running) return;
@@ -104,6 +149,7 @@ export class HypurrscanTokenHoldersClient extends BaseApiService {
     try {
       let download: QueuedDownload | undefined;
       while ((download = this.waiting.shift())) {
+        this.wakeSlotWaiters();
         if (!download.priority && Date.now() - download.enqueuedAt > HypurrscanTokenHoldersClient.MAX_WAIT_MS) {
           download.reject(new HoldersQueueError('waited too long'));
           continue;

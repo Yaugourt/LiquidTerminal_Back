@@ -1,8 +1,9 @@
-import { HoldersQueueError, HypurrscanTokenHoldersClient } from '../../clients/hypurrscan/tokenHolders.client';
+import { HypurrscanTokenHoldersClient } from '../../clients/hypurrscan/tokenHolders.client';
 import { redisService } from '../../core/redis.service';
 import { AssetContext, MarketData, SpotContext } from '../../types/market.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { OnDemandSnapshot } from '../../utils/onDemandSnapshot';
+import { redisSnapshotStore } from '../../utils/redisSnapshotStore';
 import {
   buildTokenHoldersView,
   HolderCohort,
@@ -49,17 +50,27 @@ export class HoldersUnavailableError extends Error {
  * One view per token, built once per upstream download and held in memory
  * while someone reads it (OnDemandSnapshot). Only the largest MAX_ROWS holders
  * are kept for paging — counts, total and cohorts still cover every holder.
+ *
+ * Each view is also kept in Redis (gzipped, ~0.3-1 MB) for MAX_STALE_MS: a
+ * view evicted from memory, a restart or another instance serves the last
+ * view at once and refreshes it in the background, instead of a cold
+ * download. Holders move slowly (Hypurrscan regenerates the lists every
+ * ~10 min), so a stale view beats "unavailable". A token with nothing stored
+ * waits up to QUEUE_WAIT_MS for room in the download queue.
  */
 export class TokenHoldersService {
   private static instance: TokenHoldersService;
 
-  /** Hypurrscan regenerates the lists every ~10 min. */
-  private static readonly FRESH_MS = 3 * 60_000;
-  private static readonly MAX_STALE_MS = 15 * 60_000;
+  /** Hypurrscan regenerates the lists every ~10 min (USDC's is ~70 MB: no sooner). */
+  private static readonly FRESH_MS = 10 * 60_000;
+  private static readonly MAX_STALE_MS = 6 * 60 * 60_000;
   /** Largest holders kept per token (1,000 pages of 10). */
   public static readonly MAX_ROWS = 10_000;
-  /** Tokens whose view is held at once; the least recently read one goes first. */
-  private static readonly MAX_TOKENS = 8;
+  /** Tokens whose view is held in memory at once; the least recently read one goes first (it stays in Redis). */
+  private static readonly MAX_TOKENS = 24;
+  /** How long a view with nothing to serve waits for room in the download queue (the front retries). */
+  private static readonly QUEUE_WAIT_MS = 20_000;
+  private static readonly STORE_KEY_PREFIX = 'spot:holders:view:';
 
   private static readonly MARKETS_CACHE_KEY = 'spot:markets';
   private static readonly SPOT_META_CACHE_KEY = 'spot:raw_data';
@@ -116,6 +127,10 @@ export class TokenHoldersService {
         {
           freshMs: TokenHoldersService.FRESH_MS,
           maxStaleMs: TokenHoldersService.MAX_STALE_MS,
+          store: redisSnapshotStore<TokenHoldersView>(`${TokenHoldersService.STORE_KEY_PREFIX}${token}`, {
+            ttlS: TokenHoldersService.MAX_STALE_MS / 1000,
+            compress: true,
+          }),
         }
       );
       snapshot = created;
@@ -133,13 +148,10 @@ export class TokenHoldersService {
   private async fetchView(token: string, stillWanted: () => boolean): Promise<TokenHoldersView> {
     try {
       // Both lists or neither: half a view is a wasted download.
-      if (this.client.freeSlots() < 2) {
-        throw new HoldersQueueError('queue full');
-      }
-      const [spot, staked] = await Promise.all([
-        this.client.getHolders(token, { stillWanted }),
-        this.client.getStakedHolders(token, { stillWanted }),
-      ]);
+      const [spot, staked] = await this.client.getTokenLists(token, {
+        maxWaitMs: TokenHoldersService.QUEUE_WAIT_MS,
+        stillWanted,
+      });
       const view = buildTokenHoldersView(token, spot, staked, TokenHoldersService.MAX_ROWS);
       logDeduplicator.info('Token holders view built', { token, holders: view.holdersCount });
       return view;
