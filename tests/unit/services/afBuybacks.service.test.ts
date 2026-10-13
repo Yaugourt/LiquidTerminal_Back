@@ -5,7 +5,7 @@
  *   kept only if Hyperliquid still held all of it (its horizon, read after the
  *   day, is no later than the day's start) — a day past the horizon is left
  *   out, never served as zero;
- * - completed days are read in the background, newest first, paced to 300
+ * - completed days are read in the background, newest first, paced to 60
  *   weight a minute, and kept in Redis so a restart doesn't read them again;
  * - the running day is read incrementally, at most once a minute, and starts
  *   over at UTC midnight;
@@ -220,7 +220,7 @@ describe('AfBuybacksService', () => {
     ).toEqual([]);
   });
 
-  it('paces the background reads to 300 weight a minute', async () => {
+  it('paces the background reads to 60 weight a minute', async () => {
     const service = mod.AfBuybacksService.getInstance();
     await service.getBuybacks();
     await run(60 * MIN);
@@ -228,12 +228,12 @@ describe('AfBuybacksService', () => {
     expect(served.length).toBeGreaterThan(10);
     // every read waits for the weight booked before it
     for (let i = 1; i < served.length; i++) {
-      const owed = (served[i - 1].weight / 300) * MIN;
+      const owed = (served[i - 1].weight / 60) * MIN;
       expect(served[i].time - served[i - 1].time).toBeGreaterThanOrEqual(owed - 1);
     }
     const total = served.reduce((sum, r) => sum + r.weight, 0);
     const span = served[served.length - 1].time - served[0].time;
-    expect(total - served[served.length - 1].weight).toBeLessThanOrEqual((span / MIN) * 300 + 1);
+    expect(total - served[served.length - 1].weight).toBeLessThanOrEqual((span / MIN) * 60 + 1);
   });
 
   it('keeps the days it read in Redis: a restarted service serves them without reading them again', async () => {
@@ -375,7 +375,7 @@ describe('AfBuybacksService', () => {
     expect(last?.usd).toBeCloseTo(expected(TODAY).usd, 4);
   });
 
-  it('fails when the running day was never read, and serves it stale for 15 minutes', async () => {
+  it('fails when the running day was never read, and serves it stale for an hour', async () => {
     failWith = () => 500;
     const service = mod.AfBuybacksService.getInstance();
     await expect(service.getBuybacks()).rejects.toBeInstanceOf(mod.AfBuybacksUnavailableError);
@@ -385,7 +385,9 @@ describe('AfBuybacksService', () => {
     failWith = () => 500;
     await jest.advanceTimersByTimeAsync(2 * MIN);
     expect((await service.getBuybacks()).today).toEqual(ok.today);
-    await jest.advanceTimersByTimeAsync(14 * MIN);
+    await jest.advanceTimersByTimeAsync(57 * MIN);
+    expect((await service.getBuybacks()).today).toEqual(ok.today);
+    await jest.advanceTimersByTimeAsync(2 * MIN);
     await expect(service.getBuybacks()).rejects.toBeInstanceOf(mod.AfBuybacksUnavailableError);
   });
 
@@ -415,7 +417,8 @@ describe('AfBuybacksService', () => {
     for (let i = 0; i < 2_001; i++) fills.push(fill(stuck, 1, 90));
     const service = mod.AfBuybacksService.getInstance();
     await service.getBuybacks();
-    await run(MIN);
+    // A full page weighs 120: the next one waits 2 minutes at 60 a minute.
+    await run(3 * MIN);
     expect((await service.getBuybacks()).days.some((d) => d.time === TODAY - DAY)).toBe(false);
     // two pages, then it gives up (no re-reading of the same millisecond)
     expect(bodies().filter((b) => b.startTime >= TODAY - DAY && b.startTime < TODAY)).toHaveLength(2);

@@ -146,8 +146,10 @@ function addBuybacks(
  * - The running day is read incrementally (fills since the last one, with an
  *   overlap), at most once per FRESH_MS whatever the number of readers.
  * - Completed days are read in the background, newest first, paced to
- *   MAX_WEIGHT_PER_MINUTE: the backend's pollers already use about half of
- *   the IP's 1,200 a minute, and a 2,000-fill page weighs 120.
+ *   MAX_WEIGHT_PER_MINUTE: the backend's live pollers and on-demand reads
+ *   (token details) share the IP's 1,200 a minute and come first, and a
+ *   2,000-fill page weighs 120. A one-off after a Redis loss: the 13 days then
+ *   take minutes to tens of minutes, invisible behind the kept days.
  */
 export class AfBuybacksService {
   private static instance: AfBuybacksService;
@@ -156,8 +158,8 @@ export class AfBuybacksService {
   public static readonly WINDOW_DAYS = 13;
   /** The running day is read again at most this often. */
   private static readonly FRESH_MS = 60_000;
-  /** Past this age the running day is not served. */
-  private static readonly MAX_STALE_MS = 15 * 60_000;
+  /** Past this age the running day is not served (the front polls every 5 min). */
+  private static readonly MAX_STALE_MS = 60 * 60_000;
   /** Fills per `userFillsByTime` response, at most. */
   private static readonly PAGE_SIZE = 2_000;
   /** Pages read for one range, at most (40,000 fills). */
@@ -168,8 +170,8 @@ export class AfBuybacksService {
   private static readonly SETTLE_MS = 60_000;
   /** Completed days read before each horizon check (one check per batch). */
   private static readonly DAYS_PER_BATCH = 4;
-  /** Weight the background reads may spend a minute. */
-  private static readonly MAX_WEIGHT_PER_MINUTE = 300;
+  /** Weight the background reads may spend a minute (out of the IP's 1,200, after the live pollers). */
+  private static readonly MAX_WEIGHT_PER_MINUTE = 60;
   /** A failed background read is retried after this. */
   private static readonly RETRY_AFTER_MS = 5 * 60_000;
   private static readonly RECENT_FILLS = 12;
