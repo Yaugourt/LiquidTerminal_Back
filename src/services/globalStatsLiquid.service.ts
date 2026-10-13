@@ -31,9 +31,11 @@ export class DashboardGlobalStatsService {
   public async getDashboardGlobalStats(): Promise<DashboardGlobalStats> {
     try {
       // Récupérer les données en parallèle
-      const [globalStats, bridgedUsdcData, validatorSummaries, vaultsData] = await Promise.all([
+      // Bridged USDC comes from a shared 5 min cache of DefiLlama and never
+      // throws: a DefiLlama outage leaves it null (or its last copy), not a 500.
+      const [globalStats, bridgedUsdc, validatorSummaries, vaultsData] = await Promise.all([
         this.globalStatsClient.getGlobalStats(),
-        this.bridgedUsdcService.getBridgedUsdcData(),
+        this.bridgedUsdcService.getLatestBridgedUsdc(),
         this.validatorSummariesService.getValidatorSummaries(),
         this.vaultsService.getVaultsList()
       ]);
@@ -42,13 +44,10 @@ export class DashboardGlobalStatsService {
       const rawTotalHypeStake = validatorSummaries.reduce((total: number, validator: ValidatorSummary) => total + validator.stake, 0);
       const totalHypeStake = this.formatHypeAmount(rawTotalHypeStake);
 
-      // Prendre la dernière valeur de USDC bridgé
-      const latestBridgedUsdc = bridgedUsdcData[bridgedUsdcData.length - 1]?.totalCirculating.peggedUSD || 0;
-
       return {
         numberOfUsers: globalStats.nUsers,
         dailyVolume: globalStats.dailyVolume,
-        bridgedUsdc: latestBridgedUsdc,
+        bridgedUsdc,
         totalHypeStake: totalHypeStake,
         vaultsTvl: vaultsData.pagination.totalTvl
       };

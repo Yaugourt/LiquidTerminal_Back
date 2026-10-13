@@ -15,10 +15,12 @@ function buildQuery(record: Record<string, string | number | boolean | undefined
   return s ? `?${s}` : '';
 }
 
-// TTLs for overview snapshots. 60s for most routes (active-traders, daily-pnl,
-// daily-volume, total-fees, total-fills, trading-volume); coin-distribution
-// is user-scoped + heavier upstream, cached longer.
-const TTL_OVERVIEW_DEFAULT = 60;
+// The fixed-name snapshots (active traders, daily PnL, daily volume, fees,
+// fills, trading volume) are not cached here: IndexerOverviewService caches
+// them under the same keys with their own TTLs (15 s for the 24h tiles), one
+// fetch per key across visitors. A second cache here held them up to 60 s
+// whenever it was the one that wrote the key. Coin distribution is per user
+// and heavier upstream, cached longer.
 const TTL_COIN_DISTRIBUTION = 300;
 
 /**
@@ -60,11 +62,7 @@ export class HypeDexerOverviewIndexerClient extends HypeDexerBaseClient {
   }
 
   public getActiveTraders24h(): Promise<unknown> {
-    return withRedisCache(
-      buildHypedexerCacheKey('overview', 'active-traders-24h'),
-      TTL_OVERVIEW_DEFAULT,
-      () => this.getPath('/overview/active-traders-24h'),
-    );
+    return this.getPath('/overview/active-traders-24h');
   }
 
   public getCoinDistribution(params: { user: string }): Promise<unknown> {
@@ -76,42 +74,22 @@ export class HypeDexerOverviewIndexerClient extends HypeDexerBaseClient {
   }
 
   public getDailyPnl10d(): Promise<unknown> {
-    return withRedisCache(
-      buildHypedexerCacheKey('overview', 'daily-pnl-10d'),
-      TTL_OVERVIEW_DEFAULT,
-      () => this.getPath('/overview/daily-pnl-10d'),
-    );
+    return this.getPath('/overview/daily-pnl-10d');
   }
 
   public getDailyVolume10d(): Promise<unknown> {
-    return withRedisCache(
-      buildHypedexerCacheKey('overview', 'daily-volume-10d'),
-      TTL_OVERVIEW_DEFAULT,
-      () => this.getPath('/overview/daily-volume-10d'),
-    );
+    return this.getPath('/overview/daily-volume-10d');
   }
 
   public getTotalFees24h(): Promise<unknown> {
-    return withRedisCache(
-      buildHypedexerCacheKey('overview', 'total-fees-24h'),
-      TTL_OVERVIEW_DEFAULT,
-      () => this.getPath('/overview/total-fees-24h'),
-    );
+    return this.getPath('/overview/total-fees-24h');
   }
 
   public getTotalFills24h(): Promise<unknown> {
-    return withRedisCache(
-      buildHypedexerCacheKey('overview', 'total-fills-24h'),
-      TTL_OVERVIEW_DEFAULT,
-      () => this.getPath('/overview/total-fills-24h'),
-    );
+    return this.getPath('/overview/total-fills-24h');
   }
 
   public getTradingVolume24h(): Promise<unknown> {
-    return withRedisCache(
-      buildHypedexerCacheKey('overview', 'trading-volume-24h'),
-      TTL_OVERVIEW_DEFAULT,
-      () => this.getPath('/overview/trading-volume-24h'),
-    );
+    return this.getPath('/overview/trading-volume-24h');
   }
 }

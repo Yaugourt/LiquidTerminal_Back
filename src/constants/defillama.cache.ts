@@ -21,6 +21,8 @@ export const DEFILLAMA_CACHE_KEYS = {
   hlFeeRank: `${DEFILLAMA_CACHE_PREFIX}:hl:fee-rank`,
   linkedProjects: `${DEFILLAMA_CACHE_PREFIX}:linked-projects`,
   tvlHistory: (slug: string) => `${DEFILLAMA_CACHE_PREFIX}:tvl-history:${slug}`,
+  /** Latest USDC circulating on Hyperliquid (stablecoins.llama.fi), one shared value for `/home/globalstats`. */
+  bridgedUsdc: `${DEFILLAMA_CACHE_PREFIX}:stablecoins:hyperliquid:usdc`,
 } as const;
 
 /** TTLs in seconds. */
@@ -37,4 +39,5 @@ export const DEFILLAMA_TTL = {
   ranking: 600,
   linkedProjects: 300,
   tvlHistory: 1800, // daily series, refresh twice an hour is plenty
+  bridgedUsdc: 300, // 5 min — one point a day, whose last value DefiLlama revises a few times an hour
 } as const;

@@ -16,6 +16,12 @@ export class HyperliquidVaultClient extends BaseApiService {
   private static readonly UPDATE_CHANNEL = 'vault:hlp:updated';
   // 30 s (weight 20 → 40 a minute): HLP TVL, APR and PnL move slowly.
   private static readonly UPDATE_INTERVAL = 30000;
+  /**
+   * Safety TTL of the stored TVL (10 polls): every poll rewrites it, so readers
+   * see a value at most one poll old; if the poller stops or Hyperliquid keeps
+   * failing, the value expires instead of being served frozen forever.
+   */
+  private static readonly CACHE_TTL_S = 300;
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
@@ -73,50 +79,19 @@ export class HyperliquidVaultClient extends BaseApiService {
   }
 
   /**
-   * Récupère la TVL du vault HLP
+   * HLP TVL as readers see it (`vault:hlp:tvl`, rewritten by the poller every
+   * 30 s). Only when the key is missing (poller not started yet, or failing
+   * past the safety TTL) is Hyperliquid read here. 0 when nothing is known.
    */
   public async getHlpTvl(): Promise<number> {
     try {
-      // Essayer d'abord de récupérer depuis le cache
       const cachedTvl = await redisService.get(HyperliquidVaultClient.CACHE_KEY);
-      
       if (cachedTvl) {
         return parseFloat(cachedTvl);
       }
-      
-      // Si pas de données en cache, récupérer depuis l'API
-      const vaultDetails = await this.getVaultDetailsRaw(HyperliquidVaultClient.HLP_VAULT_ADDRESS);
-      
-      // Trouver le portfolio "day"
-      const dayPortfolio = vaultDetails.portfolio.find(([key]) => key === 'day');
-      
-      if (!dayPortfolio) {
-        logDeduplicator.warn('No day portfolio found for HLP vault');
-        return 0;
-      }
-      
-      const [_, portfolioData] = dayPortfolio;
-      
-      if (!portfolioData.accountValueHistory || portfolioData.accountValueHistory.length === 0) {
-        logDeduplicator.warn('No account value history found for HLP vault day portfolio');
-        return 0;
-      }
-      
-      // Trier par timestamp décroissant pour avoir la plus récente en premier
-      const sortedHistory = [...portfolioData.accountValueHistory].sort((a, b) => b[0] - a[0]);
-      const latestValue = parseFloat(sortedHistory[0][1]);
-      
-      // Mettre en cache
-      await redisService.set(HyperliquidVaultClient.CACHE_KEY, latestValue.toString());
-      
-      logDeduplicator.info('HLP vault TVL retrieved successfully', { 
-        tvl: latestValue,
-        timestamp: sortedHistory[0][0]
-      });
-      
-      return latestValue;
+      return (await this.refreshHlpTvl()) ?? 0;
     } catch (error) {
-      logDeduplicator.error('Error fetching HLP vault TVL:', { 
+      logDeduplicator.error('Error fetching HLP vault TVL:', {
         error: error instanceof Error ? error.message : String(error)
       });
       return 0;
@@ -124,20 +99,67 @@ export class HyperliquidVaultClient extends BaseApiService {
   }
 
   /**
-   * Met à jour la TVL du vault HLP
+   * Reads the TVL from Hyperliquid (latest point of the vault's day history)
+   * and stores it under the safety TTL. Null when the answer has no day
+   * history: the stored value is left as is. Throws on a failed call.
+   */
+  private async refreshHlpTvl(): Promise<number | null> {
+    const vaultDetails = await this.getVaultDetailsRaw(HyperliquidVaultClient.HLP_VAULT_ADDRESS);
+
+    // Trouver le portfolio "day"
+    const dayPortfolio = vaultDetails.portfolio.find(([key]) => key === 'day');
+
+    if (!dayPortfolio) {
+      logDeduplicator.warn('No day portfolio found for HLP vault');
+      return null;
+    }
+
+    const [_, portfolioData] = dayPortfolio;
+
+    if (!portfolioData.accountValueHistory || portfolioData.accountValueHistory.length === 0) {
+      logDeduplicator.warn('No account value history found for HLP vault day portfolio');
+      return null;
+    }
+
+    // Trier par timestamp décroissant pour avoir la plus récente en premier
+    const sortedHistory = [...portfolioData.accountValueHistory].sort((a, b) => b[0] - a[0]);
+    const latestValue = parseFloat(sortedHistory[0][1]);
+    if (!Number.isFinite(latestValue)) {
+      logDeduplicator.warn('HLP vault day portfolio has no numeric account value');
+      return null;
+    }
+
+    await redisService.set(
+      HyperliquidVaultClient.CACHE_KEY,
+      latestValue.toString(),
+      HyperliquidVaultClient.CACHE_TTL_S
+    );
+
+    logDeduplicator.info('HLP vault TVL retrieved successfully', {
+      tvl: latestValue,
+      timestamp: sortedHistory[0][0]
+    });
+
+    return latestValue;
+  }
+
+  /**
+   * Poller tick: always reads Hyperliquid (the stored value is what it
+   * replaces, never a reason to skip the call), then tells readers.
    */
   private async updateHlpTvl(): Promise<void> {
     try {
-      const tvl = await this.getHlpTvl();
-      
+      const tvl = await this.refreshHlpTvl();
+      if (tvl === null) return;
+
       // Publier l'événement de mise à jour
       await redisService.publish(HyperliquidVaultClient.UPDATE_CHANNEL, JSON.stringify({
         type: 'DATA_UPDATED',
         timestamp: Date.now()
       }));
-      
+
       this.lastUpdate = Date.now();
-      
+
       logDeduplicator.info('HLP vault TVL updated', { tvl });
     } catch (error) {
       logDeduplicator.error('Failed to update HLP vault TVL:', { error: error instanceof Error ? error.message : String(error) });

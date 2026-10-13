@@ -199,7 +199,8 @@ export interface DashboardGlobalStats {
         totalVolume24h: number;
         totalPairs: number;
     };
-    bridgedUsdc: number;
+    /** Null when DefiLlama failed and no copy of its last answer is left. */
+    bridgedUsdc: number | null;
     numberOfUsers: number;
     dailyVolume: number;
     totalHypeStake: number;

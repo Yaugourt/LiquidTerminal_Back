@@ -104,7 +104,7 @@ Copy `.env.example` to `.env`. Key variables:
 | `JWKS_URL`, `NEXT_PUBLIC_PRIVY_AUDIENCE`, `FIRST_ADMIN_PRIVY_USER_ID` | Privy authentication |
 | `ALLOWED_ORIGINS`, `PORT`, `NODE_ENV` | Server config |
 | `HL_INDEXER_API_KEY` | HypeDexer / HL indexer access |
-| `HYPEDEXER_DAILY_CREDIT_BUDGET` | HypeDexer credits a UTC day before a warning is logged (optional, default 300000; warning only) |
+| `HYPEDEXER_DAILY_CREDIT_BUDGET` | HypeDexer credits a UTC day before a warning is logged (optional, default 1000000; warning only, never blocks a call). The background alone is ~320k/day; the Elysium ingestion (~2.3M/day when enabled) exceeds the default on purpose while it is investigated (`docs/DATA_BUDGET.md` §4.2) |
 | `HYPERFOLIO_API_KEY` | Hyperfolio access: required for `/hyperfolio/*` (Yields page, tracker EVM panels), which answer 503 `HYPERFOLIO_NOT_CONFIGURED` without it |
 | `HYPERFOLIO_DAILY_BUDGET` | Upstream Hyperfolio calls a UTC day, all instances together (optional, default 50000; a guess of the paid quota, set it to the real one) |
 | `RATE_LIMIT_BURST`, `RATE_LIMIT_MINUTE`, `RATE_LIMIT_HOUR` | Per-IP ceilings of the general limiter (optional, defaults 200/s, 6000/min, 300000/h; sized for many people behind one IP) |

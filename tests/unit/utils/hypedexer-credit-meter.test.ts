@@ -101,6 +101,21 @@ describe('HypedexerCreditMeter', () => {
     await expect(meter.todayTotal()).resolves.toBe(1800);
   });
 
+  it('defaults to a 1,000,000 budget, above the ~320k background day, and only warns', async () => {
+    mockCounters.set(dayKey, 999_000);
+    meter.record('https://api.hypedexer.com/a', '900', null);
+    await flushPromises();
+    expect(mockLog.warn).not.toHaveBeenCalled();
+
+    // record() returns nothing to wait on: past the budget the call has long gone through.
+    expect(meter.record('https://api.hypedexer.com/a', '200', null)).toBeUndefined();
+    await flushPromises();
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      'HypeDexer daily credit budget exceeded',
+      expect.objectContaining({ credits: 1_000_100, budget: 1_000_000 })
+    );
+  });
+
   it('keeps metering the minute when Redis fails', async () => {
     mockClient.incrby.mockRejectedValueOnce(new Error('down'));
     meter.record('https://api.hypedexer.com/a', '3', null);

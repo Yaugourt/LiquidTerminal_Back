@@ -131,7 +131,7 @@ Status 2026-09-28: every item below is done unless marked otherwise. Results in 
 ### P3: observability, so regressions are caught
 
 - [x] **P3.1** `utils/hypedexer-credit-meter.ts`, called from `core/base.api.service.ts` on every successful response carrying `X-Credit-Cost` (only HypeDexer sends it): calls and credits per upstream path (ids/addresses collapsed), logged once a minute as `HypeDexer credits (last minute)` with the last `X-Credit-Balance`.
-- [x] **P3.2** Day total in Redis (`hypedexer:credits:YYYY-MM-DD`, UTC, shared by instances), one warning per process and day above `HYPEDEXER_DAILY_CREDIT_BUDGET` (default 300 000). Logs only: `/api/health` is public.
+- [x] **P3.2** Day total in Redis (`hypedexer:credits:YYYY-MM-DD`, UTC, shared by instances), one warning per process and day above `HYPEDEXER_DAILY_CREDIT_BUDGET` (default 300 000, raised to 1 000 000 on 2026-10-13: see `docs/DATA_BUDGET.md` §4.2). Logs only: `/api/health` is public.
 - [x] **P3.3 Export quota.** A cancelled download gives the quota back up to 4 upstream pages (≈200 credits); past that the pages were paid for and the export counts. Upstream failures still give it back; local datasets never count.
 
 **Expected result.** After P0+P1, per-visitor cost on the heavy pages drops by >90% and becomes mostly shared. After P2, the background is ~40–50k/day. At 1 000 users, total cost stays of the same order as with 10. **Measured: §8.**

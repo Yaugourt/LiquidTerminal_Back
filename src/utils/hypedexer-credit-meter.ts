@@ -9,13 +9,20 @@ import { logDeduplicator } from './logDeduplicator';
  *   so a route that starts burning shows up in the logs by name.
  * - Across instances: the day's total in Redis (`hypedexer:credits:YYYY-MM-DD`,
  *   UTC), with one warning per process and day once it passes the budget
- *   (`HYPEDEXER_DAILY_CREDIT_BUDGET`, default 300 000).
+ *   (`HYPEDEXER_DAILY_CREDIT_BUDGET`, default 1 000 000).
+ *
+ * A warning only: nothing here ever delays or refuses a call.
  */
 
 const FLUSH_INTERVAL_MS = 60_000;
 const TOP_PATHS_LOGGED = 10;
 const DAY_KEY_TTL_SECONDS = 8 * 24 * 60 * 60;
-const DEFAULT_DAILY_BUDGET = 300_000;
+/**
+ * Above the background alone (~320k a day with zero visitors) plus a busy day
+ * of live tiles, so the warning means something. The Elysium ingestion
+ * (~2.3M a day when enabled) exceeds it on purpose: it is under investigation.
+ */
+const DEFAULT_DAILY_BUDGET = 1_000_000;
 
 /**
  * Loaded on first use: importing the Redis service opens its connections, and
