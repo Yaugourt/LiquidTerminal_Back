@@ -5,10 +5,14 @@ import { validateGetRequest } from '../../middleware/validation';
 import { auctionGetSchema } from '../../schemas/spot.schemas';
 import { AuctionError, InvalidAuctionDataError } from '../../errors/spot.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { HypurrscanFeedsService } from '../../services/hypurrscan/hypurrscanFeeds.service';
+import { hypurrscanFeedHandler } from '../hypurrscanFeed.handler';
 
 const router = express.Router();
 const spotDeployStateApi = SpotDeployStateApiService.getInstance();
 const auctionService = AuctionPageService.getInstance(spotDeployStateApi);
+const hypurrscanFeeds = HypurrscanFeedsService.getInstance();
 
 // Appliquer le rate limiting et la sanitization
 
@@ -83,5 +87,8 @@ router.get('/timing', validateGetRequest(auctionGetSchema), (async (_req: Reques
     });
   }
 }) as RequestHandler);
+
+// Past perp deploy auctions (Hypurrscan /pastAuctionsPerp, shared cache).
+router.get('/perp', marketRateLimiter, hypurrscanFeedHandler(() => hypurrscanFeeds.getPastAuctionsPerp()));
 
 export default router; 
