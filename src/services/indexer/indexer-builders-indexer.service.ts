@@ -6,7 +6,7 @@ import {
   IndexerBuildersTimeframe,
 } from '../../clients/hypedexer/rest/builders/builders-indexer.client';
 import { HLIndexerBuildersClient } from '../../clients/hypedexer/rest/builders/builders-list-poller.client';
-import { cacheService } from '../../core/cache.service';
+import { cacheService, SHARED_LAST_COPY_KEEP_S } from '../../core/cache.service';
 import { HYPEDEXER_BUILDERS_CACHE_KEY, HYPEDEXER_TTL } from '../../constants/hypedexer.cache';
 
 /**
@@ -41,15 +41,19 @@ export class IndexerBuildersIndexerService {
     return cacheService.getOrSet(
       HYPEDEXER_BUILDERS_CACHE_KEY.stats(tf),
       () => this.client.getGlobalStats(timeframe),
-      HYPEDEXER_TTL.buildersStats
+      HYPEDEXER_TTL.buildersStats,
+      // One key per timeframe: the last copy is kept an hour, so an outage still shows the last figures.
+      { lastCopyKeepS: SHARED_LAST_COPY_KEEP_S }
     );
   }
 
+  /** Slow upstream: an expired entry is served from its last copy while one refresh runs. */
   public async getStatsAllTimeframes(): Promise<unknown> {
     return cacheService.getOrSet(
       HYPEDEXER_BUILDERS_CACHE_KEY.statsAllTimeframes,
       () => this.client.getStatsAllTimeframes(),
-      HYPEDEXER_TTL.buildersAllTimeframes
+      HYPEDEXER_TTL.buildersAllTimeframes,
+      { refreshInBackground: true, lastCopyKeepS: SHARED_LAST_COPY_KEEP_S }
     );
   }
 
@@ -65,17 +69,33 @@ export class IndexerBuildersIndexerService {
     );
   }
 
+  /**
+   * A builder page polls its stats and users every 15 s: shared by every
+   * viewer of that builder (one upstream call per key and TTL, not per viewer).
+   */
   public async getBuilderStats(
     builderAddress: string,
     params: IndexerBuilderDetailQuery
   ): Promise<unknown> {
-    return this.client.getBuilderStats(builderAddress, params);
+    return cacheService.getOrSet(
+      HYPEDEXER_BUILDERS_CACHE_KEY.builderStats(builderAddress, params.timeframe ?? 'default'),
+      () => this.client.getBuilderStats(builderAddress, params),
+      HYPEDEXER_TTL.buildersStats
+    );
   }
 
   public async getBuilderUsers(
     builderAddress: string,
     params: IndexerBuilderUsersQuery
   ): Promise<unknown> {
-    return this.client.getBuilderUsers(builderAddress, params);
+    return cacheService.getOrSet(
+      HYPEDEXER_BUILDERS_CACHE_KEY.builderUsers(
+        builderAddress,
+        params.timeframe ?? 'default',
+        params.limit !== undefined ? String(params.limit) : 'default'
+      ),
+      () => this.client.getBuilderUsers(builderAddress, params),
+      HYPEDEXER_TTL.buildersStats
+    );
   }
 }
