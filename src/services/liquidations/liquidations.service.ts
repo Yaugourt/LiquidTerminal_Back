@@ -1,5 +1,6 @@
 import { HLIndexerLiquidationsClient } from '../../clients/hypedexer/rest/liquidations/liquidations.client';
 import {
+  Liquidation,
   LiquidationResponse,
   LiquidationQueryParams,
   LiquidationsError,
@@ -45,6 +46,8 @@ export class LiquidationsService implements LiquidationDataProvider {
   private static readonly RECENT_CACHE_TTL = 15;
   private static readonly USER_HISTORY_CACHE_TTL = 300;
   private static readonly TOP_CACHE_TTL = 30;
+  /** Largest `limit` /historical/top accepts: the rows read per window. */
+  private static readonly TOP_MAX_LIMIT = 20;
 
   private static readonly TOP_PERIOD_HOURS: Record<TopLiquidationsPeriod, number> = {
     '1h': 1,
@@ -253,13 +256,29 @@ export class LiquidationsService implements LiquidationDataProvider {
    * The dashboard's "notable liquidations" used to be picked out of a
    * 1 000-row HypeDexer page (~100 credits every 30 s); the DB already holds
    * every liquidation, deduplicated the same way as the stats beside it.
+   *
+   * One read per window, whatever the threshold and limit: the TOP_MAX_LIMIT
+   * largest rows, cached. The rows above a threshold are a prefix of them
+   * (largest first), so filtering and slicing that list gives exactly what
+   * the query would. A free-form min_amount_dollars can't bypass the cache.
    */
   public async getTopLiquidations(
     period: TopLiquidationsPeriod,
     minAmountDollars: number,
     limit: number
   ): Promise<TopLiquidationsResponse> {
-    const cacheKey = `liquidations:top:${period}:${minAmountDollars}:${limit}`;
+    const top = await this.getTopOfWindow(period);
+    return {
+      success: true,
+      data: top.data.filter((l) => l.notional_total >= minAmountDollars).slice(0, limit),
+      filters: { period, minAmountDollars, limit },
+      metadata: { computedAt: top.computedAt },
+    };
+  }
+
+  /** The window's TOP_MAX_LIMIT largest liquidations, shared for TOP_CACHE_TTL. */
+  private async getTopOfWindow(period: TopLiquidationsPeriod): Promise<{ data: Liquidation[]; computedAt: string }> {
+    const cacheKey = `liquidations:top:${period}`;
 
     try {
       const cached = await redisService.get(cacheKey);
@@ -271,13 +290,8 @@ export class LiquidationsService implements LiquidationDataProvider {
     return this.inflight.run(cacheKey, async () => {
       try {
         const since = new Date(Date.now() - LiquidationsService.TOP_PERIOD_HOURS[period] * 60 * 60 * 1000);
-        const data = await historicalLiquidationRepository.getTopEvents(since, minAmountDollars, limit);
-        const result: TopLiquidationsResponse = {
-          success: true,
-          data,
-          filters: { period, minAmountDollars, limit },
-          metadata: { computedAt: new Date().toISOString() },
-        };
+        const data = await historicalLiquidationRepository.getTopEvents(since, 0, LiquidationsService.TOP_MAX_LIMIT);
+        const result = { data, computedAt: new Date().toISOString() };
         try {
           await redisService.set(cacheKey, JSON.stringify(result), LiquidationsService.TOP_CACHE_TTL);
         } catch (cacheError) {

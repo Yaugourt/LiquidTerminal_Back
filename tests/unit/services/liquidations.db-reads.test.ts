@@ -65,16 +65,39 @@ describe('LiquidationsService DB reads and history cache', () => {
     const second = await service.getTopLiquidations('24h', 100000, 3);
 
     expect(first.data).toEqual([row]);
+    expect(first.filters).toEqual({ period: '24h', minAmountDollars: 100000, limit: 3 });
     expect(second).toEqual(first);
     expect(mockRepo.getTopEvents).toHaveBeenCalledTimes(1);
     const [since, min, limit] = mockRepo.getTopEvents.mock.calls[0];
-    expect(min).toBe(100000);
-    expect(limit).toBe(3);
+    // The window's 20 largest, whatever the threshold and limit asked.
+    expect(min).toBe(0);
+    expect(limit).toBe(20);
     // 24h window.
     expect(Math.abs(before - 24 * 3600e3 - (since as Date).getTime())).toBeLessThan(5000);
-    expect(mockTtls.get('liquidations:top:24h:100000:3')).toBe(30);
+    expect(mockTtls.get('liquidations:top:24h')).toBe(30);
     expect(mockClient.getLiquidations).not.toHaveBeenCalled();
     expect(mockClient.getRecentLiquidations).not.toHaveBeenCalled();
+  });
+
+  it('serves any threshold and limit from the one cached read per window', async () => {
+    const rows = [5e6, 2e6, 150_000, 99_999.5, 40_000, 0].map((notional_total, i) => ({
+      tid: 10 - i,
+      coin: 'ETH',
+      notional_total,
+    }));
+    mockRepo.getTopEvents.mockResolvedValue(rows);
+
+    const a = await service.getTopLiquidations('7d', 100000, 3);
+    const b = await service.getTopLiquidations('7d', 1.2345, 20);
+    const c = await service.getTopLiquidations('7d', 1.2346, 2);
+    const d = await service.getTopLiquidations('7d', 1e9, 5);
+
+    expect(a.data.map((r) => r.notional_total)).toEqual([5e6, 2e6, 150_000]);
+    expect(b.data.map((r) => r.notional_total)).toEqual([5e6, 2e6, 150_000, 99_999.5, 40_000]);
+    expect(c.data.map((r) => r.notional_total)).toEqual([5e6, 2e6]);
+    expect(d.data).toEqual([]);
+    expect(mockRepo.getTopEvents).toHaveBeenCalledTimes(1);
+    expect([...mockStore.keys()].filter((k) => k.startsWith('liquidations:top:'))).toEqual(['liquidations:top:7d']);
   });
 
   it('keeps a wallet history 5 min and other lists 15 s, keyed on every param', async () => {
