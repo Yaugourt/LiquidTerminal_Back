@@ -18,6 +18,8 @@ const perp = [{ name: 'BTC', price: 100_000, index: 0 }];
 const metas = [
   { universe: [{ name: 'BTC' }] },
   { universe: [{ name: 'xyz:XYZ100' }, { name: 'xyz:TSLA' }] },
+  null,
+  { universe: [{ name: 'km:US500' }, { name: 'km:GOLD' }] },
 ];
 
 describe('enrichTwapOrders', () => {
@@ -35,6 +37,19 @@ describe('enrichTwapOrders', () => {
     expect(usdt.tokenSymbol).toBe('USDT0');
     // The raw order is passed through untouched.
     expect(hype.action).toEqual(order(10_107).action);
+  });
+
+  it('splits HIP-3 indexes as 100000 + dex × 10000 + local index, for every dex', () => {
+    // Live 2026-10-13: a = 180015, 190005, 200004 came back unlabeled.
+    const [xyz, km, kmLocal1] = enrichTwapOrders(
+      [order(100_000 + 1 * 10_000 + 0), order(100_000 + 3 * 10_000 + 0), order(130_001)],
+      spot,
+      perp,
+      metas
+    );
+    expect(xyz).toMatchObject({ tokenSymbol: 'XYZ100', marketType: 'hip3', marketIndex: 100_000 });
+    expect(km).toMatchObject({ tokenSymbol: 'US500', marketType: 'hip3', marketIndex: 120_000 });
+    expect(kmLocal1).toMatchObject({ tokenSymbol: 'GOLD', marketType: 'hip3' });
   });
 
   it('falls back to "Token N" for an unknown market', () => {

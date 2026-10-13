@@ -5,7 +5,7 @@ export interface RawTwapOrder {
   action: {
     type: 'twapOrder';
     twap: {
-      /** Asset index: perp < 10000, spot = 10000 + pair index, HIP-3 = 10000 + slot × 100000 + local index. */
+      /** Asset index: perp < 10000, spot = 10000 + pair index, HIP-3 = 100000 + perp dex index × 10000 + local index. */
       a: number;
       b: boolean;
       s: string;
@@ -26,7 +26,7 @@ export interface TwapOrderWithMarket extends RawTwapOrder {
   tokenSymbol: string;
   /** Current price of the market, 0 when unknown (HIP-3 markets have none here). */
   tokenPrice: number;
-  /** `a` minus the spot offset for spot/HIP-3, `a` itself for perps. */
+  /** `a` minus the spot offset (10000) for spot/HIP-3, `a` itself for perps. */
   marketIndex: number;
   marketType: TwapMarketType;
 }
@@ -83,21 +83,21 @@ export function enrichTwapOrders(
     .filter((order) => order.action?.twap?.a >= 0)
     .map((order) => {
       const assetIndex = order.action.twap.a;
-      const isSpot = assetIndex >= 10000;
-      const marketIndex = isSpot ? assetIndex - 10000 : assetIndex;
+      const isHip3 = assetIndex >= 100000;
+      const isSpot = !isHip3 && assetIndex >= 10000;
+      const marketIndex = assetIndex >= 10000 ? assetIndex - 10000 : assetIndex;
 
       const spot = isSpot ? spotByIndex.get(marketIndex) : undefined;
-      const perp = !isSpot && marketIndex < 100000 ? perpByIndex.get(marketIndex) : undefined;
-      const hip3Slot = Math.floor(marketIndex / 100000);
-      const hip3Name = !spot && !perp && hip3Slot > 0
-        ? (hip3Universes.get(hip3Slot)?.[marketIndex % 100000] ?? null)
+      const perp = !isSpot && !isHip3 ? perpByIndex.get(marketIndex) : undefined;
+      // HIP-3: a = 100000 + dex × 10000 + local index (dex 1 = xyz).
+      const hip3Name = isHip3
+        ? (hip3Universes.get(Math.floor((assetIndex - 100000) / 10000))?.[(assetIndex - 100000) % 10000] ?? null)
         : null;
 
       let tokenSymbol = spot?.name || perp?.name || hip3Name || `Token ${marketIndex}`;
       if (tokenSymbol === 'USDT_USDC') tokenSymbol = 'USDT0';
 
-      // HIP-3 sits in the spot numeric range (a >= 10000) but in slot 1+.
-      const marketType: TwapMarketType = !isSpot ? 'perp' : hip3Slot > 0 ? 'hip3' : 'spot';
+      const marketType: TwapMarketType = isHip3 ? 'hip3' : isSpot ? 'spot' : 'perp';
 
       return {
         ...order,
