@@ -104,6 +104,14 @@ export const HYPEDEXER_TTL = {
    * come from close snapshots (a row crossing a page boundary between two
    * refreshes is missing from the walk), so all pages share one TTL. */
   twapSourcePages:        10,
+  /** The TWAP source aggregate (`HYPEDEXER_TWAPS_CACHE_KEY.source`): the front
+   * polls it every 15 s, and each refresh re-reads the first page of both
+   * queries (2 × ~52 credits, ~420 a minute while anyone views). */
+  twapSource:             15,
+  /** The deeper pages (offset > 0) of one source query: older, slower-moving
+   * rows, walked once a minute for every visitor (~6 pages of ~52 credits for
+   * the 24 h query). Their last copy is served while a walk runs or fails. */
+  twapSourceDeep:         60,
   /** Enriched markets/questions: the payload carries live mid_price odds
    * from HL allMids. A recompute costs no credits (the lists are cached). */
   hip4EnrichedList:       15,
@@ -197,6 +205,14 @@ export const HYPEDEXER_HIP4_CACHE_KEY = {
   outcomeIds: 'hyperliquid:hip4:outcome-ids',
   /** Every live outcome side's volume in one entry: the HIP-4 pages' poll. */
   liveVolumes: 'hypedexer:hip4:live-volumes',
+} as const;
+
+/** TWAP source keys (indexer-twaps.service.ts); the pages themselves use buildHypedexerCacheKey. */
+export const HYPEDEXER_TWAPS_CACHE_KEY = {
+  /** Both source queries merged, the front's poll. */
+  source: 'hypedexer:twaps:source',
+  /** Deep pages (offset > 0) of one source query, by query name. */
+  sourceDeep: (query: string) => `hypedexer:twaps:source-deep:${query}`,
 } as const;
 
 /**

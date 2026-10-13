@@ -24,6 +24,52 @@ function str(q: unknown): string | undefined {
   return typeof q === 'string' ? q : undefined;
 }
 
+/**
+ * The front's TWAP source (last 24 h + still running): one shared aggregate,
+ * so behind marketRateLimiter only: the caller picks no key, and the per-IP
+ * passthrough budget is not spent on the front's poll. Registered before
+ * '/:twap_id', which would take 'source' for an id. Nothing computed and
+ * nothing kept is a temporary condition: 503, the front falls back.
+ */
+router.get(
+  '/source',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: await svc.getTwapSource() });
+    } catch (e) {
+      logDeduplicator.error('GET /indexer/twaps/source', { error: e instanceof Error ? e.message : String(e) });
+      res.set('Retry-After', '15').status(503).json({
+        success: false,
+        error: 'TWAPs temporarily unavailable',
+        code: 'INDEXER_TWAPS_SOURCE_UNAVAILABLE',
+      });
+    }
+  }) as RequestHandler
+);
+
+/**
+ * The deep rows of that source (older, slower-moving: ~90% of its bytes),
+ * which the front reads once per walk, about a minute. Same limiter and 503
+ * as '/source'.
+ */
+router.get(
+  '/source/deep',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: await svc.getTwapSourceDeep() });
+    } catch (e) {
+      logDeduplicator.error('GET /indexer/twaps/source/deep', { error: e instanceof Error ? e.message : String(e) });
+      res.set('Retry-After', '15').status(503).json({
+        success: false,
+        error: 'TWAPs temporarily unavailable',
+        code: 'INDEXER_TWAPS_SOURCE_DEEP_UNAVAILABLE',
+      });
+    }
+  }) as RequestHandler
+);
+
 router.get(
   '/stats',
   marketRateLimiter,
