@@ -12,8 +12,8 @@ wss://your-domain.com/ws  (production)
 ```
 
 ### Connection Limits
-- **Max connections per IP**: 5
-- **Max total connections**: 1000
+- **Max connections per IP**: 200 (env `WS_MAX_CONNECTIONS_PER_IP`)
+- **Max total connections**: 10000 (env `WS_MAX_TOTAL_CONNECTIONS`)
 - **Max messages per second**: 10
 
 ## Protocol

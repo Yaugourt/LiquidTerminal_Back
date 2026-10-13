@@ -463,10 +463,22 @@ export const CACHE_KEYS = {
 
 ### Cache Strategy
 
-- **Read path**: `getOrSet(key, fetchFn, ttl)` — returns cached data or fetches + caches
+- **Read path**: `getOrSet(key, fetchFn, ttl)` — returns cached data or fetches + caches (one fetch per key at a time: in-process single flight + Redis lock)
+- **Last copy**: every key keeps `${key}:last` (~10 TTLs, at most `CACHE_LAST_COPY_MAX_S`; longer with `lastCopyKeepS`), served when a fetch fails. An expired live key (TTL ≤ 30 s) waits for its refresh at most 1.5 s (`CACHE_LIVE_REFRESH_WAIT_MS`) before its copy is served. After a failed fetch, `${key}:fail` (≤ 10 s) holds further attempts off while a copy exists.
 - **Write path**: `invalidateEntityCache(id)` + `invalidateEntityListCache()` — clears entity + all list caches
 - **Pattern invalidation**: `invalidateByPattern("project*")` — wildcard key deletion
-- **Graceful degradation**: On Redis failure, falls back to database directly
+- **Graceful degradation**: On Redis failure, falls back to the source directly (still one fetch per key at a time in each process)
+
+### Redis memory
+
+Last copies, snapshot stores (token holders 6 h per viewed token, token details 24 h per listed token, staked holders) and per-wallet keys make Redis memory grow with traffic. Every cache entry carries a TTL (the pollers' fixed keys such as `spot:raw_data` don't: they are few and rewritten every few seconds). Set, and check on deploy:
+
+```
+maxmemory <a limit that fits the host, e.g. 70% of its RAM>
+maxmemory-policy volatile-ttl     # or volatile-lru
+```
+
+With `noeviction`, writes fail once memory is full and trip the Redis circuit, which bypasses every cache and sends all traffic upstream. With `allkeys-*`, rate-limit counters and locks can be evicted. The `volatile-*` policies only evict keys that have a TTL, soonest-to-expire (or least recently used) first: short-lived cache entries and copies give way first, and the pollers' keys are never evicted. `redis-cli CONFIG GET maxmemory*` shows the current setting.
 
 ---
 
@@ -615,13 +627,17 @@ export class CategoryValidationError extends CategoryError {
 ```typescript
 // src/middleware/apiRateLimiter.ts
 export const marketRateLimiter = async (req, res, next) => {
-  // 3 concurrent Redis-based windows:
-  //   BURST: 20 req/second
-  //   MINUTE: 1,200 req/minute
-  //   HOUR: 72,000 req/hour
-  // Returns 429 if any exceeded
-  // Graceful: allows request if Redis fails
+  // 3 fixed windows per IP in Redis (env RATE_LIMIT_BURST/MINUTE/HOUR):
+  //   BURST: 200 req/second
+  //   MINUTE: 6,000 req/minute
+  //   HOUR: 300,000 req/hour
+  // Sized for many visitors behind one IP (CGNAT, offices).
+  // Returns 429 + Retry-After: seconds until the refusing window rolls over
+  // Fail-secure: in-memory per-second limit if Redis fails
 };
+// passthroughRateLimiter (/indexer/*): 300/s, 4,000/min per IP
+// addressLookupRateLimiter (Elysium profiles): 20/s, 300/min per IP
+// accountRateLimiter (auth, CSV uploads): 60/s, 1,200/min per IP
 ```
 
 ### Authentication

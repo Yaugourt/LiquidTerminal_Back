@@ -106,7 +106,17 @@ Copy `.env.example` to `.env`. Key variables:
 | `HL_INDEXER_API_KEY` | HypeDexer / HL indexer access |
 | `HYPEDEXER_DAILY_CREDIT_BUDGET` | HypeDexer credits a UTC day before a warning is logged (optional, default 300000; warning only) |
 | `HYPERFOLIO_API_KEY` | Hyperfolio access: required for `/hyperfolio/*` (Yields page, tracker EVM panels), which answer 503 `HYPERFOLIO_NOT_CONFIGURED` without it |
-| `HYPERFOLIO_DAILY_BUDGET` | Upstream Hyperfolio calls a UTC day, all instances together (optional, default 50000) |
+| `HYPERFOLIO_DAILY_BUDGET` | Upstream Hyperfolio calls a UTC day, all instances together (optional, default 50000; a guess of the paid quota, set it to the real one) |
+| `RATE_LIMIT_BURST`, `RATE_LIMIT_MINUTE`, `RATE_LIMIT_HOUR` | Per-IP ceilings of the general limiter (optional, defaults 200/s, 6000/min, 300000/h; sized for many people behind one IP) |
+| `PASSTHROUGH_RATE_LIMIT_BURST`, `PASSTHROUGH_RATE_LIMIT_MINUTE` | Per-IP ceilings of the `/indexer/*` pass-through limiter (optional, defaults 300/s, 4000/min) |
+| `ADDRESS_LOOKUP_RATE_LIMIT_BURST`, `ADDRESS_LOOKUP_RATE_LIMIT_MINUTE` | Per-IP ceilings of the Elysium address / contract profile lookups (optional, defaults 20/s, 300/min) |
+| `CACHE_LAST_COPY_MAX_S`, `CACHE_LAST_COPY_MAX_CHARS` | A cached value's last copy (served when a refresh fails, and when a live key's refresh is slow) is kept ~10 TTLs, at most this many seconds or 2 TTLs (optional, default 600); copies of non-live keys longer than the character cap are skipped (default 262144) |
+| `CACHE_LIVE_REFRESH_WAIT_MS` | How long a reader of an expired live key (TTL ≤ 30 s) waits for its refresh before getting the last copy (optional, default 1500) |
+| `CACHE_SHARED_LAST_COPY_S` | Keep of the last copy for shared fixed-name keys that opt in (dashboard tiles, builders stats, HIP-4 tokens): how long an upstream outage still shows their last values (optional, default 3600) |
+| `HYPERFOLIO_STREAMS_PER_IP`, `HYPERFOLIO_STREAMS_TOTAL` | Concurrent Hyperfolio positions streams (optional, defaults 30 per IP, 500 in all) |
+| `WS_MAX_CONNECTIONS_PER_IP`, `WS_MAX_TOTAL_CONNECTIONS` | `/ws` connections (optional, defaults 200 per IP, 10000 in all) |
+| `L4BOOK_MAX_COINS` | Order books mirrored at once (optional, default 48) |
+| `BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE` | Hyperliquid weight the bridge-reserve scan spends a minute (optional, default 60) |
 | `TELEGRAM_BOT_API_KEY`, `TELEGRAM_BOT_USERNAME` | Telegram bot |
 | `R2_*` | Cloudflare R2 file uploads (optional) |
 
@@ -115,7 +125,8 @@ See `.env.example` for the full list.
 ## Deploy
 
 1. **Deploy the backend before the frontend.** The front calls routes that only exist from this release on (`/market/token-details`, `/market/holders`, `/market/twap`, `/market/revenue/af-buybacks`, `/liquidations/historical/top`, `/hyperfolio/*`) and has no fallback for their absence.
-2. **Environment.** Set `HYPERFOLIO_API_KEY` before the deploy (without it the Yields page and the tracker EVM panels fail). `HYPERFOLIO_DAILY_BUDGET` and `HYPEDEXER_DAILY_CREDIT_BUDGET` are optional.
+2. **Environment.** Set `HYPERFOLIO_API_KEY` before the deploy (without it the Yields page and the tracker EVM panels fail). `HYPERFOLIO_DAILY_BUDGET` and `HYPEDEXER_DAILY_CREDIT_BUDGET` are optional. `CACHE_LAST_COPY_MAX_BYTES` was renamed `CACHE_LAST_COPY_MAX_CHARS`.
+   **Redis memory.** Check `redis-cli CONFIG GET maxmemory*`: set a `maxmemory` limit with `maxmemory-policy volatile-ttl` (or `volatile-lru`), not `noeviction` nor `allkeys-*` (see [docs/DATABASE_ARCHITECTURE.md](docs/DATABASE_ARCHITECTURE.md#redis-memory)). The backend assumes one instance per outbound IP for its Hyperliquid weight budget.
 3. **Historical migration.** `20260924120000_repair_doubled_liquidation_time_ms` repairs liquidations stored with a doubled `time_ms` (dated around 2083), which every "since X" window counts. It is data-only, touches a handful of rows through the time index, and is idempotent. Check before and after:
 
    ```sql

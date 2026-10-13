@@ -169,3 +169,24 @@ points, nfts et transactions. On reste donc nettement sous les 30/min par IP, m�
 
 **Déploiement :** l'instance lancée sur :3002 tourne encore sur l'ancien build. Il faut `npm run build`
 puis la redémarrer pour appliquer ces correctifs.
+
+---
+
+## 6. Mise à jour 2026-10-13 — trafic à l'échelle
+
+Les garde-fous ci-dessus restent ; leurs valeurs changent pour des milliers de visiteurs, dont
+beaucoup derrière une même IP (CGNAT mobile, bureaux) :
+
+- **Budget par IP des cache-miss :** 30 → 120 appels upstream/min. Les plafonds qui protègent la
+  clé restent le global de 8 appels/s par process et le budget journalier (`HYPERFOLIO_DAILY_BUDGET`,
+  50 000 par défaut : une estimation, le quota payant réel est inconnu).
+- **Copie de secours :** chaque clé garde une dernière copie (environ 10 TTL, au plus 10 min :
+  les clés sont par wallet, une copie plus longue gonflerait Redis). Un cache-miss
+  refusé par un garde-fou (budget IP, cooldown, budget global ou journalier) ou une panne upstream
+  sert cette copie avec `stale: true` au lieu d'une erreur. Un wallet jamais lu, ou pas lu depuis plus
+  longtemps que sa copie n'est gardée, reçoit l'erreur.
+- **SSE :** 30 flux par IP et 500 au total (`HYPERFOLIO_STREAMS_PER_IP`, `HYPERFOLIO_STREAMS_TOTAL`).
+  Au-delà, `503 SSE_CONNECTION_LIMIT` + `Retry-After: 3` (plus un 429 terminal).
+- **Rate limit HTTP :** `marketRateLimiter` passe à 200 req/s, 6 000/min, 300 000/h par IP
+  (`RATE_LIMIT_*`), `Retry-After` = secondes avant la fin de la fenêtre qui a refusé (exposé par CORS).
+
