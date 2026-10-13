@@ -217,9 +217,10 @@ return data;
 ## Rate Limiting
 
 ### Tiers
-- **Burst**: 20 requests/second
-- **Minute**: 1,200 requests/minute
-- **Hour**: 72,000 requests/hour
+Defaults per IP (env `RATE_LIMIT_BURST` / `RATE_LIMIT_MINUTE` / `RATE_LIMIT_HOUR`, sized for shared IPs; see docs/DATA_BUDGET.md BK-L-01):
+- **Burst**: 200 requests/second
+- **Minute**: 6,000 requests/minute
+- **Hour**: 300,000 requests/hour
 
 ### Middlewares
 - `marketRateLimiter` - Standard API rate limiting
@@ -257,6 +258,8 @@ try {
 ---
 
 ## External APIs
+
+Before changing a poll interval, cache TTL, rate limit or upstream budget, read docs/DATA_BUDGET.md and update it in the same commit.
 
 ### HyperLiquid (`clients/hyperliquid/`)
 - Spot market data, token info, asset context

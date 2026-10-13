@@ -1,0 +1,629 @@
+# Data budget — upstream calls, limits, caches and cadences
+
+What every number between the upstreams, the backend and the browser is (poll periods, cache TTLs, limiters, upstream budgets), with a stable ID per row so the two of us can say "BK-R-07 should be 10 s" instead of re-auditing. Last verified: 2026-10-13, front `a2db42b1` (`perf/step-1`), back `d74ed63` (`perf/step-3`).
+
+> **Conventions.** Sections 2–4 use paths relative to `LiquidTerminal_Back/` (a `front:` prefix means `liquidterminal_front/`); section 5 uses paths relative to `liquidterminal_front/` (a `back:` prefix means `LiquidTerminal_Back/`). A bare `file.ts:NN` repeats the last full path given for that file. Numbers are the code's defaults; an env key next to a number overrides it (env keys: both READMEs). "Audit §n" means `LiquidTerminal_Back/docs/HYPEDEXER_CREDIT_AUDIT.md` (credit history, measured unit costs); "CODEMAP" means `liquidterminal_front/docs/CODEMAP.md` (route map). Rows marked **Flag** are things the code does that the numbers depend on and that look wrong or risky.
+>
+> **ID prefixes.** `UP` upstream provider · `BK-P` backend poller · `BK-R` backend route · `BK-L` limiter or cap · `BK-S` socket or stream · `BU-HL` / `BU-HD` / `BU-HF` budget lines (Hyperliquid weight, HypeDexer credits, Hyperfolio calls) · `FR` front widget · `FR-D` browser-direct call · `Q` open question.
+
+## 1. Policy (agreed 2026-10-13)
+
+- **Live data first.** Live data, and never blocking a visitor, beat upstream savings.
+- **HypeDexer limits are high.** Credits are a cost to watch (§4.2, the daily meter at `src/utils/hypedexer-credit-meter.ts:18`), not a reason to slow a live widget.
+- **Thousands of users expected.** Scale through shared backend caches, single-flight and stale-while-revalidate (the `:last` copy, §3 "Shared machinery"), so upstream cost stays flat in the number of visitors.
+- **No per-visitor caps as a scaling tool.** Per-IP limiters (§3.3) stop abuse; they are not how load is kept in check.
+- **Hard upstream limits still hold:** Hyperliquid 1,200 weight/min per backend outbound IP (`src/core/base.api.service.ts:148-153`, §4.1); Hyperfolio's per-second burst limit (`src/clients/hyperfolio/hyperfolio.client.ts:47-59`) and its unknown paid quota (§4.3).
+
+**How to change a number.** Edit the code and this file in the same commit. Both repos keep an identical copy (`docs/DATA_BUDGET.md`), so update both. Then recheck section 4: the Hyperliquid margin (§4.1) and the HypeDexer daily total (§4.2).
+
+## 2. Upstream providers
+
+| ID | Provider | Host(s) (env override) | Auth | Hard limits and cost model (as the code states them) | Called by |
+|---|---|---|---|---|---|
+| UP-01 | Hyperliquid `/info` | `api.hyperliquid.xyz/info` (`HYPERLIQUID_API_URL`), `src/clients/hyperliquid/spot/spot.assetcontext.client.ts:13` | none | **1,200 weight / min per outbound IP** for the whole backend (`src/core/base.api.service.ts:148-153`). Weights used in code: `spotMetaAndAssetCtxs`, `metaAndAssetCtxs`, `globalStats`, `validatorSummaries`, `vaultDetails`, `tokenDetails` = 20 (`spot.assetcontext.client.ts:14`, `perp/perp.assetcontext.client.ts:12`, `globalstats.client.ts:18`, `staking/validator.ts:12`, `vault/hlpvault.client.ts:12`, `src/services/spot/bridgeReserve.service.ts:123`); `clearinghouseState`, `spotClearinghouseState`, `allMids` = 2 (`src/services/spot/tokenDetails.service.ts:219` "positioning up to 160" for 80 calls, `bridgeReserve.service.ts:124`, `src/services/indexer/indexer-hip4.service.ts:39`); `userFillsByTime` = 20 + per fill, a 2,000-fill page = 120 (`src/services/revenue/afBuybacks.service.ts:151`); `allPerpMetas`, `outcomeTemplates`, `userNonFundingLedgerUpdates` carry no constant: this file counts them ~20 each; the inventory at `tokenDetails.service.ts:215-223` counts the ledgers ~24/min and TWAP metas ~4/min and leaves `outcomeTemplates` out. A 429 is **not retried** (`base.api.service.ts:154-163`, `:266-268`); 5xx are retried up to 3 attempts (`:144`). | back (BK-P-01..06, 09..12, BK-R-06, 10, 14, 15, 27). **Browser also calls it directly** from the visitor's IP (`front:src/services/api/constants.ts:35`); those calls do not count against the backend IP: see §5.2 (FR-D-01..14, 18, 19). |
+| UP-02 | Hyperliquid UI `/info` | `api-ui.hyperliquid.xyz/info` (`HYPERLIQUID_UI_API_URL`), `src/clients/hyperliquid/spot/spot.deploy.client.ts:11` | none | Counted in the same 1,200 budget ("api-ui may share api.hyperliquid.xyz's per-IP weight", `spot.deploy.client.ts:18`); `spotDeployState` weight 20 (`:12`). | back (BK-P-05). Browser: `front:src/services/api/constants.ts:36`. |
+| UP-03 | Hyperliquid stats-data | `stats-data.hyperliquid.xyz/Mainnet` (`HYPERLIQUID_STATS_URL`): `/vaults` (`src/clients/hyperliquid/vault/vaults.client.ts:11`), `/leaderboard` (`leaderboard/leaderboard.client.ts:20`), `/builder_fills` files (`src/services/builders/builder-growth.util.ts:11`) | none | Static files, not `/info`: left out of the weight inventory (`tokenDetails.service.ts:215-223`). No limit in code. | back (BK-P-07, BK-P-25, `/leaderboard` on demand). |
+| UP-04 | Hyperliquid WebSocket | `wss://api.hyperliquid.xyz/ws` (`HYPERLIQUID_WS_URL`), `src/clients/hyperliquid/websocket/top-of-book.ws.client.ts:37-38` | none | One socket, one `l2Book` subscription per mirrored L4 coin (≤ 48, BK-L-16). No limit encoded in code. | back (BK-S-04). Browser: `wss://rpc.hyperliquid.xyz/ws` (`front:src/services/explorer/websocket.service.ts:10`). |
+| UP-05 | HypeDexer REST | `api.hypedexer.com` (`HL_INDEXER_API_URL`), `src/clients/hypedexer/rest/shared/hypedexer-api.config.ts:28-30` | `X-API-Key` = `HL_INDEXER_API_KEY`, **required at boot** (`:12-26`, `:40`) | **Credits = 2 + ceil(rows / 10)** per successful REST call; errors free (audit §1). Every response's `X-Credit-Cost` is metered (`src/core/base.api.service.ts:215-220`), day total in Redis `hypedexer:credits:YYYY-MM-DD`, one warning per process and day above **`HYPEDEXER_DAILY_CREDIT_BUDGET` = 300,000** (`src/utils/hypedexer-credit-meter.ts:10-18`, `:31-32`), logs only. Analytics lane: "100 requests a minute" (comment, `src/services/priorityFees/priorityFees.service.ts:25-29`). No other hard limit in code (policy: limits are high). | back only. |
+| UP-06 | HypeDexer WebSocket | `wss://api.hypedexer.com/ws` (`HYPEDEXER_WS_URL`, `src/clients/hypedexer/websocket/liquidations.ws.client.ts:34`); `wss://api.hypedexer.com/ws?mode=mirror` (`HYPEDEXER_LIVEDATA_WS_URL`, `live-data.ws.client.ts:34`, `l4book.ws.client.ts:32`) | same key | **Not billed today** (audit §1: A/B test on `X-Credit-Balance`); docs say 10 events = 1 credit, so this may change. | back (BK-S-01..03). |
+| UP-07 | Hyperfolio | `api.hyperfolio.xyz` (`HYPERFOLIO_API_URL`), logos `hyperfolio.xyz` (`HYPERFOLIO_ASSETS_URL`), `src/clients/hyperfolio/hyperfolio-api.config.ts:24-31` | `x-api-key` = `HYPERFOLIO_API_KEY`; missing key → routes answer 503 `HYPERFOLIO_NOT_CONFIGURED` (`:16-22`, `src/errors/hyperfolio.errors.ts:18-20`) | Upstream **per-second burst limit "~20 req/s per key"**, answered as 403 "limit exceeded" (`src/clients/hyperfolio/hyperfolio.client.ts:47-59`); quota answered 429; **paid quota unknown**. Our guards: 8 calls/s per process, 120 misses/min per IP, `HYPERFOLIO_DAILY_BUDGET` = 50,000 calls/UTC day (a guess, `src/clients/hyperfolio/hyperfolio.quota.ts:14`, README). See §4.3. | back only. |
+| UP-08 | Hypurrscan | `api.hypurrscan.io` (`HYPURRSCAN_API_URL`): `/pastAuctions`, `/feesRecent`, `/fees`, `/spotUSDC`, `/unstakingQueue`, `/validating`, `/twap/*`, `/holders/<token>` | none | No limit in code. Holder lists are huge (HYPE 14.9 MB, stakedHYPE 2.8 MB, USDC ~70 MB, `src/clients/hypurrscan/tokenHolders.client.ts:32-34`): one download at a time (BK-L-09). | back (BK-P-13..17, BK-R-07, 08, 10). **Browser also calls** `/deploys`, `/globalAliases` (`front:src/services/explorer/api.ts:43`, `:54`) and `/pastAuctionsPerp` (`front:src/services/market/perpDex/api.ts:184`). |
+| UP-09 | DefiLlama | `api.llama.fi` (`DEFILLAMA_API_URL`), `coins.llama.fi` (`DEFILLAMA_COINS_API_URL`), `src/clients/defillama/defillama-api.config.ts:16-22`; `stablecoins.llama.fi` (hard-coded, `src/services/bridgedUsdc.service.ts:6`) | none | Free, no limit in code. | back (BK-R-04, BK-R-35). **Browser also calls** `/protocol/hyperliquid-bridge` (`front:src/services/dashboard/api.ts:20`). |
+| UP-10 | HL Names | `api.hlnames.xyz/api` (`HLNAMES_API_URL`), `src/clients/hlnames/hlnames.client.ts:14` | `X-API-Key` = `HLNAMES_API_KEY`, default is the public key from their docs (`:15-16`) | No limit in code; cached 6 h (`:17`). | back (BK-R-37). |
+| UP-11 | Others | openchain.xyz + 4byte.directory (Elysium selectors, `src/services/elysium/elysium-ingestion.service.ts:94-96`); Gitbook sitemap (`src/services/telegram/telegram.doc-update-dispatcher.service.ts:10`); Privy JWKS (`JWKS_URL`); Cloudflare R2 (`R2_*`, `src/core/storage.service.ts:18-22`) | — | — | back. |
+| UP-12 | HyperEVM RPC | `rpc.hyperliquid.xyz` (`/evm`, `/explorer`) | none | — | **Browser only** (`front:src/services/api/constants.ts:32`, `front:src/services/explorer/api.ts:16`); the backend never calls it. |
+
+## 3. Backend
+
+Shared machinery every table below relies on:
+
+| Mechanism | Behaviour | Ref |
+|---|---|---|
+| `cacheService.getOrSet` | One fetch per key per process (`recomputing` map) and across instances (Redis lock `lock:<key>`, 30 s; followers poll every 250 ms up to 15 s). | `src/core/cache.service.ts:170`, `:401`, `:424-431` |
+| Live keys (TTL ≤ 30 s) | On expiry one refresh runs; readers wait ≤ **1.5 s** (`CACHE_LIVE_REFRESH_WAIT_MS`) then get the last copy if it is ≤ max(60 s, 4 TTL) old. | `cache.service.ts:70`, `:78-81`, `:235-249` |
+| Last copy (`<key>:last`) | Kept min(10 TTL, max(**600 s** `CACHE_LAST_COPY_MAX_S`, 2 TTL)), served `stale` when a fetch fails. Opt-in `lastCopyKeepS` = **3,600 s** (`CACHE_SHARED_LAST_COPY_S`) for fixed-name tiles. Copies over **262,144 chars** (`CACHE_LAST_COPY_MAX_CHARS`) are skipped for non-live keys without an opt-in keep. | `cache.service.ts:100-124`, `:445-470` |
+| Failure backoff | After a failed fetch, a key with a copy is not fetched again for min(TTL, **10 s**) by any instance. | `cache.service.ts:89`, `:361-366` |
+| `getOrRefresh` | SWR for slow aggregates: serve last value, refresh in background once older than `freshS`; cold key waits. | `cache.service.ts:490-531` |
+| `OnDemandSnapshot` (+ `redisSnapshotStore`) | Fetched only while read; stale value served while one refresh runs; optional Redis copy survives restarts. | `src/utils/onDemandSnapshot.ts:28-60`, `src/utils/redisSnapshotStore.ts` |
+| HypeDexer in-flight dedup | Identical GETs in flight share one promise. | `src/clients/hypedexer/rest/shared/hypedexer-base.client.ts:13-37` |
+| Guarded interval | Skips a tick while the previous one runs; period jittered ±10 %. | `src/utils/guardedInterval.ts:13-39` |
+| Poller keys without TTL | Most Hyperliquid/Hypurrscan poller keys are written without TTL: if a poller stops, its last write is served indefinitely, with no stale flag (only `spot:raw_data:updated_at` lets token details detect it, `src/services/spot/tokenDetails.service.ts:186-188`). | e.g. `spot.assetcontext.client.ts:130-135` |
+
+### 3.1 Pollers
+
+Cost per minute = nominal period; ±10 % jitter applies to guarded intervals. "HL" = Hyperliquid weight, "cr" = HypeDexer credits (unit costs: audit §2). "Lock" = Redis distributed lock (one instance polls); without it every instance polls.
+
+| ID | Poller (file) | Interval | Upstream request(s) | Cost / min | Redis keys written (TTL) | Pub/sub channel | Feeds | Lock |
+|---|---|---|---|---|---|---|---|---|
+| BK-P-01 | `HyperliquidSpotClient` (`src/clients/hyperliquid/spot/spot.assetcontext.client.ts:23`) | 10 s | `spotMetaAndAssetCtxs` | **120 HL** | `spot:raw_data`, `spot:raw_data:updated_at`, `spot:markets`, `spot:tokens:without_pairs` (no TTL, `:17-21`) | `spot:data:updated` | BK-R-01, 03, 06, 07; BK-P-08 | no |
+| BK-P-02 | `HyperliquidPerpClient` (`src/clients/hyperliquid/perp/perp.assetcontext.client.ts:18`) | 10 s | `metaAndAssetCtxs` | **120 HL** | `perp:raw_data`, `perp:markets` (no TTL, `:15-16`) | `perp:data:updated` | BK-R-02, 03; alerts; revenue/priority-fee HYPE price | no |
+| BK-P-03 | `HyperliquidGlobalStatsClient` (`src/clients/hyperliquid/globalstats.client.ts:26`) | 15 s | `globalStats` | **80 HL** | `global_stats` (300 s, `:21-22`) | `global:stats:updated` | BK-R-04, 05 | no |
+| BK-P-04 | `ValidatorClient` (`src/clients/hyperliquid/staking/validator.ts:19`) | 30 s | `validatorSummaries` | **40 HL** | `staking:validators:raw_data` (no TTL) | `staking:validators:updated` | BK-R-04, 09 | no |
+| BK-P-05 | `HyperliquidSpotDeployClient` (`src/clients/hyperliquid/spot/spot.deploy.client.ts:20`) | 20 s | `spotDeployState` (api-ui) | **60 HL** | `spot:deploy:state` (no TTL) | `spot:deploy:updated` | BK-R-11 | no |
+| BK-P-06 | `HyperliquidVaultClient` (`src/clients/hyperliquid/vault/hlpvault.client.ts:18`) | 30 s | `vaultDetails` (HLP) | 40 HL nominal, **0 in practice** | `vault:hlp:tvl` (**no TTL**, `:110`) | `vault:hlp:updated` | BK-R-03 (`hlpTvl`), metrics snapshot | no |
+| | **Flag** | | `getHlpTvl()` returns the cached value whenever the key exists (`:81-85`) and the key never expires, so after the first read the poller never calls Hyperliquid again: **HLP TVL is frozen** until the key is evicted or deleted. | | | | | |
+| BK-P-07 | `HyperliquidVaultsClient` (`src/clients/hyperliquid/vault/vaults.client.ts:20`) | 30 s | stats-data `/vaults` | 0 HL (static host) | `vaults:filtered_list`, `vaults:filtered_list_all` (no TTL) | `vaults:list:updated` | BK-R-04, 12 (in-process copy 15 s, `src/services/vault/vaults.service.ts:16-17`) | no |
+| BK-P-08 | `HyperliquidSpotStatsClient` (`src/clients/hyperliquid/spot/spot.stats.client.ts:8`) | 10 s | none (Redis: `spot:markets` + `spotUSDC:raw_data`) | 0 | `spot:global_stats` | `spot:stats:updated` | BK-R-03 | no |
+| BK-P-09 | `AggregatePositioningClient` (`src/clients/hyperliquid/positioning/aggregate-positioning.client.ts:21`) | 60 s (×2^failures, max ×10, `:127-128`) | `clearinghouseState` × cohort ≤ **80** (`:27`), 12 at a time (`:29`); aborts the cycle on the first 429 (`:226-233`) | **≤ 160 HL** | `positioning:aggregate` (120 s, `:17`, `:24`) | `positioning:updated` | BK-R-19 | `poll:aggregate-positioning` 50 s (`:19-20`) |
+| BK-P-10 | `SpotBridgeReserveService` (`src/services/spot/bridgeReserve.service.ts:120`) | 60 s cycle | `tokenDetails` (20, once per token, kept for good) + `spotClearinghouseState` (2) every 5 min per reserve, 30 min per watched token (`:125-126`) | **≤ 60 HL** (`BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE`, `:122`); steady ~32 (`:108`) | `spot:bridge-reserve:v1` (`:118`) | — | BK-P-01 (`bridgeReserve` subtracted from supply) | no |
+| BK-P-11 | `TokenDetailsService` warmer (`src/services/spot/tokenDetails.service.ts:232`) | 60 s | `tokenDetails` of one listed token whose summary is missing or > 6 h old (`:233`) | **20 HL** (own allowance) | `spot:token-details:<id>` (24 h, `:242`, `:342-343`) | — | BK-R-06 | per-minute claim key `spot:token-details:warm:<minute>` (`:423`) |
+| BK-P-12 | `MarketAlertsService` (`src/services/alerts/market-alerts.service.ts:455-457`) | 10 s / 60 s | 10 s: reads `perp:raw_data` (Redis, 0 HL); 60 s: `userNonFundingLedgerUpdates` of the reserve-yield address | **~20 HL** | `alerts:market:reserve_yield_cursor` | — | Telegram market alerts via `/ws` (BK-S-07) | no |
+| BK-P-13 | `HypurrscanClient` auctions (`src/clients/hypurrscan/auction.client.ts:14`) | 20 s | `/pastAuctions` | Hypurrscan 3/min | `hypurrscan:auctions` (no TTL) | `hypurrscan:auctions:updated` | BK-R-11 | no |
+| BK-P-14 | `HypurrscanFeesClient` (`src/clients/hypurrscan/fees.client.ts:16`) | 30 s | `/feesRecent` | 2/min | `fees:raw_data` (no TTL); `fees:stats` recomputed on its channel (`src/services/fees/fees.service.ts:27-33`) | `fees:data:updated` | BK-R-13 | no |
+| BK-P-15 | `SpotUSDCClient` (`src/clients/hypurrscan/spotUSDC.client.ts:18`) | 60 s | `/spotUSDC` | 1/min | `spotUSDC:raw_data` (no TTL) | `spotUSDC:data:updated` | BK-R-03 | no |
+| BK-P-16 | `HypurrscanUnstakingClient` (`src/clients/hypurrscan/unstaking.client.ts:15`) | 40 s | `/unstakingQueue` | 1.5/min | `hypurrscan:unstaking` (no TTL) | `hypurrscan:unstaking:updated` | BK-R-09 | `poll:unstaking` 60 s (`:63`) |
+| BK-P-17 | `HypurrscanValidationClient` (`src/clients/hypurrscan/validation.client.ts:15`) | 50 s | `/validating` | 1.2/min | `hypurrscan:validations` (no TTL) | `hypurrscan:validations:updated` | BK-R-09 | `poll:validation` 75 s (`:63`) |
+| BK-P-18 | `HLIndexerTopTradersClient` (`src/clients/hypedexer/rest/toptraders/toptraders.client.ts:21`) | 60 s (backoff ×2^n, max ×10) | `/overview/top-traders-24h?sort=…&limit=50` × 4 sorts (`:26`) | **28 cr** (4 × 7) | `toptraders:<sort>` (90 s, `:25`) | `toptraders:updated` | BK-R-18, BK-P-09 cohort | `poll:toptraders` 90 s (`:102`) |
+| BK-P-19 | `HLIndexerActiveUsersClient` (`src/clients/hypedexer/rest/activeusers/activeusers.client.ts:20`) | 60 s (backoff ×2^n, max ×10, `:100`) | `/users/active?hours=1,4,12,24&limit=100` (`:26`) | **48 cr** (4 × 12) | `activeusers:<h>h` (90 s, `:25`) | `activeusers:updated` | BK-R-20 | `poll:activeusers` 90 s (`:109`) |
+| BK-P-20 | `HLIndexerBuildersClient` (`src/clients/hypedexer/rest/builders/builders-list-poller.client.ts:17`) | 60 s (backoff ×2^n, max ×10, `:87`) | `/builders/list?limit=1000…` (upstream ignores `limit`, ~1,400+ rows, `:13-16`) | **~145 cr** | `builders:all` (120 s, `:11`, `:20`) | `builders:updated` | BK-R-21, BK-R-26 (`/list`), BK-P-25 | `poll:builders` 90 s (`:96`) |
+| BK-P-21 | `MetricsSnapshotClient` (`src/clients/metrics/metrics-snapshot.client.ts:12`) | 5 min | reads perp stats (Redis) + overview active-traders-24h and total-fees-24h through the overview client cache (60 s, `src/clients/hypedexer/rest/overview/overview-indexer.client.ts:21`) | ≤ 1.2 cr (2 × 3 per 5 min, 0 when the tiles are warm) | historical DB `metricSnapshot` (1 point/h) | — | BK-R-17 | `poll:metrics-snapshot` 50 s (`:8-9`) |
+| BK-P-22 | `LiquidationsBackfillService` (`src/services/liquidations/liquidations.backfill.service.ts:40-43`) | at boot + daily 03:00 UTC (`src/core/client.initializer.service.ts:399-424`) | `/liquidations` pages of 1,000, 700 ms apart, ≤ 500 pages | 102 cr / page; audit §6: 1 page per run (paging bug, open) | historical DB | — | BK-R-22 | no |
+| BK-P-23 | `HypeDexerCompletedTradesPoller` (`src/clients/hypedexer/rest/completed-trades/completed-trades-poller.client.ts:12`) | 5 s, **paused while no Telegram wallet rule exists** (`src/services/telegram/telegram.wallet-dispatcher.service.ts:160-161`) | `/completed-trades/` since cursor − 10 s, pages of 500, ≤ 10 pages (`:18-23`) | 84–132 cr (audit §3: 7–11 cr / call) | — | callbacks | Telegram wallet alerts | no |
+| BK-P-24 | `ElysiumIngestionService` (`src/services/elysium/elysium-ingestion.service.ts:179-197`), **on unless `ELYSIUM_INGEST_ENABLED=false`** | 8 streams: tx 30 s, bridge 60 s (+ 26 h window every 15 min), tokens 15 min, dex 60 s, methods 30 min, tokenstats 15 min, launchpad 30 s, launchstats 5 min (`:67-112`) | HypeDexer Elysium REST, pages of 1,000, ≤ 200 pages a window; all streams share one throttle of **one call / 500 ms** (`:49-51`, `:62`, `:116-127`) | **~1,600 cr measured** (2026-10-12, local); code ceiling 120 calls × ≤ 102 cr = 12,240 cr. **To investigate.** | historical DB (`elysium_*`) | — | BK-R-34 | `poll:elysium-ingest:<stream>` 120 s (`:65`, `:223`) |
+| BK-P-25 | `BuilderGrowthService` (`src/services/builders/builder-growth.service.ts:59-61`), off when `BUILDER_GROWTH_ENABLED=false` (`:153`) | 5 min (30 s while backfilling) | stats-data `builder_fills` files, 8 at a time (`:63`); registry = `builders:all` (`:140`, `:225`) | 0 HL; ≈ 0 cr: HypeDexer top-100 builders once a day (~12 cr, `:73`, `:276`) and 30d global stats per growth recompute (~3 cr, `:470`) | historical DB | — | BK-R-21 (`/growth`) | `poll:builder-growth` 420 s (`:55-56`) |
+| BK-P-26 | `TelegramDocUpdateDispatcherService` (`src/services/telegram/telegram.doc-update-dispatcher.service.ts:13`) | 3 h | Gitbook sitemap + pages | 0 | — | — | `/ws` `doc_update_alert` | no |
+
+Not pollers: Hypurrscan `/fees` history is read on demand when > 30 h old (`src/clients/hypurrscan/feesHistorical.client.ts:26-33`, used by BK-R-14); the stats-data leaderboard is an on-demand snapshot (fresh 60 s, max stale 5 min, `src/clients/hyperliquid/leaderboard/leaderboard.client.ts:25-31`). The liquidations REST poller was removed (audit P2.1); its `liquidations:recent` key (20 s) is filled on demand (`src/clients/hypedexer/rest/liquidations/liquidations.client.ts:17-18`).
+
+### 3.2 Routes
+
+"Fresh / stale / keep" = TTL, how long an old copy may still be served, how long the last copy is kept. "SF" = single-flight. Unless stated, a route behind the general limiter (BK-L-01) only.
+
+| ID | Route (front uses) | Upstream | Fresh / stale / keep | SF | Budget | Upstream fails / budget spent |
+|---|---|---|---|---|---|---|
+| BK-R-01 | `GET /market/spot`, `/market/spot/tokens-without-pairs` | Redis `spot:markets` (BK-P-01) | poller 10 s; no TTL | n/a | — | key missing → error (`src/services/spot/marketData.service.ts:52-55`); poller stopped → last write forever |
+| BK-R-02 | `GET /market/perp` | Redis `perp:markets` (BK-P-02) | 10 s; no TTL | n/a | — | same as BK-R-01 (`src/services/perp/perpAssetContext.service.ts:51-54`). **No limiter** (`src/routes/perp/marketPerp.routes.ts:11`) |
+| BK-R-03 | `GET /market/spot/globalstats`, `/market/perp/globalstats`, `/market/stablecoins`, `/market/stablecoins/history` | Redis: `spot:global_stats`, `perp:markets`, `vault:hlp:tvl`, `spotUSDC:raw_data` | 10–60 s pollers | n/a | — | no limiter on perp/stablecoins routes; `hlpTvl` frozen (BK-P-06 flag) |
+| BK-R-04 | `GET /home/globalstats` (front polls every 15 s per tab, `front:src/services/dashboard/hooks/useDashboardStats.ts:9`) | Redis `global_stats` + validators + vaults **and `stablecoins.llama.fi/stablecoincharts/Hyperliquid` on every request** (`src/services/globalStatsLiquid.service.ts:34-39`, `src/services/bridgedUsdc.service.ts:12-14`) | **no cache on the DefiLlama part** | no | none | DefiLlama slow/down → whole route 500 (`src/routes/globalStats.routes.ts:22`). **Flag:** 1 upstream call per request; 1,000 open dashboards ≈ 67 calls/s to DefiLlama, each holding an outbound slot (BK-L-19) up to 30 s × 3 attempts. The front comment "no upstream cost" is wrong. |
+| BK-R-05 | `GET /home/globalstats/dashboard` | `global_stats` (300 s), on miss a direct `globalStats` read (20 HL) per concurrent caller (`src/clients/hyperliquid/globalstats.client.ts:49-69`) | 300 s | no | — | 500 |
+| BK-R-06 | `GET /market/token-details/:tokenId` | Redis summary + live fields from `spot:raw_data`; HL `tokenDetails` | fresh 1 h, served stale up to 24 h, kept in Redis 24 h (`tokenDetails.service.ts:210-211`) | yes (per token) | ≤ 10 HL reads/min all tokens, 4 reserved for first reads, ≤ 20 first reads/min per client (IPv6 /64) (`:224-228`) | no slot within 5 s (`:230`) → 200 `partial: true` with live fields; unreadable → 503 `TOKEN_DETAILS_UNAVAILABLE` (`src/routes/spot/tokenDetails.routes.ts:44-62`) |
+| BK-R-07 | `GET /market/holders/:token` | Hypurrscan `/holders` (+ staked) | fresh 10 min, stale 6 h, Redis gzip copy 6 h (`src/services/spot/tokenHolders.service.ts:65-66`, `:130-131`); ≤ 24 token views in memory (`:70`) | yes | download queue (BK-L-09) | no room within 20 s (`:72`) and nothing held → 503 (`src/routes/spot/tokenHolders.routes.ts:61`), no Retry-After |
+| BK-R-08 | `GET /staking/holders`, `/top`, `/stats`, `/:address` | Hypurrscan `/holders/stakedHYPE` (priority download) | fresh 10 min, stale 6 h, Redis 6 h (`src/services/staking/stakedHolders.service.ts:98-107`) | yes | — | nothing held → 503 + `Retry-After: 30` (`src/routes/staking/stakedHolders.routes.ts:16-17`) |
+| BK-R-09 | `GET /staking/validators`, `/staking/validators/trending`, `/staking/validations`, `/staking/unstaking-queue` (+`/stats`) | Redis (BK-P-04, 16, 17) | pollers; no TTL | n/a | — | last poller write |
+| BK-R-10 | `GET /market/twap` | Hypurrscan `/twap/*` + HL `allPerpMetas` | orders fresh 15 s / stale 2 min; metas fresh 5 min / stale 30 min (`src/services/twap/twap.service.ts:60-64`) | yes | — | 503 `TwapUnavailableError` (`src/routes/twap/twap.routes.ts:34`) |
+| BK-R-11 | `GET /market/auction`, `/market/auction/timing` | Redis `hypurrscan:auctions`, `spot:deploy:state` | pollers | n/a | — | no limiter; last poller write |
+| BK-R-12 | `GET /market/vaults` | Redis vault lists (BK-P-07) | 30 s + 15 s in-process copy | yes | — | no limiter |
+| BK-R-13 | `GET /market/fees`, `/market/fees/raw` | Redis `fees:stats`, `fees:raw_data` | 30 s | n/a | — | no limiter |
+| BK-R-14 | `GET /market/revenue/history?window=` | Hypurrscan `/fees` (on demand > 30 h), HypeDexer HIP-3 auctions / HIP-4 daily fees / priority (30 min each), HL ledger (10 min) (`src/services/revenue/revenue.service.ts:33-43`) | breakdown 5 min (`:43`, `:98-103`) | no | — | 500; **no limiter** (`src/routes/revenue/revenue.routes.ts:14`) |
+| BK-R-15 | `GET /market/revenue/af-buybacks` | HL `userFillsByTime` | running day fresh 60 s, max stale 1 h; 13 completed days kept in Redis 35 days (`afBuybacks.service.ts:155-182`) | yes | backfill ≤ 60 HL/min (`:174`) | days not yet read are left out; running day older than 1 h not served |
+| BK-R-16 | `GET /market/priority-fees/series?window=24h\|7d` | HypeDexer analytics rollups (≤ 29 calls a window) | 5 min / 15 min (`src/services/priorityFees/priorityFees.service.ts:18-21`) | no (plain get/set, `:116-123`) | — | 500 |
+| BK-R-17 | `GET /market/metrics/history` | historical DB (BK-P-21) | — | — | — | — |
+| BK-R-18 | `GET /top-traders?sort&limit≤50` | Redis `toptraders:<sort>` (BK-P-18) | 60 s poll, 90 s TTL | on miss: one on-demand refresh under the poll lock, then passthrough (`toptraders.client.ts:148-185`) | `limit` ≤ 50 (`src/schemas/toptraders.schema.ts:17`) | 500 |
+| BK-R-19 | `GET /top-traders/positioning`, `/positioning/history` | Redis `positioning:aggregate` (BK-P-09); history DB | 60 s / 120 s TTL | — | — | 500 |
+| BK-R-20 | `GET /active-users?hours&limit` | Redis `activeusers:<h>h` (BK-P-19); other hours/limit > 100 → passthrough | 60 s / 90 s | on-miss refresh | — | 500 |
+| BK-R-21 | `GET /builders`, `/builders/stats`, `/builders/growth` | `builders:all` (BK-P-20); growth: DB via `getOrRefresh` fresh 600 s, keep 24 h (`builder-growth.service.ts:75-76`, `:369`) | 60 s | yes | — | `builders:all` missing → on-demand refresh, then direct fetch (`builders-list-poller.client.ts:128-147`) |
+| BK-R-22 | `GET /liquidations/data`, `/stats/all`, `/chart-data`, `/historical/stats`, `/historical/chart`, `/historical/top` | historical DB (WS ingestion BK-S-01 + backfill) | 10 s (data, stats, chart), 15 s (top), 30–300 s (historical stats), 30–600 s (historical chart) (`src/services/liquidations/liquidations.service.ts:44-55`, `liquidations.historical-stats.service.ts:25-30`, `liquidations.historical-chart.service.ts:21-25`) | yes (`inflight.run`) | — | 500 |
+| BK-R-23 | `GET /liquidations`, `/liquidations/recent`, `/liquidations/analytics/stats` | HypeDexer `/liquidations*`, `/analytics/liquidations` | 15 s; a wallet's history (`user=`) 60 s (`liquidations.service.ts:47-51`) | in-flight dedup only | — | plain get/set: **no last copy**; failure → 500 |
+| BK-R-24 | `GET /liquidations/stream` (SSE) | Redis pub/sub of BK-S-01 | — | — | BK-L-17 | 429 past the caps |
+| BK-R-25 | `/indexer/overview/*` | HypeDexer `/overview/*` | trading volume, fees, fills, active traders: service 15 s + 1 h keep (`src/services/indexer/indexer-overview.service.ts:6`, `:23-62`) **over a client cache of 60 s** (`overview-indexer.client.ts:21`); daily-pnl-10d 3,600 s; daily-volume-10d 300 s; coin-distribution 30 s over client 300 s (`:22`) | yes | general only (fixed keys); coin-distribution + passthrough | last copy (stale, unflagged); none → 502. **Flag:** the two cache layers make the "15 s live" tiles up to ~75 s old and refresh upstream once a minute. |
+| BK-R-26 | `/indexer/builders/*` | HypeDexer `/builders/*` | `/list` = `builders:all`; all-timeframes 55 s, refresh in background, keep 1 h; stats 15 s keep 1 h; top 15 s per limit; per-builder stats/users 15 s (`src/services/indexer/indexer-builders-indexer.service.ts:44-98`, `src/constants/hypedexer.cache.ts:54-60`) | yes | passthrough on `/top`, `/:addr/*` | last copy / 502 |
+| BK-R-27 | `/indexer/hip4/*` | HypeDexer `/hip4/*`, HL `allMids` (≤ 12/min, `indexer-hip4.service.ts:31-39`), HL `outcomeTemplates` | fills by newest-fill age: 10 s active / 60 s quiet / 3,600 s dormant / 60 s empty (`indexer-hip4.service.ts:100-115`); enriched 15 s; settlements 30 s; base lists 600 s (60 s when empty), the outcome-token list kept 1 h past a failure (`indexer-hip4.service.ts:479-485`); market row 86,400 s settled / 300 s open; analytics 60 s, live volumes 15 s; templates 3,600 s (`hypedexer.cache.ts:61-89`) | yes | passthrough | last copy / 502. Templates retried every 60 s while HL fails (`indexer-hip4.service.ts:407-411`) |
+| BK-R-28 | `/indexer/hip3/*` | HypeDexer `/hip3/*` | overview 15 s keep 1 h; auctions/current 55 s keep 1 h; fills 10 s; snapshots 15 s; stats/traders 120 s; top movers 15 s; user keys 15–30 s (`src/services/indexer/indexer-hip3.service.ts:36-143`). **Uncached:** assets, dexs, gossip status/history, auctions list/history, leaderboard, ohlcv, oracle stats | yes / in-flight only | passthrough except overview, gossip status, auctions/current | 502 |
+| BK-R-29 | `/indexer/fills/*`, `/users/*`, `/funding/*`, `/twaps/*`, `/completed-trades/*`, `/analytics/*` | HypeDexer | global fills / recent fills 10 s (`src/services/indexer/indexer-fills.service.ts:16`); user fills 15 s; fills count 30 s; users 30 s; users leaderboard 60 s (client); funding user 30 s, summary 1,800 s, predicted 55 s (+ client 30 s); twaps list 15 s, source pages (limit 500) 10 s without serve-while-refresh (`src/services/indexer/indexer-twaps.service.ts:39-46`); completed trades + summary 15 s; analytics stats 15 s. **Uncached:** `/funding/fundingHistory`, `/twaps/stats`, `/twaps/:id`, `/twaps/:id/fills`, `/completed-trades/:id/fills` | yes | passthrough except `/fills/count`, `/funding/predictedFundings` | 502 |
+| BK-R-30 | `/indexer/evm/*` | HypeDexer `/evm/*` | stats 15 s, daily 300 s, blocks 5 s, transactions 5 s, bridge events / ledger 30 s (`src/services/indexer/indexer-evm.service.ts:22-90`) | yes | passthrough except `/stats` | 502 |
+| BK-R-31 | `/indexer/vaults/*` | HypeDexer `/vaults/*` | summaries, details, equity snapshots 300 s; daily 1,800 s; ledger 60 s (3,600 s when empty); leaderboards 300 s (`hypedexer.cache.ts:127-141`) | yes | passthrough except leaderboards | 502 |
+| BK-R-32 | `/indexer/spot/*` (auctions hist/live, pairs, tokens) | HypeDexer `/spot/*` | **uncached** (`src/services/indexer/indexer-spot-indexer.service.ts:14-28`) | in-flight only | passthrough | 502 |
+| BK-R-33 | `/indexer/candles` | HypeDexer `/info candleSnapshot` | one bar (≥ 2 s), no last copy (`src/clients/hypedexer/rest/candles/candles.client.ts:43-62`) | yes | general only | 502 |
+| BK-R-34 | `/indexer/elysium/*`, `/elysium/analytics/*` | HypeDexer Elysium (testnet) REST; historical DB | pass-through 5–300 s (`hypedexer.cache.ts:116-126`); per-address 15 s; analytics `getOrRefresh` fresh 60 s keep 6 h (`src/services/elysium/elysium-analytics.service.ts:16-18`, `:63`) | yes | address lookups: BK-L-03 + BK-L-18 | over budget → error |
+| BK-R-35 | `/defillama/*` | api.llama.fi, coins.llama.fi | protocols/chains 600 s, protocol/tvl/dexs/fees/overview 300 s, prices 60 s, HL snapshot/rankings 600 s, tvl history 1,800 s (`src/constants/defillama.cache.ts:27-40`) | yes | — | last copy / error |
+| BK-R-36 | `/hyperfolio/*` | Hyperfolio | composition 60 s, positions 120 s, history 300 s, transactions 120 s, nfts 600 s, points 300 s, yield 120 s (`src/constants/hyperfolio.cache.ts:32-40`); copy 600 s (nfts 1,200 s) | yes (cache + client in-flight, `hyperfolio.client.ts:66`) | BK-L-10..14 | refused/failed refresh → last copy with `stale: true`; no copy → 429 + `Retry-After: 10` (throttle), 503 `HYPERFOLIO_QUOTA_EXHAUSTED` (no Retry-After), 502 otherwise (`src/routes/hyperfolio/hyperfolio.routes.ts:43-66`) |
+| BK-R-37 | `/names/*` | HL Names | 6 h (`hlnames.client.ts:17`) | — | — | — |
+| BK-R-38 | `/export/*` (auth) | HypeDexer pages of 500 / local DB | — | — | BK-L-05 | 429 + Retry-After |
+| BK-R-39 | Account and content: `/auth`, `/user`, `/wallet`, `/walletlists`, `/readlists`, `/project`, `/category`, `/educational`, `/publicgoods`, `/xp`, `/leaderboard`, `/link-preview`, `/alerts`, `/telegram` | Postgres, R2, Privy | per-service DB caches | — | general; `/auth`, CSV uploads + BK-L-04; contributions BK-L-06 | — |
+| BK-R-40 | `/api/health` (`/live`, `/ready`, `/`) | — | — | — | none | — |
+
+### 3.3 Limiters and caps
+
+IP key: `app.set('trust proxy', 1)` (`src/app.ts:85`), so `req.ip` is the address the single edge proxy appends. The HTTP limiters key on the full `req.ip`; only token details and Hyperfolio collapse IPv6 to its /64 (`src/utils/client-ip.ts:9-24`). `/ws` takes the rightmost `X-Forwarded-For` entry (`src/websocket/ws.server.ts:229-245`). Fixed windows in Redis (`INCR`+`EXPIRE`), Retry-After = seconds to the window's rollover (`src/middleware/apiRateLimiter.ts:47-50`, `:73-93`, `:181-189`).
+
+| ID | Limiter / cap | Covers | Key | Limit (env) | On refusal | Ref |
+|---|---|---|---|---|---|---|
+| BK-L-01 | `marketRateLimiter` (general) | almost every public route; **not** `/market/perp`, `/market/perp/globalstats`, `/market/stablecoins`, `/market/auction`, `/market/fees`, `/market/revenue/history`, `/market/vaults`, `/api/health`, `/liquidations/stream` | `ratelimit:<ip>` | **200/s** (`RATE_LIMIT_BURST`), **6,000/min** (`RATE_LIMIT_MINUTE`), **300,000/h** (`RATE_LIMIT_HOUR`) | 429 + Retry-After | `apiRateLimiter.ts:15-34`, `:135-178` |
+| BK-L-02 | `passthroughRateLimiter` | 63 `/indexer/*` routes whose key the caller controls (see BK-R-25..33) | `ratelimit:pt:<ip>` | **300/s** (`PASSTHROUGH_RATE_LIMIT_BURST`), **4,000/min** (`PASSTHROUGH_RATE_LIMIT_MINUTE`); stacks on BK-L-01 | 429 + Retry-After | `apiRateLimiter.ts:201-204`, `:254` |
+| BK-L-03 | `addressLookupRateLimiter` | Elysium address / contract profiles (`src/routes/indexer/elysium.routes.ts:114-130`, `src/routes/elysium/elysium-analytics.routes.ts:110-118`) | `ratelimit:addr:<ip>` | **20/s**, **300/min** (`ADDRESS_LOOKUP_RATE_LIMIT_BURST/_MINUTE`) | 429 + Retry-After | `apiRateLimiter.ts:263-270` |
+| BK-L-04 | `accountRateLimiter` | `/auth/*`, project and educational CSV uploads | `ratelimit:acct:<ip>` | 60/s, 1,200/min (no env) | 429 + Retry-After | `apiRateLimiter.ts:278-282` |
+| BK-L-05 | Export quota and queue | `/export/:dataset` (+ preview) | user id | 1 download / 24 h sliding; 60 previews / h; 3 concurrent, ≤ 10 waiting ≤ 20 s; ≤ 50,000 rows; a cancelled export gives back ≤ 4 pages | 429; Retry-After 30–300 s from queue depth | `src/constants/export.constants.ts:10-81`, `src/services/export/export.concurrency.ts:38-41` |
+| BK-L-06 | `contributionRateLimiter` | educational resource submissions | user id | 5 / 24 h | 429 | `src/constants/content-filter.constants.ts:146-149` |
+| BK-L-07 | In-memory fallback (Redis down) | BK-L-01..04 | ip (≤ 10,000 entries) | the limiter's own burst per 1 s | 429, Retry-After 1 | `apiRateLimiter.ts:95-123` |
+| BK-L-08 | Token-details read budget | BK-R-06 | process; first reads per client = IP or IPv6 /64 | 10 HL reads / 60 s (4 reserved for first reads), 20 first reads / min / client, wait ≤ 5 s | 200 `partial: true` | `tokenDetails.service.ts:224-230` |
+| BK-L-09 | Holders download queue | BK-R-07, 08 | process | 1 download at a time, ≤ 12 queued, dropped after 30 s; stakedHYPE jumps the queue | 503 (BK-R-07) | `src/clients/hypurrscan/tokenHolders.client.ts:46-50` |
+| BK-L-10 | Hyperfolio per-IP miss budget | Hyperfolio cache misses + stream opens | IP or IPv6 /64, in process memory | 1,200 weight / 10 per call = **120 misses/min** | last copy, else 429 `HYPERFOLIO_RATE_LIMITED` + Retry-After 10 | `hyperfolio.client.ts:160-168`, `:198-200`, `src/services/hyperfolio/hyperfolio.service.ts:96-98` |
+| BK-L-11 | Hyperfolio upstream throttle | every Hyperfolio call | process | **8 calls/s**, wait ≤ 2 s; one retry after a burst 403 (1.1 s) | error → last copy | `hyperfolio.client.ts:54-56`, `:283-301` |
+| BK-L-12 | Hyperfolio daily budget | every Hyperfolio call (retries included) | Redis `hyperfolio:upstream-calls:<UTC day>` (all instances; per process if Redis down) | **50,000/day** (`HYPERFOLIO_DAILY_BUDGET`), warning at 80 % | last copy, else 503 `HYPERFOLIO_QUOTA_EXHAUSTED` until 00:00 UTC | `hyperfolio.quota.ts:14-91` |
+| BK-L-13 | Hyperfolio cooldown | all Hyperfolio misses | process | 10 s after an upstream 429 / burst 403 | last copy, else 429 | `hyperfolio.service.ts:27`, `:91-108` |
+| BK-L-14 | Hyperfolio position streams | `/hyperfolio/wallet/:address/positions/stream` | IP or /64 | **30 per IP** (`HYPERFOLIO_STREAMS_PER_IP`), **500 total** (`HYPERFOLIO_STREAMS_TOTAL`); upstream timeout 90 s | 503 `SSE_CONNECTION_LIMIT` + Retry-After 3 | `hyperfolio.cache.ts:48-55`, `hyperfolio.routes.ts:248-260` |
+| BK-L-15 | `/ws` connections | `/ws` | rightmost XFF | **200 per IP** (`WS_MAX_CONNECTIONS_PER_IP`), **10,000 total** (`WS_MAX_TOTAL_CONNECTIONS`); 10 messages/s per socket (excess answered with a `RATE_LIMIT` error, socket kept); public socket terminated past 4 MiB buffered; ≤ 4 L4 coins per socket (`TOO_MANY_BOOKS` error); server ping every 30 s, a socket silent 60 s is closed | close 1008 (connection caps) | `src/websocket/ws.server.ts:53-55`, `:78`, `:83`, `:86`, `:281`, `:334-342`, `:677-685`, `:1023-1036`, `:1045-1068`, `:1076-1110` |
+| BK-L-16 | L4 books mirrored | BK-S-03, 06 | process | **48 coins** (`L4BOOK_MAX_COINS`), resync every 8 s (`L4BOOK_RESYNC_MS`), ≥ 3 s apart, kept 30 s after the last viewer | `l4book_unavailable` | `src/services/orderbook/l4book.service.ts:278-291` |
+| BK-L-17 | Liquidations SSE | `/liquidations/stream` | `req.ip` | 3 per IP, 1,000 total | 429 | `src/services/liquidations/sse-manager.service.ts:31-32`, `src/routes/liquidations/liquidations.routes.ts:375-410` |
+| BK-L-18 | Elysium per-address budget | Elysium per-address cache misses | global | 240 / min | error | `src/services/indexer/indexer-elysium.service.ts:29-33`, `:115-120` |
+| BK-L-19 | Outbound semaphore | every `BaseApiService` call (all HTTP clients except raw `fetch` in HIP-4 HL reads, revenue/alerts ledger, HL Names, Elysium selectors, builder files) | process | **50 concurrent**, ≤ 250 waiting, wait ≤ 15 s; 30 s request timeout | `OutboundCapacityError` → last copy or 5xx | `src/core/base.api.service.ts:70-130`, `:143` |
+| BK-L-20 | Circuit breakers | one per client (`spot`, `perp`, `vault`, `positioning`, `toptraders`, `builders`, `hyperfolio`, `hypedexer-*`, `hypurrscan_*`…) | process | open after 5 consecutive failures, for 30 s; `hypedexer-builders-rest` 15 failures, 90 s (`src/clients/hypedexer/rest/builders/builders-indexer.client.ts:42-45`) | "Circuit breaker is open" → last copy / 5xx | `src/core/circuit.breaker.service.ts:20-24`, `:59-85` |
+| BK-L-21 | Hyperliquid weight caps | HL consumers | process | token details ≤ 220/min (BK-L-08 + warmer), bridge reserve ≤ 60/min (`BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE`), AF backfill ≤ 60/min, positioning aborts on 429, no retry of HL 429 | skip the tick | §4.1 |
+| BK-L-22 | Dead per-client limiters | `RateLimiterService` instances on the HL, HypeDexer and Hypurrscan clients | — | constructed but never checked by a route (only Hyperfolio and the Elysium budget call `checkRateLimit`); there is **no global Hyperliquid weight governor** | — | `src/core/hyperLiquid.ratelimiter.service.ts`; grep `checkRateLimit(` |
+
+### 3.4 Sockets and streams
+
+| ID | Direction | Endpoint / channel | When open | Volume / cost | Feeds | Ref |
+|---|---|---|---|---|---|---|
+| BK-S-01 | in | HypeDexer `liquidations` (UP-06) | always | ~1 msg/min (audit §3); not billed | ingestion → historical DB (2 s batches), `/ws liquidation`, SSE, Telegram liquidation alerts, market-alert cascades | `src/clients/hypedexer/websocket/liquidations.ws.client.ts:22-35`, `src/services/liquidations/liquidations.ingestion.service.ts:36` |
+| BK-S-02 | in | HypeDexer live-data `allFills` (perp + spot + HIP-3 + HIP-4) | **always**, even with no fill-alert rule (audit P2.5, open) | 2.4–3.7k msgs/min, 1.6–2.1 MB/min (audit §3); not billed | Telegram fill alerts | `live-data.ws.client.ts:129-134`, `src/services/telegram/telegram.fill-alert-dispatcher.service.ts:103-131` |
+| BK-S-03 | in | HypeDexer mirror `l4Book` per coin | lazy: first viewer, closed when none | ~245 msgs/min per coin + a snapshot per resync (~0.7 MB, every 8 s) | `/ws l4book` | `l4book.ws.client.ts:21-40`, `l4book.service.ts:265-291` |
+| BK-S-04 | in | Hyperliquid `l2Book` (touch) | with each L4 coin (not HIP-4 `#N`) | ~1.5 KB/frame | keeps the L4 book honest | `top-of-book.ws.client.ts:22-33` |
+| BK-S-05 | out | `/ws` `liquidation` (public, filterable) | per socket | fan-out of BK-S-01 | front live liquidations | `ws.server.ts:386-460` |
+| BK-S-06 | out | `/ws` `l4book` (public) | per socket, ≤ 4 coins | 100 levels/side, ≤ 4 emits/s per coin (`l4book.service.ts:265-267`) | front order books | `ws.server.ts:677-681` |
+| BK-S-07 | out | `/ws` privileged: `wallet_event`, `liquidation_alert`, `fill_alert`, `doc_update_alert`, `bot_announcement`, `alert` | bot sockets with `Authorization: Bot <key>` (`TELEGRAM_BOT_API_KEY`) | — | Telegram bot | `ws.server.ts:64-71`, `:249-290` |
+| BK-S-08 | out | SSE `/liquidations/stream` | per client | heartbeat 30 s, replays ≤ 100 missed events; Redis channel `liquidations:sse:broadcast` | legacy live liquidations | `sse-manager.service.ts:30-35` |
+| BK-S-09 | out | SSE `/hyperfolio/wallet/:address/positions/stream` | per wallet view, cache miss only (a cached answer is replayed) | one long upstream call (≤ 90 s), heartbeat 15 s | tracker EVM positions | `hyperfolio.routes.ts:224-340`, `hyperfolio.cache.ts:48-55` |
+
+## 4. Budgets
+
+### 4.1 Hyperliquid weight per minute (backend IP, limit 1,200)
+
+Steady = nominal period, nobody on the on-demand pages. Worst = −10 % jitter on guarded intervals and every on-demand consumer at its cap.
+
+| ID | Consumer | Steady | Worst | Basis |
+|---|---|---|---|---|
+| BU-HL-01 | Spot markets (BK-P-01) | 120 | 133 | 20 × 6/min |
+| BU-HL-02 | Perp markets (BK-P-02) | 120 | 133 | 20 × 6/min |
+| BU-HL-03 | Global stats (BK-P-03) | 80 | 89 | 20 × 4/min |
+| BU-HL-04 | Spot deploy state (BK-P-05) | 60 | 67 | 20 × 3/min |
+| BU-HL-05 | Validators (BK-P-04) | 40 | 44 | 20 × 2/min |
+| BU-HL-06 | HLP vault (BK-P-06) | 40 (0 today, frozen) | 44 | 20 × 2/min |
+| BU-HL-07 | Positioning (BK-P-09) | 160 | 160 | 80 × 2 |
+| BU-HL-08 | Reserve-yield ledgers: alerts 60 s + revenue 10 min (BK-P-12, BK-R-14; the revenue read only while someone views revenue) | 20 | 22 | ~20 + 2 |
+| BU-HL-09 | Bridge-reserve scan (BK-P-10) | 32 | 67 | `bridgeReserve.service.ts:108`, `:122`; 60 per cycle on a guarded 60 s cycle (÷ 0.9) |
+| BU-HL-10 | Token-details warmer (BK-P-11) | 20 | 22 | 1 × 20 on a guarded 60 s interval (÷ 0.9) |
+| BU-HL-11 | Token-details reads (BK-R-06) | 0 | 200 | 10 × 20 |
+| BU-HL-12 | AF running day (BK-R-15) | 0 | ~25 | `tokenDetails.service.ts:220` |
+| BU-HL-13 | AF backfill after a Redis loss | 0 | 60 | `afBuybacks.service.ts:174` |
+| BU-HL-14 | HIP-4 `allMids` (BK-R-27) | 0 | 24 | 12 × 2 |
+| BU-HL-15 | HIP-4 `outcomeTemplates` (on demand) | 0 (~0.3 while a HIP-4 page is open) | 20 | 1/h; 1/min while HL fails (`indexer-hip4.service.ts:407-411`) |
+| BU-HL-16 | TWAP `allPerpMetas` (BK-R-10) | 0 | 4 | 20 / 5 min |
+| | **Total** | **~692** | **~1,114** | |
+| | **Margin under 1,200** | ~508 (42 %) | **~86 (7 %)** | |
+
+The code's own inventory (no jitter, ledgers 24, bridge 60) says ~977, ~1,037 during an AF backfill (`tokenDetails.service.ts:215-223`). Outside this table: a missing poller key forces one extra read per caller (`perp.assetcontext.client.ts:128-129`, `globalstats.client.ts:57-60`); HL 5xx are retried up to 3 attempts, so an HL 5xx episode can triple the pollers' weight; HL 429 is never retried.
+
+**Single-instance assumption.** None of the Hyperliquid pollers BK-P-01..06, 10 and 12 takes a distributed lock, and the read budgets (BK-L-08, BK-L-21) are per process (`tokenDetails.service.ts:203-204`, README "Deploy" step 2). Their steady share is ~512 (BU-HL-01..06, 08, 09); positioning (160, locked) and the warmer (20, one per-minute claim across instances, `tokenDetails.service.ts:422-426`) are not duplicated. Two instances behind one outbound IP therefore make the steady load ~512 × 2 + 180 ≈ 1,204, over the limit with zero visitors, and the per-process on-demand caps (BU-HL-11..14) double too. Positioning (BK-P-09), the HypeDexer pollers (BK-P-18..21, 24), builder growth (BK-P-25) and two Hypurrscan pollers (BK-P-16, 17) take a lock.
+
+### 4.2 HypeDexer credits per day
+
+Background (independent of visitors):
+
+| ID | Consumer | Credits / min | Credits / day | Ref |
+|---|---|---|---|---|
+| BU-HD-01 | Builders list (BK-P-20) | ~145 | **~208,800** | `builders-list-poller.client.ts:13-17` |
+| BU-HD-02 | Active users ×4 (BK-P-19) | 48 | **69,120** | `activeusers.client.ts:17-20` |
+| BU-HD-03 | Top traders ×4 (BK-P-18) | 28 | **40,320** | `toptraders.client.ts:18-21` |
+| BU-HD-04 | Metrics snapshot (BK-P-21) | ≤ 1.2 | ≤ 1,728 | 2 × 3 per 5 min |
+| BU-HD-05 | Liquidations backfill (BK-P-22) | — | ~200 | 1–2 pages × 102 |
+| | **Subtotal** | **~222** | **~320,000** | |
+| BU-HD-06 | Completed-trades feed (BK-P-23), only with ≥ 1 Telegram wallet rule | 84–132 | +121k–190k | audit §3 |
+| BU-HD-07 | **Elysium ingestion (BK-P-24)** | **~1,600 (measured 2026-10-12, local)** | **~2.3M** | to investigate; ceiling 12,240/min |
+
+**Flag:** the background subtotal (~320k/day) is above the default `HYPEDEXER_DAILY_CREDIT_BUDGET` (300,000, `hypedexer-credit-meter.ts:18`), so the warning fires every day (~22:30 UTC with zero visitors, earlier with traffic, at once with Elysium). Either raise the env to the agreed figure or treat the warning as noise.
+
+Live shared keys while at least one viewer polls them (cost per key, the same for 1 or 10,000 viewers; a key refreshes at most once per TTL, less when its only viewer polls slower):
+
+| ID | Key (route) | Credits / refresh | TTL | Max credits / min | Ref |
+|---|---|---|---|---|---|
+| BU-HD-10 | Overview tiles ×4: volume, fees, fills, active traders (BK-R-25) | 3 each | 60 s effective (client cache) | 12 | `overview-indexer.client.ts:21` |
+| BU-HD-11 | HIP-3 overview + top movers (BK-R-28) | 3 each | 15 s | 24 | `hypedexer.cache.ts:46` |
+| BU-HD-12 | Builders top, limits 3 / 5 / 100 (BK-R-26) | 3 / 3 / 12 | 15 s | 72 | `hypedexer.cache.ts:58-60` |
+| BU-HD-13 | Builders stats, per timeframe or builder | 3 | 15 s | 12 each | `hypedexer.cache.ts:55-57` |
+| BU-HD-14 | HIP-4 live volumes, ~17 coin chunks (BK-R-27); front polls 30 s | ~7 each | 15 s | **~476** (238 at the 30 s poll) | `hypedexer.cache.ts:64-68`, `front:src/services/indexer/hip4/hooks/useHip4LiveMarkets.ts:45` |
+| BU-HD-15 | HIP-4 coin tape `limit=400`, per active coin viewed | 42 | 10 s | **252 per coin** | `hypedexer.cache.ts:73`, `front:src/app/(app)/market/hip4/[coin]/page.tsx:112` |
+| BU-HD-16 | HIP-4 global tape `limit=50` | 7 | 10 s | 42 | `front:src/app/(app)/market/hip4/page.tsx:31` |
+| BU-HD-17 | HIP-4 settlements | 7 (+3 per new market, once) | 30 s | 14 | `hypedexer.cache.ts:81` |
+| BU-HD-18 | TWAP source page 1 (500 rows); deeper pages once a minute each | 52 | 10 s | **312** + 52 per deep page | `indexer-twaps.service.ts:20-46` |
+| BU-HD-19 | TWAP flow (150 rows), completed trades, fills / priority stats | 7–17 | 15 s | ~28–68 each | `hypedexer.cache.ts:95-98` |
+| BU-HD-20 | EVM blocks page (`limit=20`) + transactions | ~4 each | 5 s | ~96 | `hypedexer.cache.ts:107-112` |
+| BU-HD-21 | HIP-3 market tape, per market | ~7–12 | 10 s | ~42–72 per market | `hypedexer.cache.ts:92` |
+| BU-HD-22 | Per-wallet keys (fills 15 s, user data 30 s, liquidations 60 s, funding summary 30 min) | 3–502 | per wallet viewed | scales with **distinct wallets**, not viewers | `hypedexer.cache.ts:48-53`, `liquidations.service.ts:51` |
+
+A busy day where every live key above stays warm costs roughly 1,500–2,000 credits/min (~2.2–2.9M/day) on top of the background, flat in the number of visitors except BU-HD-15/21/22. The audit's per-page figures (§8, 2026-09-28) predate the live-cadence change (`87b8719`) and the 60 s pollers (`432c1cd`) and understate today's cost.
+
+### 4.3 Hyperfolio
+
+| ID | Guard / figure | Value | Ref |
+|---|---|---|---|
+| BU-HF-01 | Upstream burst limit (Hyperfolio) | ~20 req/s per key, 403 "limit exceeded" | `hyperfolio.client.ts:47-59` |
+| BU-HF-02 | Our ceiling per process | 8 calls/s (→ ≤ 691,200/day theoretical) | `hyperfolio.client.ts:54` |
+| BU-HF-03 | Daily budget (all instances, Redis) | 50,000 calls/UTC day (`HYPERFOLIO_DAILY_BUDGET`), warning at 80 %; **a guess** | `hyperfolio.quota.ts:14-25` |
+| BU-HF-04 | Real paid quota | **unknown** | README "Configuration" |
+| BU-HF-05 | Per-IP miss budget | 120 misses/min (a wallet page ≈ 6 misses → ~20 cold wallets/min per IP) | `hyperfolio.client.ts:160-168` |
+| BU-HF-06 | Cooldown after upstream throttle | 10 s, cached answers still served | `hyperfolio.service.ts:27` |
+| BU-HF-07 | Cost of one cold wallet page | ~6 calls (composition, positions, history, transactions, nfts, points), then nothing for 60–600 s | `hyperfolio.client.ts:161-163`, `hyperfolio.cache.ts:32-40` |
+| BU-HF-08 | Yields page | 1 shared key per query, 120 s → ≤ 720 calls/day per distinct query | `hyperfolio.cache.ts:39` |
+| BU-HF-09 | Daily budget in wallets | 50,000 / 6 ≈ 8,300 cold wallet views per day (refreshes of a viewed wallet count again after each TTL) | derived |
+
+With 8/s per process the daily budget binds long before the burst limit (50,000 calls ≈ 1 h 44 min at 8/s). Past the budget every Hyperfolio panel serves its last copy (≤ 10 min old, 20 min for NFTs) and then 503s until 00:00 UTC.
+
+## 5. Front
+
+Paths are front-relative (`src/…`); backend paths carry `back:` and backend rows are cross-referenced by their ID from §3 (BK-P pollers, BK-R routes, BK-S sockets, BK-L limits).
+
+How to read the tables:
+
+- **Cadence** is the front poll period P. Every poll goes through `useDataFetching` (or `setVisibleInterval`), so it pauses in a hidden tab (§5.3). "once" = fetched on mount only (`refreshInterval: 0`); "push" = websocket.
+- **Backend** is what bounds the age of the answer the backend hands out: the cache TTL of the key, or the poller interval that writes it. Two numbers joined by "+" are two cache layers stacked (service key over client key).
+- **Worst** is the worst-case age of what the visitor sees = P + backend age. It ignores upstream lag (Hypurrscan regenerates its files, HypeDexer indexes with a delay) and the ≤ 1.5 s a reader waits for a live key's refresh (`back:src/core/cache.service.ts:78`). A live key (TTL ≤ 30 s, `cache.service.ts:70`) whose refresh is slow can serve its last copy for up to 4 TTLs, at least 60 s (`:80-81`): that is the outage case, not the normal one. Browser-direct calls: Worst = P.
+- **Hidden**: `P` = polls skip while hidden, one catch-up poll on return (`src/lib/visibility.ts:21-56`); `S60` = socket closed after 60 s hidden, reopened and resubscribed on return (`src/lib/websocket-client.ts:38`); `ON` = socket stays open in a background tab; `—` = nothing recurring.
+
+### 5.1 Live widgets
+
+#### Shell (mounted on every page)
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-01 | Sidebar spot / perp badges | `/market/spot/globalstats`, `/market/perp/globalstats` | 60 s (`src/hooks/useSidebarBadges.ts:41`, `:44-45`) | pollers 10 s (BK-P-08 `back:src/clients/hyperliquid/spot/spot.stats.client.ts:8`, BK-P-02 `perp.assetcontext.client.ts:18`), BK-R-03 | 70 s | P |
+| FR-02 | Sidebar HYPE price + 24h change (also `/hype` price pill, dashboard HYPE price) | HL WS `wss://api.hyperliquid.xyz/ws`: `trades` + `activeAssetCtx` on `@107` (`src/services/market/hype/websocket.service.ts:6`, `:50`, `:56`) | push | — | push | S60 (`:42`) |
+| FR-03 | Sidebar vault count | `/market/vaults?limit=1` | 30 s (`src/services/explorer/vault/hooks/useVaults.ts:40`) | poller 30 s + 15 s in-process copy (BK-P-07, BK-R-12) | 75 s | P |
+| FR-04 | Sidebar validator count | `/staking/validators` | 30 s (`src/services/explorer/validator/hooks/validator/useValidators.ts:8`) | poller 30 s (BK-P-04 `back:src/clients/hyperliquid/staking/validator.ts:19`) | 60 s | P |
+| FR-05 | Sidebar project count | `/project?limit=1` | 30 s (`src/services/ecosystem/project/hooks/useProjects.ts:29`, called at `useSidebarBadges.ts:49`) | list cache 300 s (`back:src/core/crudBase.service.ts:174`, `back:src/constants/cache.constants.ts:23`) | 330 s | P |
+| FR-06 | Header search: address aliases | Hypurrscan `/globalAliases`, browser-direct (FR-D-15) | 300 s (`src/services/explorer/hooks/useGlobalAliases.ts:12`; mounted by `src/components/AppShell.tsx:65`) | — | 300 s | P |
+| FR-07 | Cmd+K search index | `/market/spot`, `/market/perp`, validators, vaults, aliases, projects, wiki | on palette open, module memo 5 min (`src/services/search/api.ts:16`, `:140`) | per route | 5 min + route | — |
+| FR-08 | `.hl` names next to addresses | `POST /names/primary`, batched every 40 ms, ≤ 500 per call, kept for the visit (`src/services/names/index.ts:15-16`, `:42`) | once per address per visit | 6 h (BK-R-37) | visit | — |
+| FR-09 | `/market/*` scope bar (`src/app/(app)/market/layout.tsx:16`) | spot/perp globalstats; `/indexer/hip3/overview` | 10 s (`src/services/market/spot/hooks/useSpotGlobalStats.ts:20`, `src/services/market/perp/hooks/usePerpGlobalStats.ts:23`); HIP-3 15 s (`src/services/indexer/hip3/hooks/index.ts:30`) | pollers 10 s; HIP-3 overview 15 s (`back:src/constants/hypedexer.cache.ts:46`, BK-R-28) | 20 s; 30 s | P |
+
+#### `/` (landing) and `/dashboard`
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-10 | Landing CommandHouse, dashboard LiveStrip / SignalRow / PulseBar stats | `/home/globalstats` | 15 s (`src/services/dashboard/hooks/useDashboardStats.ts:9`) | users/volume poller 15 s, stake 30 s, vault TVL 30 s + 15 s copy, bridged USDC read from DefiLlama **on every request** (BK-R-04) | 60 s (vault TVL) | P |
+| FR-11 | LiveStrip / PulseBar perp stats | `/market/perp/globalstats` | 10 s (`usePerpGlobalStats.ts:23`) | poller 10 s (BK-P-02) | 20 s | P |
+| FR-12 | LiveStrip 7d revenue | `/market/revenue/history?window=7d` | 60 s (`src/services/market/revenue/hooks/useRevenueBreakdown.ts:20`) | breakdown 300 s (`back:src/services/revenue/revenue.service.ts:43`, BK-R-14) | 6 min | P |
+| FR-13 | LiveStrip 24h liquidations | `/liquidations/data` | 10 s (`src/services/explorer/liquidation/hooks/useLiquidationsData.ts:39`) | 10 s (`back:src/services/liquidations/liquidations.service.ts:45`, BK-R-22) | 20 s | P |
+| FR-14 | BigPrintsCard (prints ≥ $10k, last 5 min) | HL WS `trades` on the 12 most-traded perps (`src/app/(app)/dashboard/page.tsx:21`; `src/services/dashboard/live/useLiveMarketFeed.ts:9`, `:11`, `:103`); seeded once from `/indexer/fills/` per coin, waves of 4 coins 1.1 s apart, start floored to 10 s (`src/services/dashboard/live/api.ts:73`, `:81-82`) | push, rendered every 1 s (`useLiveMarketFeed.ts:14`) | seed: 10 s (`back:src/services/indexer/indexer-fills.service.ts:16`) | ≤ 1 s | ON |
+| FR-15 | PriceBoard | HL WS `allMids` (`useLiveMarketFeed.ts:120`); coin list = top 16 perps by volume (`dashboard/page.tsx:19`) from `/market/perp` | push, 1 s render; list 10 s (`src/services/market/perp/hooks/usePerpMarket.ts:46`) | list: poller 10 s (BK-R-02) | ≤ 1 s | ON (list: P) |
+| FR-16 | LiveLiquidationsCard | seed `/liquidations/recent?limit=60` once (`src/services/dashboard/live/useLiveLiquidations.ts:20`), then backend `/ws` `liquidation` (`src/services/explorer/liquidation/websocket.store.ts:21`, `:69-71`) | push | seed 15 s (`liquidations.service.ts:47`) over client key 20 s (`back:src/clients/hypedexer/rest/liquidations/liquidations.client.ts:18`); push BK-S-05 | push | ON |
+| FR-17 | ChainHeartbeat (blocks/s, tx mix, 60 s window) | HL RPC WS `wss://rpc.hyperliquid.xyz/ws` `explorerBlock` + `explorerTxs` (`src/services/dashboard/live/useChainPulse.ts:6`, `:8`, `:74-75`) | push, 1 s render (`:9`) | — | ≤ 1 s | ON |
+| FR-18 | Movers (MoversCard, SignalRow) | `/market/perp`, `/market/spot` | 10 s (`usePerpMarket.ts:46`, `src/services/market/spot/hooks/useSpotMarket.ts:71`) | pollers 10 s (BK-R-01, 02) | 20 s | P |
+| FR-19 | TWAP cards (SignalRow, TwapFlowCard, HypeTwapCard, `/dashboard/market` TwapPanel, token TWAP tab, wallet TWAPs) | `/indexer/twaps` pages of 500 (`src/services/market/order/twap-source.ts:43`, `:61`) + HL UI `allMids` per dex, browser-direct (FR-D-12); fallback `/market/twap` | 15 s (`src/services/market/order/hooks/useTwapOrders.ts:40`) on a 12 s module memo (`twap-source.ts:50`); pages past the first re-walked every 60 s (`:58`) | source pages 10 s, no serve-while-refresh (`hypedexer.cache.ts:103`, `back:src/services/indexer/indexer-twaps.service.ts:40-45`, BK-R-29); fallback 15 s (`back:src/services/twap/twap.service.ts:60`, BK-R-10) | first page 25 s; deeper rows 70 s | P |
+| FR-20 | Spot auction signal (SignalRow, AuctionsPanel, SpotAuctionBand, AuctionStrip) | `/market/auction/timing` + `/market/auction` | 30 s (`src/services/market/auction/hooks/useAuctionTiming.ts:86`; `useAuctions.ts:38`, `:96`) | pollers 20 s (BK-P-05 `back:src/clients/hyperliquid/spot/spot.deploy.client.ts:20`, BK-P-13 `back:src/clients/hypurrscan/auction.client.ts:14`), BK-R-11 | 50 s | P |
+| FR-21 | Builders 24h (SignalRow, BuildersConcentrationCard, NetworkPulse) | `/indexer/builders/stats` | 15 s (`src/services/indexer/builders/hooks/useBuildersGlobalStats.ts:9`) | 15 s (`hypedexer.cache.ts:57`, BK-R-26) | 30 s | P |
+| FR-22 | Fees 7d sparkline (SignalRow), NetworkGrowthSection | `/market/metrics/history` | 300 s (`src/services/market/metrics/index.ts:43`) | snapshot 5 min, 1 point/h (BK-P-21 `back:src/clients/metrics/metrics-snapshot.client.ts:12`) | 10 min | P |
+| FR-23 | Biggest trade 24h (SignalRow, hub BiggestTradesCard) | `/indexer/completed-trades/` | 15 s (`src/services/market/biggest-trades/index.ts:46`) | 15 s (`hypedexer.cache.ts:98`, BK-R-29) | 30 s | P |
+
+#### `/dashboard/market`
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-24 | AuctionsPanel perp side | HL `perpDeployAuctionStatus` (FR-D-08) + Hypurrscan `/pastAuctionsPerp` (FR-D-16), browser-direct | 30 s (`src/services/market/auction/hooks/usePerpAuctionTiming.ts:86`); 60 s (`src/services/market/perpDex/hooks/usePastAuctionsPerp.ts:24`) | — | 30 s; 60 s | P |
+| FR-25 | LiquidationsPanel | `/liquidations/data`; `/liquidations/historical/top` | 10 s (FR-13); 15 s (`src/services/explorer/liquidation/hooks/useTopLiquidations.ts:14`) | 10 s; 15 s (`liquidations.service.ts:53`) | 20 s; 30 s | P |
+| FR-26 | BuildersConcentrationCard | `/indexer/builders/stats` + `/top` | 15 s (`useBuildersGlobalStats.ts:9`, `useBuildersTop.ts:14`) | 15 s (`hypedexer.cache.ts:57`, `:60`) | 30 s | P |
+| FR-27 | Hip3MarketsPanel, Hip3AuctionRow | HL WS `allDexsAssetCtxs` (`src/services/market/perpDex/websocket.service.ts:105`) + HL `perpDexs` / `allPerpMetas` browser-direct (FR-D-04, FR-D-07) | push; metadata polled 60 s on a 5 min shared memo (`src/services/market/perpDex/hooks/usePerpDexMarketData.ts:20`, `:53`, `:64`) | — | push; metadata 5 min | S60 (`websocket.service.ts:97`) |
+| FR-28 | Hip4OutcomesCard | `/indexer/hip4/questions-with-outcomes` | 30 s (`src/services/indexer/hip4/hooks/useHip4QuestionsWithOutcomes.ts:14`) | 15 s (`hypedexer.cache.ts:106`, BK-R-27) | 45 s | P |
+| FR-29 | TraderPnlCard | `/indexer/overview/daily-pnl-10d` | 300 s (`src/services/market/trader-pnl/index.ts:45`) | 3,600 s (`hypedexer.cache.ts:43`) over client 60 s (`back:src/clients/hypedexer/rest/overview/overview-indexer.client.ts:21`) | 66 min | P |
+| FR-30 | MarketVolumeCard | `/indexer/overview/daily-volume-10d` | 300 s (`src/services/market/market-volume/index.ts:35`) | 300 s (`hypedexer.cache.ts:41`) + client 60 s | 11 min | P |
+
+Also on the page: FR-02, FR-18, FR-19, FR-20, FR-22.
+
+#### `/dashboard/capital`
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-31 | FeesRevenuePanel | `/market/revenue/history` | 60 s (`useRevenueBreakdown.ts:20`) | 300 s (BK-R-14) | 6 min | P |
+| FR-32 | StablecoinsCard (also `/market`, `/market/spot`) | `/market/stablecoins/history` | 60 s (`src/services/market/stablecoins/hooks/useSpotStablecoins.ts:25`); flagged stale past 30 min (`:17`) | poller 60 s (BK-P-15 `back:src/clients/hypurrscan/spotUSDC.client.ts:18`); Hypurrscan rewrites the file ~every 10 min (CODEMAP) | 120 s (+ upstream) | P |
+| FR-33 | VaultsModule | `/market/vaults` | 30 s (`useVaults.ts:40`) | 30 s + 15 s copy (BK-R-12) | 75 s | P |
+| FR-34 | ValidatorsModule | `/staking/validators` | 30 s (`useValidators.ts:8`) | poller 30 s (BK-P-04) | 60 s | P |
+| FR-35 | TopYieldsModule (also project page yields) | `/hyperfolio/yield` | 300 s (`src/services/market/yields/hooks/useTopYields.ts:25`, `useProtocolYields.ts:51`) | 120 s (`back:src/constants/hyperfolio.cache.ts:39`, BK-R-36) | 7 min | P |
+| FR-36 | Tracker recap: top traders, active users | `/top-traders`, `/active-users` | 30 s (`src/services/market/toptraders/hooks/useTopTraders.ts:27`, `src/services/market/activeusers/hooks/useActiveUsers.ts:27`) | pollers 60 s (BK-P-18, BK-P-19) | 90 s | P |
+| FR-37 | Tracker recap: public lists | `/walletlists/public` | 60 s (`src/services/market/tracker/hooks/usePublicListsPreview.ts:17`) | 300 s (`back:src/services/walletlist/walletlist.service.ts:203`) | 6 min | P |
+
+#### `/market` (venue hub)
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-38 | KPI ribbon 24h volume / fees / active traders (also NetworkPulse, OperatingMetricsCard) | `/indexer/overview/{trading-volume,total-fees,active-traders,total-fills}-24h` | 15 s (`src/services/indexer/overview/hooks/useTradingVolume24h.ts:15`, `useTotalFees24h.ts:15`, `useActiveTraders24h.ts:15`, `useTotalFills24h.ts:20`) | 15 s (`hypedexer.cache.ts:46`) **over a 60 s client cache** (`overview-indexer.client.ts:21`, BK-R-25) | 90 s | P |
+| FR-39 | Venue cards, UniversalTokenTable | `/market/spot`, `/market/perp`, globalstats | 10 s | pollers 10 s | 20 s | P |
+| FR-40 | TwapFlowCard (hub) | `/indexer/twaps?limit=150` (`src/services/market/twap-flow/index.ts:36`) | 15 s (`:52`) | 15 s (`indexer-twaps.service.ts:44` → `hypedexer.cache.ts:98`) | 30 s | P |
+| FR-41 | HubRail / TrackerStatsBar top traders | `/top-traders` | 30 s | poller 60 s | 90 s | P |
+| FR-42 | HubLanes builders | `/indexer/builders/stats/all-timeframes`; `/top` | 60 s (`useBuildersStatsAllTimeframes.ts:11`); 15 s | 55 s, refreshed in background (`hypedexer.cache.ts:54`); 15 s | 115 s; 30 s | P |
+| FR-43 | HubLanes HIP-4 | as FR-28 | 30 s | 15 s | 45 s | P |
+| FR-44 | AuctionStrip | as FR-20 + FR-24 | 30 s / 60 s | 20 s / — | 50 s / 60 s | P |
+
+Also on the page: FR-23, FR-32.
+
+#### `/market/spot`
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-45 | SpotKpiStrip | spot globalstats; `/market/fees` | 10 s; 30 s (`src/services/market/fees/hooks/useFeesStats.ts:18`) | 10 s; poller 30 s (BK-P-14 `back:src/clients/hypurrscan/fees.client.ts:16`) | 20 s; 60 s | P |
+| FR-46 | SpotDirectoryTable, SpotLeaderboards, SpotMarketShape | `/market/spot` | 10 s (`useSpotMarket.ts:71`) | poller 10 s (BK-P-01) | 20 s | P |
+| FR-47 | Fee flow (also `/hype/operations` FeeRunRateCard) | `/market/fees/raw` | 300 s (`src/services/market/fees/hooks/useFeesHistory.ts:16`) | poller 30 s | 330 s | P |
+| FR-48 | HYPE chart | HL `candleSnapshot`, browser-direct (FR-D-18) | once (`src/services/market/token/hooks/useTokenCandles.ts:34`) | — | page age | — |
+
+Also on the page: FR-20 (SpotAuctionBand), FR-32.
+
+#### Token pages: `/market/spot/[token]`, `/market/perp/[token]`, `/market/perpdex/[dex]/[asset]`, `/market/hip4/[coin]`
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-49 | Live price, trades tape, L2 overlay | HL WS `trades` + `l2Book` for the coin (`src/services/market/token/websocket.service.ts:10`, `:85`, `:91`), last 50 trades (`:14`) | push | — | push | ON |
+| FR-50 | OrderBook / Hip4OrderBook (L4) | backend `/ws` `l4book` (`src/services/market/orderbook/websocket.store.ts:73`) | push | emitted every 250 ms, rebuilt from a snapshot every 8 s (`back:src/services/orderbook/l4book.service.ts:267`, `:278`, BK-S-06); ≤ 4 coins per socket (`back:src/websocket/ws.server.ts:78`) | ≤ 250 ms | ON |
+| FR-51 | TradingViewChart | HL `candleSnapshot` browser-direct (≥ 1 m bars); 5 s / 30 s bars from `/indexer/candles` (`src/services/market/token/api.ts:33-35`) | once (`useTokenCandles.ts:34`); last price follows FR-49 | sub-minute: one bar, ≥ 2 s (BK-R-33) | page age | — |
+| FR-52 | TokenDetailsBand (also `/hype` supply via `useHypeSupply`) | `/market/token-details/:tokenId` | 60 s (`src/services/market/token/hooks/useTokenDetails.ts:16`) | live fields from the spot poller, ≤ 5 s older than its write (`back:src/services/spot/tokenDetails.service.ts:241`, BK-P-01 10 s); static fields fresh 1 h, served up to 24 h (`:210-211`, BK-R-06) | live 75 s; static 61 min | P |
+| FR-53 | Holders tab (also `/hype/capital` cohorts) | `/market/holders/:token` | 5 min (`src/services/market/spot/hooks/useTokenHolders.ts:10`) | fresh 10 min, stale 6 h (`back:src/services/spot/tokenHolders.service.ts:65-66`, BK-R-07) | 15 min (+ Hypurrscan ~10 min regeneration, CODEMAP) | P |
+| FR-54 | Auction info (spot token) | `/market/auction` | 60 s (`useAuctions.ts:121`) | poller 20 s | 80 s | P |
+| FR-55 | TWAP tab (spot token) | as FR-19 | 15 s | 10 s | 25 s | P |
+
+#### `/market/perp`, `/market/perpdex` (+`[dex]`), HIP-3 asset
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-56 | MarketStatsStrip | spot/perp globalstats; `/market/fees` | 10 s; 30 s | 10 s; 30 s | 20 s; 60 s | P |
+| FR-57 | Perp tables, PerpLeaderboards | `/market/perp` | 10 s | 10 s | 20 s | P |
+| FR-58 | PerpFundingCarry | HL `predictedFundings`, browser-direct (FR-D-09) | 30 s (`src/services/market/funding/hooks/usePredictedFundings.ts:27` → default `src/hooks/useDataFetching.ts:82`) | — | 30 s | P |
+| FR-59 | AuctionCard, PastAuctionsPerpTable | as FR-20 + FR-24 | 30 s / 60 s | 20 s / — | 50 s / 60 s | P |
+| FR-60 | PerpDex tables, stats cards, TopPerpDexs, Hip3MarketsExplorer, `[dex]` overview | as FR-27 | push; metadata 5 min | — | push | S60 |
+| FR-61 | HIP-3 asset context (mark, oracle, OI) | HL `metaAndAssetCtxs {dex}` browser-direct (FR-D-19); `perpDexs` | 10 s (`src/services/market/hip3/hooks/useHip3AssetView.ts:69`); 1 h (`:77`) | — | 10 s | P |
+| FR-62 | HIP-3 snapshot ribbon | `/indexer/hip3/snapshots` | 10 s (`src/services/indexer/hip3/hooks/index.ts:41`) | 15 s (`hypedexer.cache.ts:93`) | 25 s | P |
+| FR-63 | Hip3MarketTape | `/indexer/hip3/fills` | 10 s (`index.ts:66`) | 10 s (`hypedexer.cache.ts:92`) | 20 s | P |
+| FR-64 | Hip3TopTraders | `/indexer/hip3/stats/traders` | 60 s (`index.ts:85`) | 120 s (`hypedexer.cache.ts:94`) | 180 s | P |
+| FR-65 | Hip3BasisCard underlying | Next route `/api/hip3/underlying` (FR-D-22) | 1 h (`src/services/market/hip3/underlying.ts:78`) | Next `revalidate` 6 h (`src/app/api/hip3/underlying/route.ts:17`) | 7 h | P |
+
+Token pages also carry FR-49..51.
+
+#### `/market/hip4` (+`[coin]`)
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-66 | Live market cards (odds) | HL `outcomeMeta` + `allMids`, browser-direct (FR-D-10); template titles memo 1 h, 60 s after a failed or empty read (`src/services/indexer/hip4/hooks/useHip4LiveMarkets.ts:76-77`) | 15 s (`:127`) | — | 15 s | P |
+| FR-67 | Card volumes | `/indexer/hip4/analytics` in coin batches (`src/services/indexer/hip4/api.ts:218`) | 30 s (`useHip4LiveMarkets.ts:45`) on a 25 s module memo (`:46`) | 15 s (`hypedexer.cache.ts:68`, `back:src/services/indexer/indexer-hip4.service.ts:337`) | 45 s | P |
+| FR-68 | Markets list (enriched) | `/indexer/hip4/markets-enriched` | 30 s (`src/services/indexer/hip4/hooks/useHip4MarketsEnriched.ts:14`) | 15 s (`hypedexer.cache.ts:106`) | 45 s | P |
+| FR-69 | Questions | as FR-28 | 30 s | 15 s | 45 s | P |
+| FR-70 | Fills tape (global and per coin) | `/indexer/hip4/fills` | 10 s (`src/services/indexer/hip4/hooks/useHip4Fills.ts:9`) | by newest-fill age: 10 s / 60 s / 3,600 s (`hypedexer.cache.ts:73-75`, `indexer-hip4.service.ts:102-114`) | 20 s on an active market | P |
+| FR-71 | Settlements | `/indexer/hip4/settlements` | 30 s (`useHip4Settlements.ts:8`) | 30 s (`hypedexer.cache.ts:81`) | 60 s | P |
+| FR-72 | Hip4AnalyticsChart | `/indexer/hip4/analytics` | 60 s (`useHip4Analytics.ts:12`) | 60 s (`hypedexer.cache.ts:61`, `:63`) | 120 s | P |
+| FR-73 | `[coin]` L2 book | HL `l2Book #N`, browser-direct (FR-D-11) | 5 s; 600 s when the coin is not a live `#N` (`useHip4OrderBook.ts:35`) | — | 5 s | P |
+| FR-74 | `[coin]` probability chart | HL `candleSnapshot` per outcome coin, browser-direct | 30 s; 600 s when the coin is not active (`useHip4OutcomeCandles.ts:14`, `:113`) | — | 30 s | P |
+| FR-75 | `[coin]` settled-market history, lookup outside the live list | `/indexer/hip4/fills` (limit 1,000); `markets-enriched?outcome_id=` | once (`useHip4ProbabilityHistory.ts:37`, `useHip4MarketLookup.ts:37`) | market row 86,400 s settled / 300 s open (`hypedexer.cache.ts:85-86`) | page age | — |
+
+`[coin]` also carries FR-49 and FR-50.
+
+#### `/market/builders` (+`[address]`, `intelligence`), `/market/trades`, `/market/yields`
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-76 | Builders table, ribbon | as FR-42 | 60 s / 15 s | 55 s / 15 s | 115 s / 30 s | P |
+| FR-77 | BuildersGrowthChart | `/builders/growth` | 300 s (`src/services/market/builder-growth/index.ts:63`) | DB fed every 5 min (BK-P-25 `back:src/services/builders/builder-growth.service.ts:59`), route fresh 600 s (`:75`) | 15 min | P |
+| FR-78 | Builder detail stats, users | `/indexer/builders/:addr/stats`, `/users` | 15 s (`useBuilderStats.ts:17`, `useBuilderUsers.ts:19`) | 15 s (`hypedexer.cache.ts:57`) | 30 s | P |
+| FR-79 | TradeExplorer rows; summary | `/indexer/completed-trades/`; `/summary` | 15 s (`src/services/market/trade-explorer/index.ts:53`); 60 s (`:69`) | 15 s (`hypedexer.cache.ts:98`) | 30 s; 75 s | P |
+| FR-80 | Yields directory | `/hyperfolio/yield` | 300 s (`src/services/market/yields/hooks/useYieldsDirectory.ts:42`) | 120 s | 7 min | P |
+
+#### `/market/tracker` (+`my-wallets`)
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-81 | SmartMoneyBoard, TopTradersPreview, ActiveUsersPreview | as FR-36 | 30 s | 60 s | 90 s | P |
+| FR-82 | SmartMoneyPositioning (also wallet digest alignment) | `/top-traders/positioning`; `/positioning/history` | 60 s (`src/services/market/positioning/index.ts:51`); 300 s (`:87`) | poller 60 s (BK-P-09 `back:src/clients/hyperliquid/positioning/aggregate-positioning.client.ts:21`); history sampled by the same poll | 120 s; 6 min | P |
+| FR-83 | PublicListsPreview | as FR-37 | 60 s | 300 s | 6 min | P |
+| FR-84 | My wallets: balances, positions | HL `spotClearinghouseState` + `clearinghouseState`, browser-direct (FR-D-13) | 15 s (`src/services/market/tracker/hooks/useWalletsBalances.ts:76`) | — | 15 s | P |
+| FR-85 | My wallets: live fills | HL WS `userFills`, first 10 wallets (`src/services/market/tracker/hooks/useTrackedWalletFills.ts:12`, `:94`), 200 kept (`:13`) | push, 750 ms render (`:14`) | — | ≤ 750 ms | ON |
+| FR-86 | My wallets: portfolio, orders, fills | HL `portfolio`, `frontendOpenOrders`, `userFills`, browser-direct | 30 s (`src/services/explorer/address/hooks/usePortfolio.ts:14`, `useOpenOrders.ts:9`, `useUserFills.ts:30`) | — | 30 s | P |
+| FR-87 | HyperEVM card, tokens tab | `/hyperfolio/wallet/:a/composition` | 60 s (`src/services/market/tracker/hyperfolio/hooks/useEvmComposition.ts:15`) | 60 s (`hyperfolio.cache.ts:33`) | 120 s | P |
+| FR-88 | PerformanceChart | `/hyperfolio/wallet/:a/history` | 300 s (`usePortfolioHistory.ts:14`) | 300 s (`hyperfolio.cache.ts:35`) | 10 min | P |
+| FR-89 | DeFi positions, NFTs, points, EVM activity | `/hyperfolio/wallet/:a/positions/stream` (JSON fallback), `/nfts`, `/points`, `/transactions` | once per address per visit (`src/services/market/tracker/hyperfolio/positions.store.ts:67`, `:108`; `useWalletNfts.ts:13`, `useWalletPoints.ts:11`, `useEvmTransactions.ts:22`) | 120 / 600 / 300 / 120 s (`hyperfolio.cache.ts:34-38`) | page age | — |
+
+#### Address pages: `/explorer/address/[address]` and `/market/tracker/wallet/[address]` (shared digest, `src/components/address/digest/useAddressDigest.ts:626-643`)
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-90 | Balances, positions, liq distance | as FR-84 | 15 s | — | 15 s | P |
+| FR-91 | PnL ribbon | HL `portfolio`, browser-direct | 30 s (`usePortfolio.ts:14`) | — | 30 s | P |
+| FR-92 | Capital flows, linked accounts | HL `userNonFundingLedgerUpdates`, pages of 2,000 (`src/services/explorer/address/api.ts:63`), ≤ 5 pages per read (`src/services/explorer/address/hooks/useLedgerUpdates.ts:6`); full pages kept, ≤ 24 (`api.ts:66`) | 120 s (`src/services/explorer/address/hooks/useLedgerUpdates.ts:23`) | — | 120 s | P |
+| FR-93 | Transactions table, activity feed | HL RPC `userDetails` + ledger + `userFills`, shared 30 s in-page (`api.ts:23-26`); asset resolver (FR-D-14) | 120 s (`useTransactions.ts:25`, `useAddressActivity.ts:10`); resolver 300 s (`useAssetResolver.ts:8`) | — | 120 s | P |
+| FR-94 | Indexer stats: overview, performance, coins | `/indexer/users/:u/{overview,performance,coins}` | 60 s (`src/services/market/tracker/wallet-performance/hooks.ts:46`, `:60`, `:70`) | 30 s (`hypedexer.cache.ts:48`) | 90 s | P |
+| FR-95 | Coin distribution | `/indexer/overview/coin-distribution?user=` | 60 s (`hooks.ts:80`) | 30 s over client 300 s (`overview-indexer.client.ts:22`) | 390 s | P |
+| FR-96 | Round trips (cadence, style, recent form) | `/indexer/completed-trades/?user=` | 60 s (`hooks.ts:36`) | 15 s | 75 s | P |
+| FR-97 | Funding summary | `/indexer/funding/userFunding/summary` | 300 s (`hooks.ts:25`) | 1,800 s (`hypedexer.cache.ts:53`) | 35 min | P |
+| FR-98 | Liquidations | `/liquidations?user=` | 60 s (`src/services/explorer/liquidation/hooks/useUserLiquidations.ts:26`) | 60 s (`liquidations.service.ts:51`, `:422`) | 120 s | P |
+| FR-99 | Predicted funding carry | HL `predictedFundings`, browser-direct | 300 s (`useAddressDigest.ts:643`) | — | 300 s | P |
+| FR-100 | Spot pair names | `/market/spot?limit=200` | 10 s (`useAddressDigest.ts:641`, `useSpotMarket.ts:71`) | 10 s | 20 s | P |
+| FR-101 | Tabs: open orders, recent fills | HL `frontendOpenOrders`, `userFills` | 30 s (`useOpenOrders.ts:9`; `src/components/market/tracker/fills/WalletRecentFillsSection.tsx:46`) | — | 30 s | P |
+| FR-102 | Tab: staking | HL `delegatorSummary`, `delegatorHistory`, `delegatorRewards`, `delegations` | 30 s each (`useDelegatorSummary.ts:42`, `useDelegatorHistory.ts:63`, `useDelegatorRewards.ts:57`, `useValidatorDelegations.ts:38`) | — | 30 s | P |
+| FR-103 | Tab: vault deposits | HL `userVaultEquities` | 60 s (`useVaultDeposits.ts:36`) | — | 60 s | P |
+| FR-104 | Header name, avatar, links | `/names/profile/:a` | once (`src/services/names/index.ts:101`) | 6 h (BK-R-37) | visit | — |
+
+Tracker variant adds FR-87..89; both add FR-19 (wallet TWAPs) and FR-82.
+
+#### `/explorer` and sub-pages
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-105 | LiveActivity feed (blocks, txs) | HL RPC WS `explorerBlock` / `explorerTxs` (`src/services/explorer/websocket.service.ts:10`, `:108-109`, `:149-150`), 500 items (`:11`) | push, applied every 250 ms (`:52`) | — | ≤ 250 ms | S60 (`:103`, `:144`) |
+| FR-106 | NetworkPulse, ExplorerFreshness | fills / active traders 24h; validators; vaults; builders 24h; DefiLlama bridge (FR-D-17) | 15 s; 30 s; 30 s; 15 s; 60 s (`src/services/dashboard/hooks/useHLBridge.ts:13`) | 15 s + 60 s client; 30 s; 45 s; 15 s; — | 90 s; 60 s; 75 s; 30 s; 60 s | P |
+| FR-107 | TokenDeploys | Hypurrscan `/deploys` browser-direct (FR-D-15) + `/market/auction` | 15 s (`src/services/explorer/hooks/useDeploys.ts:118`); 30 s | —; 20 s | 15 s; 50 s | P |
+| FR-108 | BridgeTransfers | `/indexer/evm/bridge/events`, `end_time` floored to 15 s (`src/services/indexer/evm/hooks/useEvmBridgeEvents.ts:23-27`) | 15 s (`:32`) | 30 s (`hypedexer.cache.ts:113`) | 45 s | P |
+| FR-109 | UpcomingUnstaking | `/staking/unstaking-queue` | 10 s (`useUnstakingQueuePaginated.ts:42`) | poller 40 s (BK-P-16 `back:src/clients/hypurrscan/unstaking.client.ts:15`) | 50 s | P |
+| FR-110 | CapitalEvolution | vaults; DefiLlama bridge | 30 s; 60 s | 45 s; — | 75 s; 60 s | P |
+| FR-111 | `/explorer/liquidations` live rows | backend `/ws` `liquidation`, 100 kept (`websocket.store.ts:22`) | push | BK-S-05 | push | ON |
+| FR-112 | `/explorer/liquidations` stats | `/liquidations/data` | 15 s (`src/components/explorer/liquidation/LiquidationsContext.tsx:196`) | 10 s | 25 s | P |
+| FR-113 | `/explorer/liquidations` chart | `/liquidations/historical/chart` | 30 s for 24h, 60 s otherwise (`LiquidationsContext.tsx:232-235`) | 30 / 60 / 300 / 300 / 600 s for 24h / 7d / 14d / 30d / 90d (`back:src/services/liquidations/liquidations.historical-chart.service.ts:21-25`) | 60 s (24h), 120 s (7d) | P |
+| FR-114 | `/explorer/priority-fees` burn chart | `/market/priority-fees/series` | 60 s (`usePriorityFeesSeries.ts:22`) | 300 s (24h) / 900 s (7d) (`back:src/services/priorityFees/priorityFees.service.ts:18-21`) | 6 / 16 min | P |
+| FR-115 | priority-fees payers | `/indexer/users/leaderboard?by=priority_fees` | 60 s (`usePriorityFeesLeaderboard.ts:25`) | 60 s client (`back:src/clients/hypedexer/rest/users/users-indexer.client.ts:8`) | 120 s | P |
+| FR-116 | priority-fees fills | `/indexer/fills/recent?has_priority_gas=true` | 15 s (`usePriorityFeesRecentFills.ts:40`) | 10 s (`indexer-fills.service.ts:16`) | 25 s | P |
+| FR-117 | priority-fees gossip freshness | `/indexer/hip3/priority-fees/gossip/history` | 300 s (`useGossipFreshness.ts:16`) | uncached, in-flight dedup only (BK-R-28) | 300 s | P |
+| FR-118 | `/explorer/validator` table, stats, lenses | `/staking/validators` | 30 s | 30 s | 60 s | P |
+| FR-119 | validator: validations | `/staking/validations` | 30 s (`useStakingValidationsPaginated.ts:42`) | poller 50 s (BK-P-17 `back:src/clients/hypurrscan/validation.client.ts:15`) | 80 s | P |
+| FR-120 | validator: unstaking stats, schedule | `/staking/unstaking-queue/stats` | 30 s (`useUnstakingStats.ts:21`) | poller 40 s | 70 s | P |
+| FR-121 | validator: stakers, holder stats (also `/hype/capital` staking card) | `/staking/holders`, `/staking/holders/stats` | 30 s (`useStakingHoldersPaginated.ts:35`, `useHoldersStats.ts:11`) | fresh 10 min, stale 6 h (`back:src/services/staking/stakedHolders.service.ts:98-99`, BK-R-08) | 10.5 min | P |
+| FR-122 | `/explorer/vaults` directory | `/market/vaults`; `/indexer/vaults/vaultSummaries` | 30 s; 60 s (`useVaultSummaries.ts:16`) | 45 s; 300 s (`hypedexer.cache.ts:131`) | 75 s; 6 min | P |
+| FR-123 | vaults leaderboards | `/indexer/vaults/leaderboards/*` | 60 s (`useVaultsLeaderboards.ts:48`) | 300 s (`hypedexer.cache.ts:129`) | 6 min | P |
+| FR-124 | vault detail KPIs, charts, ledger | `/indexer/vaults/{vaultDetails,equitySnapshots,dailySnapshots,vaultLedger}` | 60 / 60 / 60 / 30 s (`useVaultIndexerDetails.ts:17`, `useVaultEquitySnapshots.ts:18`, `useVaultDailySnapshots.ts:18`, `useVaultLedger.ts:25`) | 300 / 300 / 1,800 / 60 s (3,600 s when empty) (`hypedexer.cache.ts:133-141`) | 6 / 6 / 31 / 1.5 min | P |
+| FR-125 | `/evm` stats; daily; blocks | `/indexer/evm/stats`, `/stats/daily`, `/blocks` | 15 s; 60 s; 5 s (`src/services/indexer/evm/hooks/useEvmChain.ts:17`, `:28`, `:40`) | 15 s; 300 s; 5 s (`hypedexer.cache.ts:107-111`) | 30 s; 6 min; 10 s | P |
+| FR-126 | block / transaction pages | HL RPC `blockDetails` / `txDetails` browser-direct + asset resolver | once (`useBlockDetails.ts:8`, `useTransactionDetails.ts:8`); resolver 300 s | — | page age | — |
+
+#### `/hype` chapters
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-127 | HypeHeroRibbon, RevenueFlywheel, revenue cards | `/market/revenue/history` | 60 s | 300 s | 6 min | P |
+| FR-128 | Ribbon price, 24h volume, supply | HYPE socket (FR-02: `dayNtlVlm`, `circulatingSupply`); `/market/token-details/107…` (FR-52) | push; 60 s | —; FR-52 | push; 75 s | S60; P |
+| FR-129 | Assistance Fund holdings | HL `spotClearinghouseState`, browser-direct (FR-D-13) | 30 s (`src/services/market/assistanceFund/hooks/useAssistanceFund.ts:26`) | — | 30 s | P |
+| FR-130 | HypePriceChart, RelativePerformance, MultipleHistory | HL `candleSnapshot`, browser-direct | once (`useTokenCandles.ts:34`, `useRelativePerformance.ts:37`) | — | page age | — |
+| FR-131 | `/hype/financials` FeeRankCard | `/defillama/fee-rank` | 300 s (`src/services/market/feeRank/hooks/useFeeRank.ts:15`) | 600 s (`back:src/constants/defillama.cache.ts:37`) | 15 min | P |
+| FR-132 | `/hype/financials`, `/hype/valuation` fundamentals, fee/revenue history | `/defillama/overview/:slug`, `/defillama/fees/:slug` | 1 h (`useProtocolFundamentals.ts:18`, `useFeeRevenueHistory.ts:21`) | 300 s (`defillama.cache.ts:33`, `:35`) | 65 min | P |
+| FR-133 | `/hype/capital` buybacks (also reserve-yield page) | `/market/revenue/af-buybacks` | 300 s (`src/services/market/hype/hooks/useAfBuybacks.ts:17`) | running day fresh 60 s, max stale 1 h (`back:src/services/revenue/afBuybacks.service.ts:160-162`) | 6 min | P |
+| FR-134 | `/hype/operations` | perp/spot globalstats; overview 24h; fees raw; TVL history | 10 s; 15 s; 300 s; once | 10 s; 75 s; 30 s; 1,800 s (`defillama.cache.ts:39`) | 20 s; 90 s; 330 s; page age | P |
+| FR-135 | `/hype/reserve-yield` | Next route `/api/reserve-yield` (FR-D-22) | 60 s (`src/services/market/reserve-yield/index.ts:21`) | Next `revalidate` 120 s, CDN `s-maxage=120, stale-while-revalidate=3600` (`src/app/api/reserve-yield/route.ts:11`, `:19`) | 180 s | P |
+
+#### `/elysium` (Elysium testnet section)
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-136 | Chain head (`/elysium`, `/elysium/node`) | Elysium RPC `eth_blockNumber`, browser-direct (FR-D-20) | 2 s (`src/services/elysium/hooks.ts:83`) | — | 2 s | P |
+| FR-137 | Blocks, transactions; stats; bridge transfers | `/indexer/elysium/*` | 5 s (`hooks.ts:71`, `:73`); 15 s (`:69`); 10 s (`:76`) | 5 s; 15 s; 10 s (`hypedexer.cache.ts:116-121`, BK-R-34) | 10 s; 30 s; 20 s | P |
+| FR-138 | Analytics pages (contracts, users, dex, fees, economics…) | `/elysium/analytics/*` | 30–120 s (`hooks.ts:86-103`) | fresh 60 s over ingestion streams 30 s–30 min (BK-P-24, BK-R-34) | ≤ 3 min + stream | P |
+| FR-139 | Pending tx inspector | Elysium RPC via viem | 4 s while pending (`src/components/elysium/ElysiumTxInspector.tsx:101`) | — | 4 s | **ON** (raw `setInterval`) |
+
+#### Content pages (not live, listed for completeness)
+
+| ID | Pages | Source | Cadence | Backend |
+|---|---|---|---|---|
+| FR-140 | `/dashboard/ecosystem`, `/ecosystem/project*` | `/project`, `/category`, `/defillama/{chain-stats,projects-map,tvl-history}`, `/project/:id/{defillama,context}` | 30 s – 300 s (`useProjects.ts:29`, `useCategories.ts:11`, `useChainStats.ts:13`, `useProjectsMetricsMap.ts:13`, `useProjectMetrics.ts:16`, `useProjectContext.ts:14`, `ProjectsDirectory.tsx:78`) | list 300 s (`crudBase.service.ts:174`); DefiLlama 300–1,800 s |
+| FR-141 | `/ecosystem/publicgoods*` | `/publicgoods*` | 30–60 s (`usePublicGoods.ts:42`, `usePublicGood.ts:20`, `useMyPublicGoods.ts:41`, `usePendingPublicGoods.ts:41`) | BK-R-39 |
+| FR-142 | `/wiki*` | `/educational/*`, `/link-preview/batch` | 60 s; link previews 300 s (`useEducationalCategories.ts:36`, `useWikiLibrary.ts:51`, `usePopularWikiResources.ts:22`, `linkPreview/hooks/hooks.ts:88`) | BK-R-39 |
+| FR-143 | `/profile`, Telegram link | `/xp/*`; `/auth/telegram/link-status` | on demand; 2 s while linking (`src/services/auth/telegram/hooks/useTelegramLink.ts:12`) | BK-R-39 |
+
+### 5.2 Browser-direct third-party calls
+
+These leave from the **visitor's IP**, not the backend's: they never count against the backend's Hyperliquid 1,200 weight/min (UP-01) and need no backend cache, but every tab pays its own share of the visitor's per-IP budget, and visitors behind one IP (office, CGNAT, VPN) share it. Calls/min are per open tab, from the cadences above. Size = wire bytes measured with `curl --compressed` on 2026-10-13 (not from code; HL never compresses): S < 10 KB, M 10–100 KB, L 100 KB–1 MB.
+
+| ID | Call | Pages | Cadence → calls/min per tab | Size |
+|---|---|---|---|---|
+| FR-D-01 | HL WS `api.hyperliquid.xyz/ws`: `trades` + `activeAssetCtx @107` | every page (sidebar, FR-02) | 1 socket, push | stream |
+| FR-D-02 | HL WS: `trades` × 12 perps + `allMids` | `/dashboard` (FR-14, FR-15) | 1 socket, push | stream |
+| FR-D-03 | HL WS: `trades` + `l2Book` of one coin | token pages (FR-49) | 1 socket per page, push | stream |
+| FR-D-04 | HL WS: `allDexsAssetCtxs` | `/market/perpdex*`, `/dashboard/market` (FR-27, FR-60) | 1 socket, push | stream |
+| FR-D-05 | HL WS: `userFills` × ≤ 10 wallets (HL allows 10 distinct users per IP, `useTrackedWalletFills.ts:7-12`) | `/market/tracker/my-wallets` (FR-85) | 1 socket, push | stream |
+| FR-D-06 | HL RPC WS `rpc.hyperliquid.xyz/ws`: `explorerBlock` + `explorerTxs` | `/explorer` (FR-105); `/dashboard` (FR-17, its own socket) | 1 socket each, push (~14 frames/s per channel, CODEMAP) | stream |
+| FR-D-07 | HL info `perpDexs` + `allPerpMetas` | perpdex pages, `/dashboard/market` | memo 5 min across pages → 0.4/min | M (21 KB + 84 KB) |
+| FR-D-08 | HL info `perpDeployAuctionStatus` | dashboard/market, hub, perp, perp auction | 2/min | S (124 B) |
+| FR-D-09 | HL info `predictedFundings` | `/market/perp` (2/min); address pages (0.2/min) | 0.2–2/min | M (64 KB) |
+| FR-D-10 | HL info `outcomeMeta` + `allMids`; `outcomeTemplates` | `/market/hip4*` | 8/min; templates 1/h | M (100 KB + 23 KB; 53 KB) |
+| FR-D-11 | HL info `l2Book #N` | `/market/hip4/[coin]` | 12/min | S |
+| FR-D-12 | HL UI info `allMids` + one `allMids {dex}` per HIP-3 dex seen in the TWAP list (`twap-source.ts:128-138`) | every TWAP widget (FR-19) | ≤ 5 reads/min × (1 + dexes) | M (23 KB each) |
+| FR-D-13 | HL info `spotClearinghouseState` + `clearinghouseState` per wallet; AF `spotClearinghouseState` | address pages, my-wallets (8/min); `/hype*` AF (2/min) | 2–8/min | S |
+| FR-D-14 | HL info `portfolio` (2/min), `frontendOpenOrders` (2/min), `userFills` (2/min, ≤ 2,000 fills), `userNonFundingLedgerUpdates` (0.5/min, pages of 2,000), `delegator*` × 4 (8/min), `userVaultEquities` (1/min); HL RPC `userDetails` (≤ 1/min, 30 s memo); asset resolver `allPerpMetas` + `spotMeta` + `allMids` + `validatorSummaries` + `allMids {dex}` (every 5 min, `src/services/explorer/address/assets.ts:49-60`) | address pages, my-wallets | digest always mounted ≈ 12–14/min; each open tab adds 2–8/min (staking tab 8) | portfolio M (37 KB HLP); ledger up to L (499 KB HLP); `userDetails` L (114 KB HLP); `spotMeta` L (137 KB) |
+| FR-D-15 | Hypurrscan `/globalAliases`; `/deploys` | every page (0.2/min); `/explorer` (4/min) | 0.2–4/min | M (29 KB; 18 KB) |
+| FR-D-16 | Hypurrscan `/pastAuctionsPerp` | dashboard/market, hub, perp, perpdex, perp auction | 1/min | L (125 KB) |
+| FR-D-17 | DefiLlama `/protocol/hyperliquid-bridge` | `/explorer` | 1/min | L (113 KB) |
+| FR-D-18 | HL info `candleSnapshot` | token charts, `/hype*` charts (once); HIP-4 probability chart (2/min per coin) | once – 2/min | S–M |
+| FR-D-19 | HL info `metaAndAssetCtxs {dex}` | HIP-3 asset page | 6/min | M (60 KB for `xyz`) |
+| FR-D-20 | Elysium testnet RPC: chain head on `testnet-rpc.elysium.kinetiq.xyz` (`src/services/elysium/api.ts:34`, `:90-96`); viem contract reads try `elysium-testnet-rpc.hypedexer.com` first, then the kinetiq RPC (`src/services/elysium/rpc.ts:24`, `src/lib/elysium-chain.ts:23`); openchain.xyz selector lookups (`src/lib/elysium/tx.ts:144`, `:158`) | `/elysium*` | head 30/min; lookups on demand | S |
+| FR-D-21 | HyperEVM RPC `rpc.hyperliquid.xyz/evm`: `.hl` / `.hype` resolution in search (memo for the visit, `src/services/search/names.ts:45`), name mint | search, `/names` | on demand | S |
+| FR-D-22 | Next server routes `/api/reserve-yield` (HL info + HyperEVM + archive RPCs, `src/lib/reserve-yield.ts:22-30`) and `/api/hip3/underlying` (financialmodelingprep.com) | `/hype/reserve-yield`; HIP-3 asset | 1/min; 1/h | — |
+
+FR-D-22 is not browser-direct: it runs on the Next server, behind the CDN cache of FR-135 / FR-65, so its upstream calls come from the Next host's IP, not the visitor's nor the backend's.
+
+Per-tab socket count: every page opens FR-D-01; `/dashboard` adds FR-D-02, the RPC socket of FR-D-06 and the backend `/ws` (FR-16): 3 Hyperliquid sockets + 1 backend. A token page adds FR-D-03 and the backend `/ws` (L4).
+
+### 5.3 Shared front mechanics
+
+**`useDataFetching`** (`src/hooks/useDataFetching.ts`) — the base of every poll above.
+
+| Rule | Value | Ref |
+|---|---|---|
+| Default poll | 30,000 ms when the caller passes none (or `undefined`) | `:82` |
+| Retries per cycle | `maxRetries` 3, base `retryDelay` 1,000 ms, doubled each time | `:84-85`, `:282-285` |
+| Stretch | ×4 backoff when the transport had already retried **and** data is on screen (1 s → 4, 8, 16 s); an empty card retries at the base pace | `:46`, `:281` |
+| Stale semantics | a failed cycle with data on screen keeps the data and sets `isStale`; `error` is published only when nothing is on screen; a failed first load for new deps drops the previous deps' data | `:93-106`, `:212-215`, `:297-301` |
+| 4xx | 4xx other than 408/429 is permanent: no retry; with nothing on screen polling stops until deps change or a manual refetch, with data on screen the next poll asks again | `:13-18`, `:176`, `:264-272` |
+| Poll overlap | a poll skips while the previous cycle (with its retries) runs, unless that cycle is older than max(2 × P, 120 s): then it is reported stale/error and restarted | `:56-58`, `:179-189` |
+| `dataUpdatedAt` | age of the data shown: the cache entry time on a cache hit | `:107-110`, `:254` |
+| `refetch` | stable identity; bypasses the GET cache; with data on screen it is a background refresh (`isRefreshing`) | `:230-237`, `:360` |
+| Hidden tab | polls via `setVisibleInterval`: ticks skipped while hidden, one catch-up tick on return, cadence restarted from there | `:345-347`, `src/lib/visibility.ts:21-56` |
+
+**Request policy and GET cache** (`src/services/api/http/request-policy.ts`, `src/services/api/cache/cache.service.ts`): every GET through `get()` is cached in memory per tab, keyed by method + URL + params + body (`cache.service.ts:20-24`), for 30 s at most (`:8`), 100 entries (`:9`, cleanup from 80, at most once a minute, `:10`, `:15`). The hook sets the accepted age per cycle (`useDataFetching.ts:32-36`): a first load takes any valid entry (instant render, up to 30 s old), a poll takes entries ≤ P/2 old (so a poll never reads back its own last answer but shares a sibling's), a manual refetch takes none. The policy reaches only requests started synchronously by the fetchFn (`request-policy.ts:1-15`). Consequence for Worst: two widgets on the same key can add up to P/2 to FR rows when one reuses the other's answer.
+
+**Transport** (`src/services/api/http/axios-config.ts`):
+
+| Rule | Value | Ref |
+|---|---|---|
+| Timeout | 10 s | `:11` |
+| Retries | network / timeout / 5xx: 3 retries, backoff 1, 2, 4 s ±20 % | `:12-15`, `:325-329`, `:383-387` |
+| 429 | retried once: after `Retry-After` when exposed (not retried at all when it exceeds 10 s), else after the normal backoff | `:17`, `:391-402` |
+| Hook retries | single-shot at the transport (no 4 × 4 multiplication) | `:157`, `useDataFetching.ts:220-222` |
+| In-flight sharing | identical GETs, and identical HL read POSTs (`api` / `api-ui` `/info`, RPC `/explorer`), share one request; a shared read is aborted only when every caller cancelled; a manual refetch starts its own | `:182-195`, `:218-293` |
+| HL POSTs | never cached (POST), only shared in flight | `:174`, `:285-293` |
+| Auth | JWT only to the backend host; 401 → one refresh, then a 60 s circuit before the next refresh | `:14`, `:56-63`, `:100-140` |
+
+**`WebSocketClient`** (`src/lib/websocket-client.ts`), used by every socket in §5.1:
+
+| Rule | Value | Ref |
+|---|---|---|
+| Reconnect | default 5 attempts, base 2,000 ms × 2^(n−1), ±25 % jitter; per socket overrides: liquidations 10 / 1,000 ms (`websocket.store.ts:52-53`), L4 5 / 1,500 ms (`orderbook/websocket.store.ts:22-23`), token 3 / 2,000 ms (`token/websocket.service.ts:11-12`), dashboard feeds 10 / 2,000 ms (`useLiveMarketFeed.ts:112-113`, `useChainPulse.ts:69-70`, `useTrackedWalletFills.ts:85-86`) | `:80-81`, `:190-211` |
+| After the budget | waits for `online` or the tab shown again, then starts over with a fresh budget | `:101-105`, `:315-325` |
+| Heartbeat | `{"method":"ping"}` every 30 s; a socket silent 75 s is dropped and reconnected (every socket uses it) | `:48-52`, `:213-249` |
+| `pauseWhenHidden` | close after 60 s hidden, silent (no offline flash), resubscribe on return. On: HYPE (`hype/websocket.service.ts:42`), perpDex (`perpDex/websocket.service.ts:97`), explorer blocks/txs (`explorer/websocket.service.ts:103`, `:144`). Off: token, L4, liquidations, dashboard tape/allMids, chain pulse, tracked fills | `:24`, `:38`, `:251-293` |
+| Disconnect | detaches handlers, so no late `onClose` | `:160-176` |
+| Ref-counting | perpDex, token and liquidations stores connect/disconnect in pairs (shared across components) | CODEMAP "WebSockets" |
+
+**Module memos** (above the HTTP cache, survive across hook instances of one tab):
+
+| Memo | TTL | Ref |
+|---|---|---|
+| perpDex metadata (`perpDexs`, `allPerpMetas`) | 5 min, shared across pages; a failed read is dropped | `src/services/market/perpDex/hooks/usePerpDexMarketData.ts:20-34` |
+| TWAP source first page; deeper pages | 12 s; 60 s | `src/services/market/order/twap-source.ts:50`, `:58` |
+| HIP-4 live volumes; outcome templates | 25 s; 1 h (60 s after a failed or empty read) | `useHip4LiveMarkets.ts:46`, `:76-77` |
+| Address raw history (`userDetails`, ledger, fills); full ledger pages | 30 s; ≤ 24 pages for the visit | `src/services/explorer/address/api.ts:23-26`, `:63-66` |
+| Cmd+K search index | 5 min | `src/services/search/api.ts:16` |
+| `.hl` names; HyperEVM name resolution | visit | `src/services/names/index.ts:15-16`; `src/services/search/names.ts:45` |
+
+Hidden tab, summary: every poll in §5.1 pauses (P), including the two hand-rolled loops of `/explorer/liquidations` (`LiquidationsContext.tsx:198`, `:232`) and the wiki pending badge (`src/services/wiki/hooks/usePendingCount.ts:36`). What keeps running in a background tab: the sockets without `pauseWhenHidden` (FR-14..17, FR-49, FR-50, FR-85, FR-111), the 1 s / 750 ms render timers of the dashboard and tracker feeds (local only), the Elysium pending-tx loop (FR-139), the Elysium start page reads (`src/components/elysium/ElysiumStart.tsx:135`, `:303`, 10 s) and the Telegram link poll (2 s, only while linking).
+
+## 6. Open questions
+
+Q-01..Q-10 are about production or upstream facts the code cannot answer; Q-11..Q-20 are cadence and placement decisions.
+
+| ID | Question | Rows |
+|---|---|---|
+| Q-01 | Prod Redis `maxmemory` and `maxmemory-policy`: the README asks for `volatile-ttl` or `volatile-lru`, but most poller keys and the HLP TVL have no TTL. With `allkeys-*` those keys can be evicted; with `volatile-*` the `:last` copies and live keys go first. What is actually set in prod? | §3 "Poller keys without TTL", BK-P-06 |
+| Q-02 | Does a CDN or more than one proxy sit in front of the API? `trust proxy` is 1 (`src/app.ts:85`) and `/ws` takes the rightmost `X-Forwarded-For` entry (`src/websocket/ws.server.ts:238-245`, the comment says Railway's single edge). An extra hop would make every per-IP limiter key on the CDN's IP. | §3.3, BK-L-01..04, 15 |
+| Q-03 | How many backend instances run in prod, and do they share one outbound IP? The Hyperliquid pollers are not locked and the weight arithmetic assumes one instance per IP. | §4.1 "Single-instance assumption" |
+| Q-04 | Hyperfolio's real paid quota, and is ~20 req/s per key still the burst limit? `HYPERFOLIO_DAILY_BUDGET` = 50,000 is a guess. | UP-07, BU-HF-01..04 |
+| Q-05 | HypeDexer prod key: what daily or monthly allocation does it have, and what should `HYPEDEXER_DAILY_CREDIT_BUDGET` be set to, given the background alone is ~320k/day? | UP-05, §4.2 |
+| Q-06 | Elysium ingestion at ~1,600 credits/min (2.3M/day): is it wanted in prod? Which streams cost the most (tx and dex every 30–60 s with 1,000-row pages)? Should `ELYSIUM_INGEST_ENABLED` default to `false`? | BK-P-24, BU-HD-07 |
+| Q-07 | Will HypeDexer start billing WebSocket events (its docs say 10 events = 1 credit)? `allFills` alone is 2.4–3.7k msgs/min and stays connected even with no fill-alert rule. | UP-06, BK-S-02 |
+| Q-08 | Hyperliquid's WebSocket connection and subscription limits per IP are not encoded anywhere; the L4 mirror can hold up to 48 `l2Book` subscriptions. | UP-04, BK-L-16, BK-S-04 |
+| Q-09 | Does the Hyperfolio positions payload exceed 262,144 chars? If it does, its last copy is skipped (`CACHE_LAST_COPY_MAX_CHARS`) and a refused refresh errors instead of serving stale. | BK-R-36, §3 "Last copy" |
+| Q-10 | DefiLlama and Hypurrscan rate limits for the backend IP are unknown. They matter for `/home/globalstats` (uncached, see Q-14) and the Hypurrscan holder downloads. | UP-08, UP-09, BK-R-04, BK-L-09 |
+| Q-11 | HIP-4 card volumes: the front polls every 30 s (`front:src/services/indexer/hip4/hooks/useHip4LiveMarkets.ts:45`) but the backend key is 15 s (`src/constants/hypedexer.cache.ts:68`), so the worst age is 45 s. Under the live-first policy, should the front poll every 15 s (BU-HD-14 ~476 credits/min, flat in visitors), or should the backend TTL go to 30 s? Either way, fix the stale front comment that cites `hip4AnalyticsFiltered`. | FR-67, BU-HD-14 |
+| Q-12 | TWAP deep pages: the front re-walks pages past the first only every 60 s (`front:src/services/market/order/twap-source.ts:58`), on the assumption that the backend caches them 60 s. It doesn't: every page is 10 s (`src/constants/hypedexer.cache.ts:103`), so deeper rows can be 70 s old. Keep the 60 s re-walk (it saves per-IP `/indexer` requests) or walk every poll? | FR-19, BU-HD-18 |
+| Q-13 | Overview 24h tiles (used on `/market`, `/explorer`, `/hype/operations`): the front polls every 15 s, but a 60 s HypeDexer client cache sits under the 15 s service key (`src/clients/hypedexer/rest/overview/overview-indexer.client.ts:21`), so the worst age is 90 s and the 15 s poll gains nothing. Lower the client TTL to 15 s (BU-HD-10 goes from 12 to 48 credits/min, still flat in visitors) or poll every 60 s? | FR-38, BK-R-25, BU-HD-10 |
+| Q-14 | `/home/globalstats` is polled every 15 s per tab on the landing page and `/dashboard`, and the backend reads DefiLlama stablecoins on every request. Add a backend cache before scale. Who owns it? | FR-10, BK-R-04 |
+| Q-15 | Background tabs: six sockets (eight widgets: FR-14/15 share one, FR-16/111 share one) stay open while hidden. The snapshot-style ones (`allMids`, `l2Book`, L4 book, chain pulse) could take `pauseWhenHidden` without losing data. Trade tapes, tracked fills and liquidations would have a gap. Which should pause? | FR-14..17, FR-49, FR-50, FR-85, FR-111 |
+| Q-16 | Address pages call HL directly from the visitor's IP: about 12–14 calls/min for the digest, up to about 27 with the staking, orders, fills and vault tabs open (FR-D-14). With HL's 1,200 weight/min per IP, a few address tabs behind one shared IP (office, CGNAT) can hit 429s. Accept this, or move some reads (portfolio, ledger) behind the backend, which has its own 1,200 budget per backend IP? | FR-90..103, FR-D-13, FR-D-14 |
+| Q-17 | Sidebar project count polls `/project?limit=1` every 30 s on every page, but the backend list cache is 300 s. Lower the poll to 300 s? | FR-05 |
+| Q-18 | Polls much faster than their backend freshness: stakers / holder stats every 30 s against 10 min; revenue breakdown every 60 s against 300 s. Align the cadences, or shorten the backend TTLs? | FR-121, FR-12, FR-31, FR-127 |
+| Q-19 | Hypurrscan calls straight from the browser: `/pastAuctionsPerp` (125 KB, every 60 s, on 5 pages), `/deploys` (every 15 s on `/explorer`), `/globalAliases` (every 5 min on every page). Hypurrscan's limits are unknown (Q-10). Move them behind backend pollers like `/spotUSDC`? | FR-D-15, FR-D-16, BK-P-15 |
+| Q-20 | CODEMAP drift: `tokenDetails` freshness (now 1 h for static fields, 10 s poller for live fields) and stakedHYPE freshness (10 min, not 3 min). Update CODEMAP in this branch? | FR-52, FR-121 |
+
+## 7. Change log
+
+| Date | Front | Back | Change |
+|---|---|---|---|
+| 2026-10-13 | `a2db42b1` | `d74ed63` | Initial inventory after the pre-merge audit and the live-cadence pass. |
+| 2026-10-13 | `a2db42b1` | `d74ed63` | Adversarial check of every cited number: §4.1 worst case recomputed (bridge scan and warmer jitter, steady excludes on-demand reads), two-instance arithmetic corrected (locked pollers are not doubled), passthrough route count 60 → 63, historical liquidation TTLs, front 429 retry rule, Elysium RPC order, Q-13/15/16 figures; added `/ws` heartbeat and soft limits, global fills TTL, builders-rest breaker override. |
