@@ -33,6 +33,16 @@ function send502(res: Response, code: string, error: unknown): void {
   });
 }
 
+/** Nothing computed and nothing kept: a temporary condition, the client retries. */
+function send503(res: Response, code: string, error: unknown): void {
+  logDeduplicator.error(`HIP4 ${code}`, { error: error instanceof Error ? error.message : String(error) });
+  res.set('Retry-After', '15').status(503).json({
+    success: false,
+    error: 'HIP-4 volumes temporarily unavailable',
+    code,
+  });
+}
+
 router.get(
   '/fills',
   marketRateLimiter,
@@ -151,6 +161,23 @@ router.get(
       });
     } catch (e) {
       send502(res, 'INDEXER_HIP4_ANALYTICS_ERROR', e);
+    }
+  }) as RequestHandler
+);
+
+/**
+ * Every live outcome side's volume, one shared entry. Behind marketRateLimiter
+ * only: the caller picks no cache key, so the per-IP passthrough budget (which
+ * guards callers that do) is not spent on the HIP-4 pages' poll.
+ */
+router.get(
+  '/live-volumes',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: await svc.getLiveVolumes() });
+    } catch (e) {
+      send503(res, 'INDEXER_HIP4_LIVE_VOLUMES_UNAVAILABLE', e);
     }
   }) as RequestHandler
 );

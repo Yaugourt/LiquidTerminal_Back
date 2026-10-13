@@ -22,10 +22,29 @@ import {
 } from '../../utils/hip4-enrichment.util';
 import { indexOutcomeTemplates, type Hip4TemplateIndex } from '../../utils/hip4-market-names.util';
 
+/** Cumulative notional volume per outcome side coin (10N, 10N+1), as the live-volumes route sends it. */
+export interface Hip4LiveVolumes {
+  volumes: Record<number, number>;
+  /** A chunk failed or a single coin hit the row limit, so some volumes are understated. */
+  partial: boolean;
+  /** Epoch ms of the read that produced it. */
+  updatedAt: number;
+}
+
+interface RawAnalyticsBucket {
+  coin?: string;
+  volume?: number;
+}
+
 type Hip4FillsQuery = NonNullable<Parameters<HypeDexerHip4Client['getFills']>[0]>;
 
 const HOUR_MS = 60 * 60 * 1000;
 const HL_INFO_URL = 'https://api.hyperliquid.xyz/info';
+const OUTCOME_META_TIMEOUT_MS = 5_000;
+/** The backend validates the analytics `coin` filter as a string of at most 256 chars. */
+const ANALYTICS_COIN_PARAM_MAX = 256;
+/** Backend max for the analytics `limit`, which caps the rows of a request across all its coins. */
+const ANALYTICS_ROW_LIMIT = 2000;
 
 /** allMids (weight 2) is read at most this often, whatever the number of enriched keys and visitors. */
 const MIDS_FRESH_MS = 5_000;
@@ -129,6 +148,8 @@ export class IndexerHip4Service {
   private static instance: IndexerHip4Service;
   private readonly client = HypeDexerHip4Client.getInstance();
   private readonly mids = new SharedHip4Mids(() => this.readHlMidPrices());
+  /** The last aggregate served in this process: a partial read is merged over it. */
+  private lastLiveVolumes: Hip4LiveVolumes | null = null;
 
   public static getInstance(): IndexerHip4Service {
     if (!IndexerHip4Service.instance) {
@@ -340,6 +361,129 @@ export class IndexerHip4Service {
   }
 
   /**
+   * Cumulative notional volume of every live outcome side coin, summed from
+   * the daily analytics buckets, in ONE shared entry (15 s): the HIP-4 pages
+   * poll it instead of fanning out ~17 coin-chunk reads from each browser.
+   * HypeDexer ingests fills for the live coins even though it omits them from
+   * markets-enriched, so this recovers their volume.
+   *
+   * The coin list comes from Hyperliquid `outcomeMeta`. It is split into
+   * ≤256-char chunks read through getAnalytics (so the per-chunk keys stay
+   * shared with fronts that still fan out); a chunk that hits the row limit is
+   * split again. `partial` is set when a chunk failed or a single coin hit the
+   * row limit, and the read is then merged over the previous aggregate coin by
+   * coin keeping the larger total (lifetime volume only grows). Throws when
+   * every chunk failed (the indexer `/analytics` can 402): cacheService then
+   * serves the last copy, and the route answers 503 when there is none.
+   */
+  public async getLiveVolumes(): Promise<Hip4LiveVolumes> {
+    return cacheService.getOrSet(
+      HYPEDEXER_HIP4_CACHE_KEY.liveVolumes,
+      () => this.computeLiveVolumes(),
+      HYPEDEXER_TTL.hip4LiveVolumes,
+      { lastCopy: true, refreshInBackground: true }
+    );
+  }
+
+  private async computeLiveVolumes(): Promise<Hip4LiveVolumes> {
+    const outcomeIds = await this.fetchOutcomeIds();
+    const coinIds = outcomeIds.flatMap((outcome) => [outcome * 10, outcome * 10 + 1]);
+    if (coinIds.length === 0) return this.rememberLiveVolumes({ volumes: {}, partial: false, updatedAt: Date.now() });
+
+    const results = await Promise.allSettled(
+      chunkCoinIds(coinIds).map((chunk) => this.fetchCompleteVolumeBuckets(chunk))
+    );
+    const firstFailure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (firstFailure && results.every((r) => r.status === 'rejected')) {
+      throw firstFailure.reason;
+    }
+
+    const volumes: Record<number, number> = {};
+    let partial = firstFailure !== undefined;
+    for (const r of results) {
+      if (r.status === 'rejected') continue;
+      partial ||= r.value.partial;
+      for (const b of r.value.buckets) {
+        const id = bucketCoinId(b);
+        if (id == null) continue;
+        volumes[id] = (volumes[id] ?? 0) + (b.volume ?? 0);
+      }
+    }
+    return this.rememberLiveVolumes(mergePartialVolumes({ volumes, partial, updatedAt: Date.now() }, this.lastLiveVolumes));
+  }
+
+  private rememberLiveVolumes(read: Hip4LiveVolumes): Hip4LiveVolumes {
+    this.lastLiveVolumes = read;
+    return read;
+  }
+
+  /** Daily buckets of one chunk of coins, through the shared per-chunk key. */
+  private async fetchVolumeBuckets(coins: number[]): Promise<RawAnalyticsBucket[]> {
+    const raw = await this.getAnalytics({ coin: coins.join(','), interval: '1d', limit: ANALYTICS_ROW_LIMIT });
+    if (!Array.isArray(raw)) throw new Error('Unexpected HIP-4 analytics payload');
+    return raw as RawAnalyticsBucket[];
+  }
+
+  /** Buckets of a chunk, complete unless `partial`. A full page means some
+   * buckets were cut off, so the chunk is read again as two halves (down to a
+   * single coin, whose 2,000 daily buckets cannot fill). A half that fails keeps
+   * its coins' rows from the truncated page and flags the result partial. */
+  private async fetchCompleteVolumeBuckets(
+    coins: number[]
+  ): Promise<{ buckets: RawAnalyticsBucket[]; partial: boolean }> {
+    const buckets = await this.fetchVolumeBuckets(coins);
+    if (buckets.length < ANALYTICS_ROW_LIMIT) return { buckets, partial: false };
+    if (coins.length === 1) return { buckets, partial: true };
+
+    const mid = Math.ceil(coins.length / 2);
+    const halves = [coins.slice(0, mid), coins.slice(mid)];
+    const results = await Promise.allSettled(halves.map((half) => this.fetchCompleteVolumeBuckets(half)));
+    const out: RawAnalyticsBucket[] = [];
+    let partial = false;
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        out.push(...r.value.buckets);
+        partial ||= r.value.partial;
+        return;
+      }
+      partial = true;
+      const ids = new Set(halves[i]);
+      out.push(...buckets.filter((b) => ids.has(bucketCoinId(b) ?? -1)));
+    });
+    return { buckets: out, partial };
+  }
+
+  /** Outcome ids of Hyperliquid `outcomeMeta`, shared for a minute (it changes when an outcome is created). */
+  private async fetchOutcomeIds(): Promise<number[]> {
+    return cacheService.getOrSet(
+      HYPEDEXER_HIP4_CACHE_KEY.outcomeIds,
+      () => this.readHlOutcomeIds(),
+      HYPEDEXER_TTL.hip4OutcomeMeta,
+      // Fixed name, read by every live-volumes refresh: kept an hour past a failed refresh.
+      { lastCopyKeepS: SHARED_LAST_COPY_KEEP_S }
+    );
+  }
+
+  /** One HL outcomeMeta read (weight 20, ~100 KB), reduced to the outcome ids. Throws on any failure. */
+  private async readHlOutcomeIds(): Promise<number[]> {
+    const resp = await fetch(HL_INFO_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'outcomeMeta' }),
+      signal: AbortSignal.timeout(OUTCOME_META_TIMEOUT_MS),
+    });
+    if (!resp.ok) throw new Error(`outcomeMeta answered ${resp.status}`);
+    const data = await resp.json() as { outcomes?: unknown } | null;
+    if (!data || !Array.isArray(data.outcomes)) throw new Error('Unexpected outcomeMeta payload');
+    const ids: number[] = [];
+    for (const o of data.outcomes) {
+      const id = Number((o as { outcome?: unknown } | null)?.outcome);
+      if (Number.isInteger(id) && id >= 0) ids.push(id);
+    }
+    return ids;
+  }
+
+  /**
    * One market by id. `#X` is what Hyperliquid trades: side X % 10 of outcome
    * floor(X / 10), whose row holds the market (X's own row is a bare
    * placeholder). So a side-coin id reads its outcome's row (3 credits) and
@@ -494,6 +638,48 @@ export class IndexerHip4Service {
     );
     return asArray(raw);
   }
+}
+
+/** Splits coin ids into chunks whose comma-joined `coin` param fits the 256-char cap. */
+function chunkCoinIds(coinIds: number[]): number[][] {
+  const chunks: number[][] = [];
+  let current: number[] = [];
+  let length = 0;
+  for (const id of coinIds) {
+    const width = String(id).length;
+    // +1 for the comma before every id but the first.
+    if (current.length > 0 && length + 1 + width > ANALYTICS_COIN_PARAM_MAX) {
+      chunks.push(current);
+      current = [];
+      length = 0;
+    }
+    length += (current.length > 0 ? 1 : 0) + width;
+    current.push(id);
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+/** Outcome coin id of an analytics bucket (`"#60240"` → 60240), or null. */
+function bucketCoinId(b: RawAnalyticsBucket): number | null {
+  if (!b.coin) return null;
+  const id = parseInt(b.coin.replace(/^#/, ''), 10);
+  return Number.isNaN(id) ? null : id;
+}
+
+/**
+ * A partial read laid over the previous aggregate, coin by coin keeping the
+ * larger total (lifetime volume only grows), so a flaky chunk never blanks or
+ * lowers a figure. A complete read, or the first one, stands as it is.
+ */
+function mergePartialVolumes(fresh: Hip4LiveVolumes, last: Hip4LiveVolumes | null): Hip4LiveVolumes {
+  if (!fresh.partial || !last) return fresh;
+  const volumes: Record<number, number> = { ...last.volumes };
+  for (const [id, volume] of Object.entries(fresh.volumes)) {
+    const coin = Number(id);
+    volumes[coin] = Math.max(volumes[coin] ?? 0, volume);
+  }
+  return { volumes, partial: last.partial, updatedAt: fresh.updatedAt };
 }
 
 function asArray<T>(raw: unknown): T[] {

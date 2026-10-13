@@ -62,10 +62,13 @@ export const HYPEDEXER_TTL = {
   /** Other filtered analytics (outcome splits, date ranges). */
   hip4AnalyticsFiltered:  60,
   /** The live-market volume fan-out: daily buckets of coin chunks, no date
-   * range, the same ~11-17 chunks for everyone, polled every 15 s by the HIP-4
-   * pages (~17 × 7 credits each refresh, ~476 a minute while anyone views
-   * them). */
+   * range, the same ~11-17 chunks for everyone (~17 × 7 credits each refresh,
+   * ~476 a minute while anyone views the HIP-4 pages). Also the TTL of the
+   * aggregate (`HYPEDEXER_HIP4_CACHE_KEY.liveVolumes`) the pages poll every 15 s. */
   hip4LiveVolumes:        15,
+  /** Hyperliquid `outcomeMeta`, read for its outcome ids only (they change when
+   * an outcome is created); free, but 20 HL weight a read. */
+  hip4OutcomeMeta:        60,
   /** Market fills (a coin's tape, the global tape), by age of the newest fill:
    * a market trading in the last hour, one quiet for hours, one dormant for a
    * day or more (settled/expired: its history no longer moves). The tapes
@@ -190,6 +193,10 @@ export const HYPEDEXER_HIP4_CACHE_KEY = {
     `hypedexer:hip4:analytics:${interval}${limit !== undefined ? `:${limit}` : ''}`,
   /** Hyperliquid `outcomeTemplates` (titles of templated markets). */
   outcomeTemplates: 'hyperliquid:hip4:outcome-templates',
+  /** Outcome ids from Hyperliquid `outcomeMeta` (the live-volumes coin list). */
+  outcomeIds: 'hyperliquid:hip4:outcome-ids',
+  /** Every live outcome side's volume in one entry: the HIP-4 pages' poll. */
+  liveVolumes: 'hypedexer:hip4:live-volumes',
 } as const;
 
 /**
