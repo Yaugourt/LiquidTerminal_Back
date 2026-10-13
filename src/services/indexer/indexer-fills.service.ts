@@ -69,7 +69,7 @@ export class IndexerFillsService {
     return cacheService.getOrSet(
       HYPEDEXER_USER_CACHE_KEY.fills(userAddress, params),
       () => this.client.getUserFills(userAddress, params),
-      HYPEDEXER_TTL.userAddress
+      HYPEDEXER_TTL.userFills
     );
   }
 
@@ -91,7 +91,7 @@ export class IndexerFillsService {
     return cacheService.getOrSet(
       HYPEDEXER_USER_CACHE_KEY.spotFills(userAddress, params),
       () => this.client.getSpotUserFills(userAddress, params),
-      HYPEDEXER_TTL.userAddress
+      HYPEDEXER_TTL.userFills
     );
   }
 

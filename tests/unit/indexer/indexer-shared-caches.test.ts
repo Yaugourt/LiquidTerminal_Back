@@ -26,10 +26,16 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 /** Echoes its params so a test can tell which call answered. */
 const echo = () => jest.fn(async (...args: unknown[]) => ({ args }));
 
-const builders = { getTopBuilders: echo(), getGlobalStats: echo(), getStatsAllTimeframes: echo() };
+const builders = {
+  getTopBuilders: echo(),
+  getGlobalStats: echo(),
+  getStatsAllTimeframes: echo(),
+  getBuilderStats: echo(),
+  getBuilderUsers: echo(),
+};
 const evm = { getEvmBlocks: echo(), getEvmTransactions: echo(), getEvmBridgeEvents: echo(), getEvmLedgerTransfers: echo() };
 const completed = { listCompletedTrades: echo(), getSummary: echo(), getTradeFills: echo() };
-const hip3 = { getFills: echo(), getSnapshots: echo(), getStatsTraders: echo() };
+const hip3 = { getFills: echo(), getSnapshots: echo(), getStatsTraders: echo(), getTopMovers: echo() };
 const twaps = { listTwaps: echo() };
 const analytics = { getFillsStats: echo(), getPriorityFeesStats: echo() };
 const hip4 = { getAnalytics: echo() };
@@ -68,9 +74,12 @@ import { IndexerAnalyticsService } from '../../../src/services/indexer/indexer-a
 import { IndexerHip4Service } from '../../../src/services/indexer/indexer-hip4.service';
 import { HYPEDEXER_TTL } from '../../../src/constants/hypedexer.cache';
 
+/** The stored entries, without the long-lived last copies cacheService keeps beside them. */
+const entries = (): Array<[string, number | undefined]> =>
+  [...mockRedis.ttls.entries()].filter(([key]) => !key.endsWith(':last'));
+
 function ttlOf(fragment: string): number | undefined {
-  const key = [...mockRedis.ttls.keys()].find((k) => k.includes(fragment));
-  return key ? mockRedis.ttls.get(key) : undefined;
+  return entries().find(([key]) => key.includes(fragment))?.[1];
 }
 
 describe('shared passthrough caches', () => {
@@ -108,12 +117,13 @@ describe('shared passthrough caches', () => {
     expect(evm.getEvmLedgerTransfers).toHaveBeenCalledTimes(2);
   });
 
-  it('shares a page of EVM blocks for 15 s', async () => {
+  it('shares a page of EVM blocks for 5 s', async () => {
     const svc = IndexerEvmService.getInstance();
     await svc.getEvmBlocks({ limit: 20 });
     await svc.getEvmBlocks({ limit: 20 });
     expect(evm.getEvmBlocks).toHaveBeenCalledTimes(1);
     expect(ttlOf('hypedexer:evm:blocks:')).toBe(HYPEDEXER_TTL.evmBlocksPage);
+    expect(HYPEDEXER_TTL.evmBlocksPage).toBe(5);
   });
 
   it('shares completed-trade lists and summaries per param set', async () => {
@@ -146,6 +156,17 @@ describe('shared passthrough caches', () => {
     expect(ttlOf('hypedexer:hip3:stats-traders')).toBe(HYPEDEXER_TTL.hip3StatsTraders);
   });
 
+  it('shares HIP-3 top movers per param set, at the live cadence', async () => {
+    const svc = IndexerHip3Service.getInstance();
+    await svc.getTopMovers({ limit: 10 } as Parameters<typeof svc.getTopMovers>[0]);
+    await svc.getTopMovers({ limit: 10 } as Parameters<typeof svc.getTopMovers>[0]);
+    await svc.getTopMovers({ limit: 20 } as Parameters<typeof svc.getTopMovers>[0]);
+
+    expect(hip3.getTopMovers).toHaveBeenCalledTimes(2);
+    expect(ttlOf('hypedexer:hip3:top-movers')).toBe(HYPEDEXER_TTL.liveRolling);
+    expect(HYPEDEXER_TTL.liveRolling).toBe(15);
+  });
+
   it('shares TWAP lists and analytics stats', async () => {
     await IndexerTwapsService.getInstance().listTwaps({ limit: 150, hours: 24 });
     await IndexerTwapsService.getInstance().listTwaps({ limit: 150, hours: 24 });
@@ -157,23 +178,21 @@ describe('shared passthrough caches', () => {
     expect(analytics.getFillsStats).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps the TWAP source pages (limit 500) 20 s and the flow card list 60 s', async () => {
+  it('keeps every TWAP source page 10 s, deeper ones too, and the flow card list 15 s', async () => {
     const svc = IndexerTwapsService.getInstance();
     await svc.listTwaps({ limit: 150, hours: 24 });
     await svc.listTwaps({ hours: 24, limit: 500, offset: 0 });
     await svc.listTwaps({ hours: 24, limit: 500, offset: 500 });
 
     expect(twaps.listTwaps).toHaveBeenCalledTimes(3);
-    const ttls = [...mockRedis.ttls.entries()].filter(([key]) => key.startsWith('hypedexer:twaps:list'));
-    expect(ttls.filter(([key]) => key.includes('"limit":500')).map(([, ttl]) => ttl)).toEqual([
-      HYPEDEXER_TTL.twapSourcePages,
-      HYPEDEXER_TTL.twapSourcePages,
-    ]);
+    const ttls = entries().filter(([key]) => key.startsWith('hypedexer:twaps:list'));
+    expect(ttls.find(([key]) => key.includes('"offset":0'))?.[1]).toBe(HYPEDEXER_TTL.twapSourcePages);
+    expect(ttls.find(([key]) => key.includes('"offset":500'))?.[1]).toBe(HYPEDEXER_TTL.twapSourcePages);
     expect(ttls.find(([key]) => key.includes('"limit":150'))?.[1]).toBe(HYPEDEXER_TTL.marketList);
-    expect(HYPEDEXER_TTL.twapSourcePages).toBe(20);
+    expect([HYPEDEXER_TTL.twapSourcePages, HYPEDEXER_TTL.marketList]).toEqual([10, 15]);
   });
 
-  it('caches HIP-4 analytics per coin chunk for 5 min, and per interval and limit otherwise', async () => {
+  it('caches HIP-4 live volume chunks 15 s, other filtered analytics a minute, and per interval and limit otherwise', async () => {
     const svc = IndexerHip4Service.getInstance();
     await svc.getAnalytics({ coin: '1010,1011', interval: '1d', limit: 2000 });
     await svc.getAnalytics({ coin: '1010,1011', interval: '1d', limit: 2000 });
@@ -182,8 +201,30 @@ describe('shared passthrough caches', () => {
     await svc.getAnalytics({ interval: '1h' });
 
     expect(hip4.getAnalytics).toHaveBeenCalledTimes(4);
-    expect(ttlOf('"coin":"1010,1011"')).toBe(HYPEDEXER_TTL.hip4AnalyticsFiltered);
+    expect(ttlOf('"coin":"1010,1011"')).toBe(HYPEDEXER_TTL.hip4LiveVolumes);
     expect(mockRedis.ttls.get('hypedexer:hip4:analytics:1h:168')).toBe(HYPEDEXER_TTL.hip4Analytics);
     expect(mockRedis.ttls.get('hypedexer:hip4:analytics:1h')).toBe(HYPEDEXER_TTL.hip4Analytics);
+    expect(HYPEDEXER_TTL.hip4LiveVolumes).toBe(15);
+    expect(HYPEDEXER_TTL.hip4AnalyticsFiltered).toBe(60);
+
+    // An outcome split or a date range is not the live fan-out.
+    await svc.getAnalytics({ coin: '1010', interval: '1d', start: '2026-10-01' });
+    expect(ttlOf('"start":"2026-10-01"')).toBe(HYPEDEXER_TTL.hip4AnalyticsFiltered);
+  });
+
+  it('caches one builder\'s stats and users per timeframe and limit', async () => {
+    const svc = IndexerBuildersIndexerService.getInstance();
+    const addr = '0x1234567890abcdef1234567890ABCDEF12345678';
+    await svc.getBuilderStats(addr, { timeframe: '24h' });
+    await svc.getBuilderStats(addr.toLowerCase(), { timeframe: '24h' });
+    await svc.getBuilderStats(addr, { timeframe: '7d' });
+    await svc.getBuilderUsers(addr, { timeframe: '24h', limit: 20 });
+    await svc.getBuilderUsers(addr, { timeframe: '24h', limit: 20 });
+    await svc.getBuilderUsers(addr, { timeframe: '24h', limit: 50 });
+
+    expect(builders.getBuilderStats).toHaveBeenCalledTimes(2);
+    expect(builders.getBuilderUsers).toHaveBeenCalledTimes(2);
+    expect(ttlOf(`hypedexer:builders:${addr.toLowerCase()}:stats:24h`)).toBe(HYPEDEXER_TTL.buildersStats);
+    expect(ttlOf(`hypedexer:builders:${addr.toLowerCase()}:users:24h:20`)).toBe(HYPEDEXER_TTL.buildersStats);
   });
 });

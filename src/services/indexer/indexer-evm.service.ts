@@ -40,7 +40,7 @@ export class IndexerEvmService {
       (params.limit !== undefined || params.start_time !== undefined || params.end_time !== undefined);
 
     if (hasFilter) {
-      // The explorer polls `limit=20` every 15 s from every open tab.
+      // The explorer polls `limit=20` every 5 s from every open tab.
       return cacheService.getOrSet<unknown>(
         buildHypedexerCacheKey('evm', 'blocks', { ...params }),
         () => this.client.getEvmBlocks(params),

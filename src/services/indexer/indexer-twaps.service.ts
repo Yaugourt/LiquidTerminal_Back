@@ -22,18 +22,27 @@ export class IndexerTwapsService {
   }
 
   /**
-   * Shared by every visitor. Two readers: the TWAP flow card (150 rows polled
-   * every minute) and the front's primary TWAP source (pages of 500, polled
-   * every 30 s by /market/twap, the dashboard board and token pages), which
-   * gets the shorter TTL so a new TWAP shows up within ~half a minute and its
-   * pages come from close snapshots.
+   * Shared by every visitor. Two readers: the TWAP flow card (150 rows) and
+   * the front's primary TWAP source (pages of 500 walked by /market/twap, the
+   * dashboard board and token pages). Every source page is kept 10 s (~52
+   * credits a page per refresh, shared by every visitor). The front reads
+   * the first page on every poll (new TWAPs and their progress within ~10-25
+   * s end to end) and walks the deeper pages once a minute (twap-source.ts
+   * DEEP_TTL_MS), so rows past the first 500 are up to ~70 s old there.
+   *
+   * Source pages don't serve their last copy while they refresh: an expired
+   * page waits for its fetch, so the pages of one walk come from snapshots
+   * at most ~10 s apart and few rows cross a page boundary between them (a
+   * copy served without waiting could be a minute older than its
+   * neighbours). The copy is still served when a fetch fails.
    */
   public listTwaps(params: IndexerTwapsListQuery): Promise<unknown> {
     const paging = (params.limit ?? 0) >= IndexerTwapsService.SOURCE_PAGE_LIMIT;
     return cacheService.getOrSet(
       buildHypedexerCacheKey('twaps', 'list', { ...params }),
       () => this.client.listTwaps(params),
-      paging ? HYPEDEXER_TTL.twapSourcePages : HYPEDEXER_TTL.marketList
+      paging ? HYPEDEXER_TTL.twapSourcePages : HYPEDEXER_TTL.marketList,
+      paging ? { staleWhileRevalidate: false } : {}
     );
   }
 

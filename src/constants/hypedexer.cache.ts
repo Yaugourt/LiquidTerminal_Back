@@ -25,38 +25,60 @@ export const HYPEDEXER_LOCKS = {
   pollHip3: 'poll:hypedexer:hip3',
 } as const;
 
-/** Example TTLs (seconds). Heavy /fills/* = on-demand by default; use short TTL only for hot keys. */
+/**
+ * TTLs (seconds). Heavy /fills/* = on-demand by default; use short TTL only for hot keys.
+ *
+ * Every key is shared by all visitors (or by every viewer of one wallet), so
+ * the upstream cost of a TTL is per key, not per visitor. Keys of 30 s or
+ * less are live data: once expired, one refresh runs and readers wait for it
+ * at most 1.5 s before cacheService serves their last copy (nobody waits
+ * longer for HypeDexer), and every key falls back to its last copy when a
+ * refresh fails.
+ */
 export const HYPEDEXER_TTL = {
   fillsCount:             30,   // existant
   overviewSlice:          55,   // existant
   globalSnapshot:        300,   // daily-volume-10d
   /** daily-pnl-10d: ~3 250 rows (~330 credits) of daily buckets per coin. */
   dailyPnl10d:          3600,
-  globalRolling:          55,   // fenêtres glissantes 24h
+  globalRolling:          55,   // fenêtres glissantes 24h (predicted fundings: read every 5 min)
+  /** Dashboard 24h volume, fees, fills, active traders; HIP-3 overview and top movers (~3 credits each). */
+  liveRolling:            15,
   staticList:            120,   // dexs, assets (quasi-statiques)
-  userAddress:            30,   // données user-spécifiques
+  userAddress:            30,   // données user-spécifiques (overview, coins…)
+  /** A wallet's fills (perp, spot, HIP-3, HIP-4): billed per wallet viewed, not per viewer. */
+  userFills:              15,
   /** Funding is paid once an hour, and the summary reads up to 5 000 events
    * (~500 credits): recomputing it every 30 s changed nothing but the bill. */
   userFundingSummary:   1800,
   buildersAllTimeframes:  55,   // 55s — très lent chez HypeDexer
-  buildersStats:          30,   // 30s — données actives
-  buildersTop:            60,   // polled every 30 s by three pages (limits 3, 5, 100)
+  /** Global builder stats per timeframe, and one builder's stats and users
+   * (keyed per builder, timeframe and limit): the pages poll every 15 s (3 credits). */
+  buildersStats:          15,
+  /** Polled every 15 s by /market/builders, the hub lanes and the dashboard
+   * cards (one shared key per limit 3, 5, 100; ~3 credits each). */
+  buildersTop:            15,
   hip4Analytics:          60,   // analytics bucketed — 1h buckets change every hour
-  /** Coin-filtered analytics: the live-market volume fan-out asks ~11 chunks
-   * of daily buckets per visitor every 5 min, the same chunks for everyone. */
-  hip4AnalyticsFiltered: 300,
+  /** Other filtered analytics (outcome splits, date ranges). */
+  hip4AnalyticsFiltered:  60,
+  /** The live-market volume fan-out: daily buckets of coin chunks, no date
+   * range, the same ~11-17 chunks for everyone, polled every 15 s by the HIP-4
+   * pages (~17 × 7 credits each refresh, ~476 a minute while anyone views
+   * them). */
+  hip4LiveVolumes:        15,
   /** Market fills (a coin's tape, the global tape), by age of the newest fill:
    * a market trading in the last hour, one quiet for hours, one dormant for a
-   * day or more (settled/expired: its history no longer moves). */
-  hip4ActiveFills:        15,
+   * day or more (settled/expired: its history no longer moves). The tapes
+   * poll every 10 s. */
+  hip4ActiveFills:        10,
   hip4QuietFills:         60,
   hip4DormantFills:     3600,
   /** HIP-4 metadata lists (markets, outcome tokens, questions) read by the
    * enriched endpoints and settlements; an empty answer is retried sooner. */
   hip4BaseList:          600,
   hip4BaseListRetry:      60,
-  /** Enriched settlements (new rows only when a market settles). */
-  hip4Settlements:        60,
+  /** Enriched settlements (new rows only when a market settles), the list page's poll. */
+  hip4Settlements:        30,
   /** One market's row, read for a deep link or a settlement outside the
    * lists: a settled market no longer changes; an open one is re-read for
    * its volume and settlement. */
@@ -66,25 +88,27 @@ export const HYPEDEXER_TTL = {
    * added upstream titles its markets within the hour. */
   hip4OutcomeTemplates: 3600,
   /** HIP-3 market pages: the tape (polled every 10 s), cumulative snapshots
-   * (30 s) and per-market trader aggregates (60 s). */
-  hip3Fills:              15,
-  hip3Snapshots:          60,
+   * (polled every 10-15 s) and per-market trader aggregates (60 s). */
+  hip3Fills:              10,
+  hip3Snapshots:          15,
   hip3StatsTraders:      120,
-  /** Market-wide lists polled every minute or more: completed trades (biggest
-   * trades, trade explorer, a wallet's round trips) and their summary, TWAP
-   * flow, fills/priority-fee stats. */
-  marketList:             60,
-  /** /indexer/twaps pages of 500: the front's primary TWAP source, polled every 30 s. */
-  twapSourcePages:        20,
-  /** Enriched markets/questions cache. Lower than `staticList` because the
-   * payload includes live mid_price overlays from HL allMids — 2 min is too
-   * stale for prediction-market probabilities. */
-  hip4EnrichedList:       30,
-  evmStats:               30,   // EVM global stats
+  /** Market-wide live lists: completed trades (biggest trades, trade
+   * explorer, a wallet's round trips) and their summary, TWAP flow,
+   * fills/priority-fee stats (~7-17 credits a call, shared). */
+  marketList:             15,
+  /** /indexer/twaps pages of 500 (~52 credits each): the front's primary TWAP
+   * source. Every page carries live progress, and pages walked together must
+   * come from close snapshots (a row crossing a page boundary between two
+   * refreshes is missing from the walk), so all pages share one TTL. */
+  twapSourcePages:        10,
+  /** Enriched markets/questions: the payload carries live mid_price odds
+   * from HL allMids. A recompute costs no credits (the lists are cached). */
+  hip4EnrichedList:       15,
+  evmStats:               15,   // EVM global stats (the explorer polls every 15 s)
   evmStatsDaily:         300,   // EVM daily stats (slow-changing)
   evmBlocks:               5,   // EVM blocks (fast-changing)
-  /** Blocks with params (the explorer polls `limit=20` every 15 s). */
-  evmBlocksPage:          15,
+  /** Blocks with params (the explorer polls `limit=20` every 5 s): one shared call every 5 s. */
+  evmBlocksPage:           5,
   evmTransactions:         5,   // EVM transactions (fast-changing)
   evmBridgeEvents:        30,   // EVM bridge events
   evmLedgerTransfers:     30,   // EVM ledger transfers
@@ -150,6 +174,11 @@ export const HYPEDEXER_BUILDERS_CACHE_KEY = {
   statsAllTimeframes: 'hypedexer:builders:stats:all-timeframes',
   stats: (timeframe: string) => `hypedexer:builders:stats:${timeframe}`,
   top:   (timeframe: string, sort: string, limit: number) => `hypedexer:builders:top:${timeframe}:${sort}:${limit}`,
+  /** One builder's page (address lowercased; `default` when the param is left to upstream). */
+  builderStats: (address: string, timeframe: string) =>
+    `hypedexer:builders:${address.toLowerCase()}:stats:${timeframe}`,
+  builderUsers: (address: string, timeframe: string, limit: string) =>
+    `hypedexer:builders:${address.toLowerCase()}:users:${timeframe}:${limit}`,
 } as const;
 
 /** Clés de cache HIP4 paramétrées — fonctions génératrices */

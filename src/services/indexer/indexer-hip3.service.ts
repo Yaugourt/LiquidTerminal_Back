@@ -1,6 +1,6 @@
 import { HypeDexerHip3Client } from '../../clients/hypedexer/rest/hip3/hip3.client';
 import { buildHypedexerCacheKey } from '../../clients/hypedexer/rest/shared/hypedexer-cache.helper';
-import { cacheService } from '../../core/cache.service';
+import { cacheService, SHARED_LAST_COPY_KEEP_S } from '../../core/cache.service';
 import { HYPEDEXER_CACHE_KEYS, HYPEDEXER_TTL, HYPEDEXER_USER_CACHE_KEY } from '../../constants/hypedexer.cache';
 
 /**
@@ -37,7 +37,9 @@ export class IndexerHip3Service {
     return cacheService.getOrSet<unknown>(
       HYPEDEXER_CACHE_KEYS.hip3Overview,
       () => this.client.getOverview(),
-      HYPEDEXER_TTL.globalRolling
+      HYPEDEXER_TTL.liveRolling,
+      // Fixed name: the last copy is kept an hour, so an outage still shows the last figures.
+      { lastCopyKeepS: SHARED_LAST_COPY_KEEP_S }
     );
   }
 
@@ -59,7 +61,8 @@ export class IndexerHip3Service {
     return cacheService.getOrSet<unknown>(
       HYPEDEXER_CACHE_KEYS.hip3AuctionCurrent,
       () => this.client.getAuctionCurrent(),
-      HYPEDEXER_TTL.globalRolling
+      HYPEDEXER_TTL.globalRolling,
+      { lastCopyKeepS: SHARED_LAST_COPY_KEEP_S }
     );
   }
 
@@ -104,8 +107,13 @@ export class IndexerHip3Service {
     );
   }
 
+  /** Shared per param set, live (15 s): every visitor of the HIP-3 page asks the same ones. */
   public getTopMovers(p: Parameters<HypeDexerHip3Client['getTopMovers']>[0]): Promise<unknown> {
-    return this.client.getTopMovers(p);
+    return cacheService.getOrSet<unknown>(
+      buildHypedexerCacheKey('hip3', 'top-movers', { ...p }),
+      () => this.client.getTopMovers(p),
+      HYPEDEXER_TTL.liveRolling
+    );
   }
 
   public getUserCoins(address: string, p: Parameters<HypeDexerHip3Client['getUserCoins']>[1]): Promise<unknown> {
@@ -124,7 +132,7 @@ export class IndexerHip3Service {
     return cacheService.getOrSet(
       HYPEDEXER_USER_CACHE_KEY.hip3Fills(address, p),
       () => this.client.getUserFills(address, p),
-      HYPEDEXER_TTL.userAddress
+      HYPEDEXER_TTL.userFills
     );
   }
 
