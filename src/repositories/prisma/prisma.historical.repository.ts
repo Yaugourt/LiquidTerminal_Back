@@ -102,9 +102,11 @@ function earliestSince(windows: { since: Date }[]): Date {
  * The liquidations of a window, one row per liquidation — (hash, liquidated
  * user, coin) — with the columns the stats and charts read.
  *
- * Rows without a direction are left out: since 2026-09 HypeDexer sends, next
- * to a priced liquidation, rows that only list its liquidators (zero size and
- * notional). They stay as raw data but are not liquidations.
+ * Liquidator-only rows are left out: since 2026-09 HypeDexer sends, next to a
+ * priced liquidation, rows that only list its liquidators (no direction, zero
+ * size and notional). They stay as raw data but are not liquidations. A priced
+ * row without a resolved direction (spot backstop liquidations, e.g. @107)
+ * is a liquidation: it counts in the totals, not in the long/short split.
  *
  * HypeDexer also lists some liquidations several times under different tids
  * (its WS and REST disagree on tids): growing partial aggregates up to
@@ -140,7 +142,7 @@ function liquidationEvents(since: Date, coinFilter: Prisma.Sql = Prisma.empty): 
             'Infinity'
           ) AS vwap_deviation
         FROM raw_liquidations
-        WHERE time >= ${since} AND liq_dir IS NOT NULL ${coinFilter}
+        WHERE time >= ${since} AND (liq_dir IS NOT NULL OR notional_total > 0) ${coinFilter}
       ) versions
     ) ranked
     WHERE version_rank = 1
