@@ -129,18 +129,38 @@ function releaseOutboundSlot(): void {
   activeOutboundRequests--;
 }
 
+/**
+ * Hyperliquid's /info API: every client of it in this backend is built on
+ * `<host>/info` (api.hyperliquid.xyz, api-ui.hyperliquid.xyz, or the
+ * HYPERLIQUID_API_URL / HYPERLIQUID_UI_API_URL overrides). HypeDexer's own
+ * /info is an endpoint of its client, never the base URL.
+ */
+export function isHyperliquidInfoUrl(baseUrl: string): boolean {
+  return /\/info\/?$/.test(baseUrl);
+}
+
 export abstract class BaseApiService {
     private readonly API_TIMEOUT = 30000; // 30 secondes au lieu de 5
     private readonly MAX_RETRIES = 3;
     private readonly RETRY_DELAY = 1000; // 1 seconde
     private readonly MAX_RETRY_DELAY_MS = 30_000; // absolute cap per retry
+    /**
+     * Whether a 429 is retried. Not on Hyperliquid /info: its 1,200 weight a
+     * minute is one budget per IP for the whole backend, so a 429 means the
+     * budget is spent and every retry spends more of it, pushing the live
+     * pollers into 429s too. The call fails at once; a poller skips that tick
+     * and the next one runs on schedule. 5xx are still retried.
+     */
+    private readonly retryRateLimited: boolean;
 
     constructor(
       protected readonly baseUrl: string,
       protected readonly defaultHeaders: Record<string, string> = {
         'Content-Type': 'application/json'
       }
-    ) {}
+    ) {
+      this.retryRateLimited = !isHyperliquidInfoUrl(baseUrl);
+    }
 
     // Méthode principale pour les requêtes avec timeout
     protected async fetchWithTimeout<T>(
@@ -241,6 +261,9 @@ export abstract class BaseApiService {
 
           // Don't retry non-retryable HTTP errors (4xx except 429)
           if (error instanceof HttpApiError && !error.isRetryable) {
+            throw error;
+          }
+          if (error instanceof HttpApiError && error.isRateLimited && !this.retryRateLimited) {
             throw error;
           }
 

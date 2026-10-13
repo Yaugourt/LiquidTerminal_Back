@@ -1,4 +1,4 @@
-import { BaseApiService } from '../../../core/base.api.service';
+import { BaseApiService, HttpApiError } from '../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { redisService } from '../../../core/redis.service';
 import { prismaHistorical } from '../../../core/prisma.historical.service';
@@ -28,27 +28,37 @@ const COHORT_CAP = 80;
 /** Concurrent clearinghouseState calls; kept under BaseApiService's global cap of 50. */
 const FANOUT_CONCURRENCY = 12;
 
-/** Run `fn` over `items` with at most `limit` in flight; never rejects (settled per item). */
+/**
+ * Run `fn` over `items` with at most `limit` in flight; never rejects (settled
+ * per item). Once an item fails with an error `abortOn` accepts, no further
+ * item starts and `aborted` is set.
+ */
 async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
-  fn: (item: T) => Promise<R>
-): Promise<Array<{ ok: true; value: R } | { ok: false }>> {
+  fn: (item: T) => Promise<R>,
+  abortOn: (error: unknown) => boolean = () => false
+): Promise<{ results: Array<{ ok: true; value: R } | { ok: false }>; aborted: boolean }> {
   const out: Array<{ ok: true; value: R } | { ok: false }> = new Array(items.length);
   let cursor = 0;
+  let aborted = false;
   const worker = async (): Promise<void> => {
-    while (cursor < items.length) {
+    while (!aborted && cursor < items.length) {
       const i = cursor++;
       try {
         out[i] = { ok: true, value: await fn(items[i]) };
-      } catch {
+      } catch (error) {
         out[i] = { ok: false };
+        if (abortOn(error)) aborted = true;
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
+  return { results: out, aborted };
 }
+
+/** Hyperliquid answered 429: the backend's /info weight budget is spent. */
+const isRateLimited = (error: unknown): boolean => error instanceof HttpApiError && error.isRateLimited;
 
 /**
  * Aggregate positioning poller.
@@ -208,9 +218,20 @@ export class AggregatePositioningClient extends BaseApiService {
         throw new Error('Empty top-trader cohort; cannot build positioning');
       }
 
-      const results = await mapWithConcurrency(cohort, FANOUT_CONCURRENCY, (addr) =>
-        this.getClearinghouseState(addr)
+      const { results, aborted } = await mapWithConcurrency(
+        cohort,
+        FANOUT_CONCURRENCY,
+        (addr) => this.getClearinghouseState(addr),
+        isRateLimited
       );
+      if (aborted) {
+        // The whole backend shares Hyperliquid's weight budget (1,200 a
+        // minute per IP): the rest of an 80-call fan-out would only spend
+        // more of it and push the live pollers into 429s. Keep the last
+        // snapshot, try again next cycle.
+        logDeduplicator.warn('Aggregate positioning cycle skipped: Hyperliquid rate limited the fan-out');
+        return;
+      }
       const states = results.filter((r): r is { ok: true; value: ClearinghouseState } => r.ok).map((r) => r.value);
       if (states.length === 0) {
         throw new Error('All clearinghouseState fetches failed');
