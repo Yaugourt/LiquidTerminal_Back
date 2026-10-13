@@ -282,8 +282,13 @@ export class L4BookService {
   private static readonly IDLE_GRACE_MS = 30_000;
   /** No snapshot within this window ⇒ the coin has no live book. */
   private static readonly SNAPSHOT_TIMEOUT_MS = 8_000;
-  /** Concurrent mirrored coins. Each costs a few MB of resident book. */
-  private static readonly MAX_COINS = Number(process.env.L4BOOK_MAX_COINS ?? 24);
+  /**
+   * Concurrent mirrored coins. Each costs a few MB of resident book (and
+   * ~0.7 MB per resync upstream): 48 keeps the books of many visitors on
+   * different markets live; past it an idle book makes room, or the client
+   * gets l4book_unavailable.
+   */
+  private static readonly MAX_COINS = Number(process.env.L4BOOK_MAX_COINS ?? 48);
 
   private readonly books = new Map<string, CoinBook>();
   /** Normalized coin → viewer count. */
