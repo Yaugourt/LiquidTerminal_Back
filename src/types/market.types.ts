@@ -201,10 +201,15 @@ export interface DashboardGlobalStats {
     };
     /** Null when DefiLlama failed and no copy of its last answer is left. */
     bridgedUsdc: number | null;
-    numberOfUsers: number;
-    dailyVolume: number;
-    totalHypeStake: number;
-    vaultsTvl: number;
+    /**
+     * The fields below are null while their source has nothing to give (a
+     * cold Redis before the pollers' first write, a source failing for more
+     * than 10 min).
+     */
+    numberOfUsers: number | null;
+    dailyVolume: number | null;
+    totalHypeStake: number | null;
+    vaultsTvl: number | null;
 }
 
 // Types pour les informations des tokens
