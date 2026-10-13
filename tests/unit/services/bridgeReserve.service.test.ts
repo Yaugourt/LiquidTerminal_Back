@@ -11,20 +11,27 @@
  *   genesis read; a watched token whose system address holds 99% of the
  *   circulating supply becomes a reserve for good;
  * - a cycle spends 180 weight at most and stops at the first failed read; a
- *   token whose read failed waits before its next try.
+ *   token whose read failed waits before its next try;
+ * - while Redis can't be read the stored state is read again later, nothing
+ *   is rescanned and a save never replaces the stored map with a partial one.
  */
 jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
 const redisStore = new Map<string, string>();
-const redisGet = jest.fn(async (key: string) => redisStore.get(key) ?? null);
+
 const redisSet = jest.fn(async (key: string, value: string) => {
   redisStore.set(key, value);
 });
+/** Redis unreadable: get answers null (as for a missing key), mget null overall. */
+let redisDown = false;
+const redisGet = jest.fn(async (key: string) => (redisDown ? null : redisStore.get(key) ?? null));
+const redisMget = jest.fn(async (keys: string[]) => (redisDown ? null : keys.map((k) => redisStore.get(k) ?? null)));
 jest.mock('../../../src/core/redis.service', () => ({
   redisService: {
     get: (key: string) => redisGet(key),
+    mget: (keys: string[]) => redisMget(keys),
     set: (key: string, value: string) => redisSet(key, value),
   },
 }));
@@ -179,6 +186,8 @@ describe('SpotBridgeReserveService', () => {
     redisStore.set('spot:raw_data', spotRawData(FIXTURES));
     redisGet.mockClear();
     redisSet.mockClear();
+    redisMget.mockClear();
+    redisDown = false;
     failing = new Set();
     systemBalances = new Map(FIXTURES.map((f) => [sys(f.index), f.systemBalances ?? []]));
     fetchMock = jest.fn(async (_url: string, init: RequestInit) => {
@@ -434,5 +443,62 @@ describe('SpotBridgeReserveService', () => {
     await runCycle(service);
     expect(service.reserveOf(AXL.tokenId)).toBe(0);
     expect(saved()[AXL.tokenId]).toEqual({ role: 'reserve', balance: 0, balanceReadAt: now });
+  });
+
+  it('reads the stored state again once Redis is back, without rescanning meanwhile', async () => {
+    await runCycle(mod.SpotBridgeReserveService.getInstance());
+    const stored = redisStore.get('spot:bridge-reserve:v1');
+    fetchMock.mockClear();
+    redisSet.mockClear();
+
+    // A restart while Redis is unreadable: nothing loaded, nothing read, nothing written.
+    redisDown = true;
+    const restarted = fresh().SpotBridgeReserveService.getInstance();
+    await expect(restarted.load()).resolves.toBe(false);
+    await runCycle(restarted);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(restarted.reserveOf(XAUT0.tokenId)).toBe(0);
+
+    redisDown = false;
+    await expect(restarted.load()).resolves.toBe(true);
+    expect(restarted.reserveOf(XAUT0.tokenId)).toBe(184467436800.4237670898);
+    expect(redisStore.get('spot:bridge-reserve:v1')).toBe(stored);
+  });
+
+  it('merges a save with the stored map instead of replacing it', async () => {
+    // Another instance (or an earlier process) classified XAUT0 and AAPL.
+    redisStore.set(
+      'spot:bridge-reserve:v1',
+      JSON.stringify({
+        [XAUT0.tokenId]: { role: 'reserve', balance: 42, balanceReadAt: now },
+        [id(9999)]: { role: 'none' },
+      })
+    );
+    const service = mod.SpotBridgeReserveService.getInstance();
+    // Loaded empty (the key was written after this process read it).
+    (service as unknown as { storeLoad: Promise<boolean> }).storeLoad = Promise.resolve(true);
+    await runCycle(service);
+
+    expect(saved()[id(9999)]).toEqual({ role: 'none' });
+    expect(saved()[AAPL.tokenId]).toMatchObject({ role: 'reserve' });
+    expect(Object.keys(saved())).toHaveLength(10);
+  });
+
+  it('postpones a save while Redis is unreadable, then saves on the next cycle', async () => {
+    const service = mod.SpotBridgeReserveService.getInstance();
+    await service.load();
+    // Redis drops between the cycle's reads and its save.
+    redisMget.mockResolvedValueOnce(null);
+    await runCycle(service);
+    expect(redisSet).not.toHaveBeenCalled();
+    expect(service.reserveOf(XAUT0.tokenId)).toBe(184467436800.4237670898);
+
+    // Next cycle changes nothing (its first read fails), yet saves what the skipped save held.
+    failing.add('T4');
+    await runCycle(service);
+    expect(genesisReads().slice(-1)).toEqual(['T4']);
+    expect(redisSet).toHaveBeenCalledTimes(1);
+    expect(saved()[XAUT0.tokenId]).toEqual({ role: 'reserve', balance: 184467436800.4237670898, balanceReadAt: now });
   });
 });

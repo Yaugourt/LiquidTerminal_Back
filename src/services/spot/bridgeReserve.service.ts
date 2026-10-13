@@ -130,7 +130,9 @@ export class SpotBridgeReserveService {
   /** After a failed read, the token's next try of that read (a failure also ends the cycle). */
   private readonly genesisRetryAt = new Map<string, number>();
   private readonly balanceRetryAt = new Map<string, number>();
-  private storeLoad: Promise<void> | null = null;
+  private storeLoad: Promise<boolean> | null = null;
+  /** A change whose save was skipped (Redis unreadable): saved on the next cycle. */
+  private unsaved = false;
   private pollingInterval: NodeJS.Timeout | null = null;
 
   private constructor() {}
@@ -163,10 +165,20 @@ export class SpotBridgeReserveService {
     }
   }
 
-  /** The kept roles and balances, from Redis, once (fails open: they are read again). */
-  public load(): Promise<void> {
+  /**
+   * The kept roles and balances, from Redis, once it could be read: while
+   * Redis is unreadable the next call tries again. True once loaded.
+   */
+  public load(): Promise<boolean> {
     if (!this.storeLoad) {
-      this.storeLoad = this.readStore();
+      this.storeLoad = this.readStore().then((stored) => {
+        if (!stored) {
+          this.storeLoad = null;
+          return false;
+        }
+        this.adopt(stored);
+        return true;
+      });
     }
     return this.storeLoad;
   }
@@ -181,7 +193,8 @@ export class SpotBridgeReserveService {
   }
 
   private async runCycle(): Promise<void> {
-    await this.load();
+    // Without the stored roles every token would look unclassified: no rescan.
+    if (!(await this.load())) return;
     const listed = await this.readListedTokens();
     if (!listed) return;
 
@@ -231,7 +244,7 @@ export class SpotBridgeReserveService {
         }
       }
     } finally {
-      if (changed) await this.saveStore();
+      if (changed || this.unsaved) await this.saveStore();
     }
   }
 
@@ -322,30 +335,57 @@ export class SpotBridgeReserveService {
     }
   }
 
-  private async readStore(): Promise<void> {
+  /**
+   * The stored roles and balances; empty when nothing is stored, null when
+   * Redis can't be read (mget tells the two apart, get doesn't).
+   */
+  private async readStore(): Promise<Map<string, StoredBridgeReserve> | null> {
+    const values = await redisService.mget([SpotBridgeReserveService.STORE_KEY]);
+    if (!values) return null;
+    const stored = new Map<string, StoredBridgeReserve>();
+    const raw = values[0];
+    if (!raw) return stored;
     try {
-      const raw = await redisService.get(SpotBridgeReserveService.STORE_KEY);
-      if (!raw) return;
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       for (const [tokenId, value] of Object.entries(parsed)) {
         const v = value as Partial<StoredBridgeReserve> | null;
         if (typeof v !== 'object' || v === null || !ROLES.includes(v.role as SystemAddressRole)) continue;
-        const stored: StoredBridgeReserve = { role: v.role as SystemAddressRole };
+        const entry: StoredBridgeReserve = { role: v.role as SystemAddressRole };
         if (Number.isFinite(v.balance) && (v.balance as number) >= 0 && Number.isFinite(v.balanceReadAt)) {
-          stored.balance = v.balance;
-          stored.balanceReadAt = v.balanceReadAt;
+          entry.balance = v.balance;
+          entry.balanceReadAt = v.balanceReadAt;
         }
-        this.tokens.set(tokenId, stored);
+        stored.set(tokenId, entry);
       }
     } catch (error) {
       logDeduplicator.error('Bridge reserve: stored state unreadable', {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    return stored;
   }
 
+  /** Stored entries for the tokens not held in memory (what memory holds is newer). */
+  private adopt(stored: Map<string, StoredBridgeReserve>): void {
+    for (const [tokenId, entry] of stored) {
+      if (!this.tokens.has(tokenId)) this.tokens.set(tokenId, entry);
+    }
+  }
+
+  /**
+   * Merged with what Redis holds, and skipped while Redis can't be read: a
+   * partial map never replaces the stored one.
+   */
   private async saveStore(): Promise<void> {
+    const stored = await this.readStore();
+    if (!stored) {
+      this.unsaved = true;
+      logDeduplicator.warn('Bridge reserve: Redis unreadable, save postponed');
+      return;
+    }
+    this.adopt(stored);
     // No expiry: roles never go back, and an old balance beats none.
     await redisService.set(SpotBridgeReserveService.STORE_KEY, JSON.stringify(Object.fromEntries(this.tokens)));
+    this.unsaved = false;
   }
 }
