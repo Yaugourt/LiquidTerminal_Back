@@ -1,6 +1,6 @@
 import { HypeDexerHip4Client } from '../../clients/hypedexer/rest/hip4/hip4.client';
 import { buildHypedexerCacheKey } from '../../clients/hypedexer/rest/shared/hypedexer-cache.helper';
-import { cacheService } from '../../core/cache.service';
+import { cacheService, SHARED_LAST_COPY_KEEP_S } from '../../core/cache.service';
 import {
   HYPEDEXER_HIP4_CACHE_KEY,
   HYPEDEXER_TTL,
@@ -26,6 +26,56 @@ type Hip4FillsQuery = NonNullable<Parameters<HypeDexerHip4Client['getFills']>[0]
 
 const HOUR_MS = 60 * 60 * 1000;
 const HL_INFO_URL = 'https://api.hyperliquid.xyz/info';
+
+/** allMids (weight 2) is read at most this often, whatever the number of enriched keys and visitors. */
+const MIDS_FRESH_MS = 5_000;
+const MIDS_TIMEOUT_MS = 3_000;
+/** A last good map up to this old is served while a refresh runs; older, callers wait for it. */
+const MIDS_MAX_STALE_MS = 60_000;
+
+/**
+ * HIP-4 mid prices from Hyperliquid allMids, shared by every enriched
+ * assembly (markets, questions, settlements, outcome lookups): one read per
+ * MIDS_FRESH_MS at most (≤ 12 a minute, 24 weight), single-flight, with a
+ * timeout; a failed read keeps the last good map instead of dropping the odds.
+ */
+export class SharedHip4Mids {
+  private last: { mids: Map<string, number>; at: number } | null = null;
+  private inflight: Promise<Map<string, number>> | null = null;
+  /** No new read before then (set by every attempt, failed ones included). */
+  private nextReadAt = 0;
+
+  constructor(private readonly read: () => Promise<Map<string, number>>) {}
+
+  public async get(): Promise<Map<string, number>> {
+    const last = this.last;
+    const age = last ? Date.now() - last.at : Infinity;
+    if (last && (age < MIDS_FRESH_MS || Date.now() < this.nextReadAt)) return last.mids;
+    // No read has succeeded yet and the last attempt is under 5 s old: no new
+    // read (HL down or 429ing must not get one per enriched recompute).
+    if (!last && !this.inflight && Date.now() < this.nextReadAt) return new Map<string, number>();
+    const refresh = this.refresh();
+    if (last && age < MIDS_MAX_STALE_MS) return last.mids;
+    return refresh;
+  }
+
+  private refresh(): Promise<Map<string, number>> {
+    if (!this.inflight) {
+      this.nextReadAt = Date.now() + MIDS_FRESH_MS;
+      const inflight = this.read()
+        .then((mids) => {
+          this.last = { mids, at: Date.now() };
+          return mids;
+        })
+        .catch(() => this.last?.mids ?? new Map<string, number>())
+        .finally(() => {
+          if (this.inflight === inflight) this.inflight = null;
+        });
+      this.inflight = inflight;
+    }
+    return this.inflight;
+  }
+}
 /** Markets read one by one to name a settlements page (the list page asks 50 rows, ~17 markets). */
 const SETTLEMENT_LOOKUP_CAP = 50;
 const SETTLEMENT_LOOKUP_CONCURRENCY = 4;
@@ -78,6 +128,7 @@ function marketFillsTtl(rows: unknown): number {
 export class IndexerHip4Service {
   private static instance: IndexerHip4Service;
   private readonly client = HypeDexerHip4Client.getInstance();
+  private readonly mids = new SharedHip4Mids(() => this.readHlMidPrices());
 
   public static getInstance(): IndexerHip4Service {
     if (!IndexerHip4Service.instance) {
@@ -104,7 +155,7 @@ export class IndexerHip4Service {
           offset: p.offset,
         }),
         () => this.client.getFills(p),
-        HYPEDEXER_TTL.userAddress
+        HYPEDEXER_TTL.userFills
       );
     }
     // A market's tape is the same for every visitor: the coin page polls
@@ -138,6 +189,11 @@ export class IndexerHip4Service {
    * `outcome_id` looks up that one market instead (other params ignored): the
    * lists hold the oldest markets only (upstream order, no sort), so a deep
    * link to any recent market needs it.
+   *
+   * Kept 15 s (hip4EnrichedList): the payload carries the live odds
+   * (mid_price). A recompute costs no HypeDexer credits (the lists are cached
+   * on their own) and the shared allMids; an expired entry is served from its
+   * last copy while one refresh runs.
    */
   public async getMarketsEnriched(p: {
     class?: string;
@@ -152,13 +208,13 @@ export class IndexerHip4Service {
       return cacheService.getOrSet(
         buildHypedexerCacheKey('hip4', 'markets-enriched', { outcome_id: outcomeId }),
         () => this.assembleMarketByOutcomeId(outcomeId),
-        HYPEDEXER_TTL.staticList
+        HYPEDEXER_TTL.hip4EnrichedList
       );
     }
     return cacheService.getOrSet(
       buildHypedexerCacheKey('hip4', 'markets-enriched', { ...p }),
       () => this.assembleEnrichedMarkets(p),
-      HYPEDEXER_TTL.staticList
+      HYPEDEXER_TTL.hip4EnrichedList
     );
   }
 
@@ -188,14 +244,14 @@ export class IndexerHip4Service {
     return cacheService.getOrSet(
       buildHypedexerCacheKey('hip4', 'questions-with-outcomes', { ...p }),
       compute,
-      HYPEDEXER_TTL.staticList
+      HYPEDEXER_TTL.hip4EnrichedList
     );
   }
 
   /**
-   * Settlements enriched with winner_name + question_name. Shared for a minute:
-   * the list page polls it every 30 s per visitor, and each read joined three
-   * upstream metadata lists fetched again every time.
+   * Settlements enriched with winner_name + question_name. Shared for 30 s
+   * (the list page's poll): each read joins three upstream metadata lists,
+   * cached on their own.
    */
   public async getSettlements(p: {
     outcome_id?: number;
@@ -253,10 +309,11 @@ export class IndexerHip4Service {
    * Caching strategy, one Redis entry per param set:
    *   - Unfiltered calls (no coin, no outcome_id, no date range): the charts'
    *     buckets, kept a minute.
-   *   - Filtered calls (coin lists, outcome splits, date ranges): kept 5 min.
-   *     The upstream view is constant-time, but each call is billed per row,
-   *     and the live-market volume fan-out sends the same coin chunks for
-   *     every visitor.
+   *   - The live-market volume fan-out (coin chunks of daily buckets, no
+   *     outcome split, no date range): kept 15 s, the HIP-4 pages' poll.
+   *     Each call is billed per row, but every visitor sends the same coin
+   *     chunks, so the cost doesn't grow with the audience.
+   *   - Other filtered calls (outcome splits, date ranges): kept a minute.
    */
   public async getAnalytics(p: {
     interval?: string;
@@ -268,13 +325,17 @@ export class IndexerHip4Service {
   } = {}): Promise<unknown> {
     const q = { ...p, interval: p.interval ?? '1h' };
     const hasFilter = p.coin != null || p.outcome_id != null || p.start != null || p.end != null;
+    const liveVolumes =
+      p.coin != null && q.interval === '1d' && p.outcome_id == null && p.start == null && p.end == null;
 
     return cacheService.getOrSet(
       hasFilter
         ? buildHypedexerCacheKey('hip4', 'analytics', { ...q })
         : HYPEDEXER_HIP4_CACHE_KEY.analytics(q.interval, q.limit),
       () => this.client.getAnalytics(q),
-      hasFilter ? HYPEDEXER_TTL.hip4AnalyticsFiltered : HYPEDEXER_TTL.hip4Analytics,
+      liveVolumes
+        ? HYPEDEXER_TTL.hip4LiveVolumes
+        : hasFilter ? HYPEDEXER_TTL.hip4AnalyticsFiltered : HYPEDEXER_TTL.hip4Analytics,
     );
   }
 
@@ -367,26 +428,29 @@ export class IndexerHip4Service {
     }
   }
 
-  /** Fetch live mid prices for all HIP-4 coins (#N) from HL allMids. */
-  private async fetchHlMidPrices(): Promise<Map<string, number>> {
-    try {
-      const resp = await fetch(HL_INFO_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'allMids' }),
-      });
-      const data = await resp.json() as Record<string, string>;
-      const map = new Map<string, number>();
-      for (const [coin, price] of Object.entries(data)) {
-        if (coin.startsWith('#')) {
-          const px = parseFloat(price);
-          if (Number.isFinite(px)) map.set(coin, px);
-        }
+  /** Live mid prices of every HIP-4 coin (#N), shared (see SharedHip4Mids). */
+  private fetchHlMidPrices(): Promise<Map<string, number>> {
+    return this.mids.get();
+  }
+
+  /** One HL allMids read, HIP-4 coins only. Throws on any failure (the shared map keeps the last one). */
+  private async readHlMidPrices(): Promise<Map<string, number>> {
+    const resp = await fetch(HL_INFO_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'allMids' }),
+      signal: AbortSignal.timeout(MIDS_TIMEOUT_MS),
+    });
+    if (!resp.ok) throw new Error(`allMids answered ${resp.status}`);
+    const data = await resp.json() as Record<string, string>;
+    const map = new Map<string, number>();
+    for (const [coin, price] of Object.entries(data ?? {})) {
+      if (coin.startsWith('#')) {
+        const px = parseFloat(price);
+        if (Number.isFinite(px)) map.set(coin, px);
       }
-      return map;
-    } catch {
-      return new Map();
     }
+    return map;
   }
 
   /*
@@ -415,7 +479,9 @@ export class IndexerHip4Service {
     const raw = await cacheService.getOrSet(
       buildHypedexerCacheKey('hip4', 'outcome-tokens'),
       () => this.client.getOutcomeTokens<RawHip4OutcomeToken[]>({}),
-      baseListTtl
+      baseListTtl,
+      // Fixed name, read by every enriched assembly: kept an hour past a failed refresh.
+      { lastCopyKeepS: SHARED_LAST_COPY_KEEP_S }
     );
     return asArray(raw);
   }

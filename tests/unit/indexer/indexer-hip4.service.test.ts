@@ -111,6 +111,7 @@ describe('IndexerHip4Service caching', () => {
     expect(mockClient.getFills).toHaveBeenCalledTimes(2);
     expect(all[0].coin).toBe('#0');
     expect(one[0].coin).toBe('#1010');
+    expect(storedTtl(`hip4:user:${user}`)).toBe(HYPEDEXER_TTL.userFills);
   });
 
   it('reads the metadata lists once for enriched markets, questions and settlements', async () => {
@@ -133,6 +134,10 @@ describe('IndexerHip4Service caching', () => {
     expect(settlements).toEqual([expect.objectContaining({ outcome_id: 10, winner_side: 0, settled_px: 2 })]);
     expect(storedTtl('hypedexer:hip4:markets')).toBe(HYPEDEXER_TTL.hip4BaseList);
     expect(storedTtl('hypedexer:hip4:settlements')).toBe(HYPEDEXER_TTL.hip4Settlements);
+    // The odds (mid_price) are live: 15 s, not the lists' 10 min.
+    expect(storedTtl('markets-enriched')).toBe(HYPEDEXER_TTL.hip4EnrichedList);
+    expect(storedTtl('questions-with-outcomes')).toBe(HYPEDEXER_TTL.hip4EnrichedList);
+    expect(HYPEDEXER_TTL.hip4EnrichedList).toBe(15);
   });
 
   it('answers markets-enriched per limit instead of whichever limit came first', async () => {
