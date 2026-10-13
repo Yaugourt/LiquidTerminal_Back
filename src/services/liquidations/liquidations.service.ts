@@ -41,11 +41,16 @@ export class LiquidationsService implements LiquidationDataProvider {
   private readonly client: HLIndexerLiquidationsClient;
   private static readonly DEFAULT_LIMIT = 100;
   
-  private static readonly DATA_CACHE_TTL = 15;
-  private static readonly STATS_CACHE_TTL = 15;
+  /** Local DB reads (no upstream cost): the dashboard panel polls them every 10 s. */
+  private static readonly DATA_CACHE_TTL = 10;
+  private static readonly STATS_CACHE_TTL = 10;
   private static readonly RECENT_CACHE_TTL = 15;
-  private static readonly USER_HISTORY_CACHE_TTL = 300;
-  private static readonly TOP_CACHE_TTL = 30;
+  /** HypeDexer analytics passthrough (paid per call). */
+  private static readonly ANALYTICS_CACHE_TTL = 15;
+  /** A tracked wallet's new liquidation shows within a minute (the address pages poll every minute). */
+  private static readonly USER_HISTORY_CACHE_TTL = 60;
+  /** The top lists poll every 15 s: a new record joins them soon after the live feed shows it. */
+  private static readonly TOP_CACHE_TTL = 15;
   /** Largest `limit` /historical/top accepts: the rows read per window. */
   private static readonly TOP_MAX_LIMIT = 20;
 
@@ -412,7 +417,8 @@ export class LiquidationsService implements LiquidationDataProvider {
       );
 
       // A wallet's liquidation history (the address pages poll it every
-      // minute) only changes when that wallet gets liquidated.
+      // minute) only changes when that wallet gets liquidated: a minute,
+      // one HypeDexer read (~12 credits) per wallet viewed.
       const ttl = user ? LiquidationsService.USER_HISTORY_CACHE_TTL : LiquidationsService.RECENT_CACHE_TTL;
       try {
         await redisService.set(cacheKey, JSON.stringify(response), ttl);
@@ -507,7 +513,7 @@ export class LiquidationsService implements LiquidationDataProvider {
       const response = await this.client.getAnalyticsStats({ days, coin });
 
       try {
-        await redisService.set(cacheKey, JSON.stringify(response), LiquidationsService.STATS_CACHE_TTL);
+        await redisService.set(cacheKey, JSON.stringify(response), LiquidationsService.ANALYTICS_CACHE_TTL);
       } catch (cacheError) {
         logDeduplicator.warn('Failed to cache analytics stats', { error: String(cacheError) });
       }

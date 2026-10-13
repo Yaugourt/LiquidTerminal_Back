@@ -74,7 +74,7 @@ describe('LiquidationsService DB reads and history cache', () => {
     expect(limit).toBe(20);
     // 24h window.
     expect(Math.abs(before - 24 * 3600e3 - (since as Date).getTime())).toBeLessThan(5000);
-    expect(mockTtls.get('liquidations:top:24h')).toBe(30);
+    expect(mockTtls.get('liquidations:top:24h')).toBe(15);
     expect(mockClient.getLiquidations).not.toHaveBeenCalled();
     expect(mockClient.getRecentLiquidations).not.toHaveBeenCalled();
   });
@@ -100,7 +100,7 @@ describe('LiquidationsService DB reads and history cache', () => {
     expect([...mockStore.keys()].filter((k) => k.startsWith('liquidations:top:'))).toEqual(['liquidations:top:7d']);
   });
 
-  it('keeps a wallet history 5 min and other lists 15 s, keyed on every param', async () => {
+  it('keeps a wallet history a minute and other lists 15 s, keyed on every param', async () => {
     const user = '0x1111111111111111111111111111111111111111';
     const a = await service.getLiquidations({ user, limit: 100, order: 'DESC' });
     await service.getLiquidations({ user, limit: 100, order: 'DESC' });
@@ -111,7 +111,7 @@ describe('LiquidationsService DB reads and history cache', () => {
     expect(b.data).toMatchObject([{ tag: `${user}:50` }]);
     expect(mockClient.getLiquidations).toHaveBeenCalledTimes(3);
     const ttls = [...mockTtls.entries()];
-    expect(ttls.filter(([k]) => k.includes(user)).every(([, ttl]) => ttl === 300)).toBe(true);
+    expect(ttls.filter(([k]) => k.includes(user)).every(([, ttl]) => ttl === 60)).toBe(true);
     expect(ttls.find(([k]) => k.includes('"coin":"BTC"'))?.[1]).toBe(15);
   });
 });
