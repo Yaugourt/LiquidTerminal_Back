@@ -18,6 +18,8 @@ export class SpotCoinNameService {
   private static readonly CACHE_KEY = 'spot:raw_data';
   /** Pairs are only ever added (one spot deploy auction every ~31 h): reload at most this often. */
   private static readonly MIN_RELOAD_INTERVAL_MS = 60_000;
+  /** Until a table is loaded (cold Redis at boot, before the spot poller's first write): retry this soon. */
+  private static readonly EMPTY_RELOAD_INTERVAL_MS = 5_000;
 
   private names = new Map<string, string>();
   private lastLoadStartedAt = 0;
@@ -40,10 +42,15 @@ export class SpotCoinNameService {
     return coin;
   }
 
-  /** Reload the table from Redis; concurrent calls share one load, and loads are rate-limited. */
+  /**
+   * Reload the table from Redis; concurrent calls share one load, and loads
+   * are rate-limited (once a minute, every 5 s while no table is loaded).
+   */
   public reload(): Promise<void> {
     if (this.loading) return this.loading;
-    if (Date.now() - this.lastLoadStartedAt < SpotCoinNameService.MIN_RELOAD_INTERVAL_MS) {
+    const interval =
+      this.names.size === 0 ? SpotCoinNameService.EMPTY_RELOAD_INTERVAL_MS : SpotCoinNameService.MIN_RELOAD_INTERVAL_MS;
+    if (Date.now() - this.lastLoadStartedAt < interval) {
       return Promise.resolve();
     }
     this.lastLoadStartedAt = Date.now();

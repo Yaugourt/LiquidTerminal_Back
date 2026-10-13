@@ -1,7 +1,7 @@
 /**
  * Spot pair ids ("@107") resolve to base token names from the spotMeta the
  * spot poller caches in Redis; unknown ids pass through and trigger a reload,
- * at most once a minute.
+ * at most once a minute — every 5 s while no table could be loaded yet.
  */
 const mockRedis = { get: jest.fn<Promise<string | null>, [string]>() };
 
@@ -80,5 +80,23 @@ describe('SpotCoinNameService', () => {
     mockRedis.get.mockResolvedValueOnce('{not json');
     await service.reload();
     expect(service.resolve('@107')).toBe('@107');
+  });
+
+  it('retries every 5 s while the spot cache is missing at boot', async () => {
+    mockRedis.get.mockResolvedValueOnce(null);
+    expect(service.resolve('@107')).toBe('@107');
+    await flush();
+    expect(mockRedis.get).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(2_000);
+    expect(service.resolve('@107')).toBe('@107');
+    await flush();
+    expect(mockRedis.get).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(3_001);
+    service.resolve('@107');
+    await flush();
+    expect(mockRedis.get).toHaveBeenCalledTimes(2);
+    expect(service.resolve('@107')).toBe('HYPE');
   });
 });
