@@ -157,6 +157,22 @@ describe('shared passthrough caches', () => {
     expect(analytics.getFillsStats).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps the TWAP source pages (limit 500) 20 s and the flow card list 60 s', async () => {
+    const svc = IndexerTwapsService.getInstance();
+    await svc.listTwaps({ limit: 150, hours: 24 });
+    await svc.listTwaps({ hours: 24, limit: 500, offset: 0 });
+    await svc.listTwaps({ hours: 24, limit: 500, offset: 500 });
+
+    expect(twaps.listTwaps).toHaveBeenCalledTimes(3);
+    const ttls = [...mockRedis.ttls.entries()].filter(([key]) => key.startsWith('hypedexer:twaps:list'));
+    expect(ttls.filter(([key]) => key.includes('"limit":500')).map(([, ttl]) => ttl)).toEqual([
+      HYPEDEXER_TTL.twapSourcePages,
+      HYPEDEXER_TTL.twapSourcePages,
+    ]);
+    expect(ttls.find(([key]) => key.includes('"limit":150'))?.[1]).toBe(HYPEDEXER_TTL.marketList);
+    expect(HYPEDEXER_TTL.twapSourcePages).toBe(20);
+  });
+
   it('caches HIP-4 analytics per coin chunk for 5 min, and per interval and limit otherwise', async () => {
     const svc = IndexerHip4Service.getInstance();
     await svc.getAnalytics({ coin: '1010,1011', interval: '1d', limit: 2000 });

@@ -11,6 +11,8 @@ import { HYPEDEXER_USER_CACHE_KEY, HYPEDEXER_TTL } from '../../constants/hypedex
 export class IndexerTwapsService {
   private static instance: IndexerTwapsService;
   private readonly client = HypeDexerTwapsClient.getInstance();
+  /** The front's TWAP source pages with limit=500; the flow card asks 150. */
+  private static readonly SOURCE_PAGE_LIMIT = 500;
 
   public static getInstance(): IndexerTwapsService {
     if (!IndexerTwapsService.instance) {
@@ -19,12 +21,19 @@ export class IndexerTwapsService {
     return IndexerTwapsService.instance;
   }
 
-  /** TWAP flow card: 150 rows polled every minute by each /market visitor. */
+  /**
+   * Shared by every visitor. Two readers: the TWAP flow card (150 rows polled
+   * every minute) and the front's primary TWAP source (pages of 500, polled
+   * every 30 s by /market/twap, the dashboard board and token pages), which
+   * gets the shorter TTL so a new TWAP shows up within ~half a minute and its
+   * pages come from close snapshots.
+   */
   public listTwaps(params: IndexerTwapsListQuery): Promise<unknown> {
+    const paging = (params.limit ?? 0) >= IndexerTwapsService.SOURCE_PAGE_LIMIT;
     return cacheService.getOrSet(
       buildHypedexerCacheKey('twaps', 'list', { ...params }),
       () => this.client.listTwaps(params),
-      HYPEDEXER_TTL.marketList
+      paging ? HYPEDEXER_TTL.twapSourcePages : HYPEDEXER_TTL.marketList
     );
   }
 

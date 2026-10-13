@@ -74,6 +74,8 @@ export const HYPEDEXER_TTL = {
    * trades, trade explorer, a wallet's round trips) and their summary, TWAP
    * flow, fills/priority-fee stats. */
   marketList:             60,
+  /** /indexer/twaps pages of 500: the front's primary TWAP source, polled every 30 s. */
+  twapSourcePages:        20,
   /** Enriched markets/questions cache. Lower than `staticList` because the
    * payload includes live mid_price overlays from HL allMids — 2 min is too
    * stale for prediction-market probabilities. */
