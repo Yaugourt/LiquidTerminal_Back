@@ -2,6 +2,18 @@ import { SpotGlobalStats, StablecoinsStats, MarketData } from '../../types/marke
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
+/**
+ * No `/spotUSDC` snapshot is cached: a cold Redis before the poller's first
+ * write (~24 s after a start, its stagger), or Redis can't be read. The routes
+ * answer 503 rather than zeros or a 500.
+ */
+export class StablecoinsUnavailableError extends Error {
+  constructor() {
+    super('No stablecoins data available yet');
+    this.name = 'StablecoinsUnavailableError';
+  }
+}
+
 export class SpotGlobalStatsService {
   private readonly SPOT_MARKETS_CACHE_KEY = 'spot:markets';
   private readonly SPOT_USDC_CACHE_KEY = 'spotUSDC:raw_data';
@@ -87,13 +99,14 @@ export class SpotGlobalStatsService {
   // ─── Stablecoins Stats ────────────────────────────────────────────────────
 
   public async getStablecoinsStats(): Promise<StablecoinsStats> {
+    const spotUSDCData = await this.getSpotUSDCDataFromCache();
+    const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
+      ? spotUSDCData[spotUSDCData.length - 1]
+      : null;
+    // Nothing cached yet: say so instead of answering zero stablecoins.
+    if (!latestSpotUSDCData) throw new StablecoinsUnavailableError();
+
     try {
-      const spotUSDCData = await this.getSpotUSDCDataFromCache();
-
-      const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
-        ? spotUSDCData[spotUSDCData.length - 1]
-        : null;
-
       const totalSpotUSDC = latestSpotUSDCData?.totalSpotUSDC || 0;
       const totalSpotUSDT0 = latestSpotUSDCData?.totalSpotUSDT0 || 0;
       const totalSpotUSDE = latestSpotUSDCData?.totalSpotUSDE || 0;
@@ -137,7 +150,7 @@ export class SpotGlobalStatsService {
   public async getStablecoinsHistory(): Promise<Record<string, number>[]> {
     const snapshots = await this.getSpotUSDCDataFromCache();
     if (!snapshots || snapshots.length === 0) {
-      throw new Error('No stablecoins history available');
+      throw new StablecoinsUnavailableError();
     }
     return snapshots;
   }

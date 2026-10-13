@@ -1,7 +1,9 @@
 /**
  * GET /market/stablecoins/history serves the Hypurrscan `/spotUSDC` series the
  * spot poller caches, entry for entry: the front derives its stablecoin KPIs,
- * charts and holder counts from this array.
+ * charts and holder counts from this array. GET /market/stablecoins sums its
+ * latest entry. With nothing cached (cold Redis before the poller's first
+ * write, or Redis unreadable) both answer 503, never zeros or a 500.
  */
 import express from 'express';
 import request from 'supertest';
@@ -69,16 +71,53 @@ describe('GET /market/stablecoins/history', () => {
     expect(redisGet).toHaveBeenCalledWith('spotUSDC:raw_data');
   });
 
-  it('answers 500 while nothing is cached', async () => {
+  it('answers 503 while nothing is cached', async () => {
     redisGet.mockResolvedValue(null);
     const res = await request(buildApp()).get('/market/stablecoins/history');
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('Failed to fetch stablecoins history');
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('30');
+    expect(res.body.code).toBe('STABLECOINS_UNAVAILABLE');
   });
 
-  it('answers 500 when the cache cannot be read', async () => {
+  it('answers 503 when the cache cannot be read', async () => {
     redisGet.mockRejectedValue(new Error('redis down'));
     const res = await request(buildApp()).get('/market/stablecoins/history');
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
+  });
+
+  it('answers 503 for an empty series', async () => {
+    redisGet.mockResolvedValue('[]');
+    const res = await request(buildApp()).get('/market/stablecoins/history');
+    expect(res.status).toBe(503);
+  });
+});
+
+describe('GET /market/stablecoins', () => {
+  beforeEach(() => redisGet.mockReset());
+
+  it('sums the latest entry', async () => {
+    redisGet.mockResolvedValue(JSON.stringify(SERIES));
+    const res = await request(buildApp()).get('/market/stablecoins');
+    expect(res.status).toBe(200);
+    expect(res.body.totalSpotUSDC).toBe(2834133870.5211616);
+    expect(res.body.totalStablecoins).toBeCloseTo(2834133870.5211616 + 5375137.748359488 + 5582527.097726468 + 5874786.233417442, 4);
+    expect(res.body.USDC_holdersCount).toBe(1253676);
+  });
+
+  it('answers 503, not zero stablecoins, while nothing is cached', async () => {
+    redisGet.mockResolvedValue(null);
+    const res = await request(buildApp()).get('/market/stablecoins');
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('30');
+    expect(res.body.code).toBe('STABLECOINS_UNAVAILABLE');
+    expect(res.body.totalStablecoins).toBeUndefined();
+  });
+
+  it('keeps answering zero for a coin an entry does not carry', async () => {
+    redisGet.mockResolvedValue(JSON.stringify(SERIES.slice(0, 1)));
+    const res = await request(buildApp()).get('/market/stablecoins');
+    expect(res.status).toBe(200);
+    expect(res.body.totalSpotUSDT0).toBe(0);
+    expect(res.body.totalStablecoins).toBe(10621031.834270295);
   });
 });
