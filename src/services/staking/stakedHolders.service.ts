@@ -194,7 +194,9 @@ export class StakedHoldersService {
 
   private async fetchView(): Promise<StakedHoldersView> {
     try {
-      const data = await this.client.getStakedHolders('HYPE');
+      // Ahead of the token holders downloads: the /hype stakers table must not
+      // wait behind other tokens' lists.
+      const data = await this.client.getStakedHolders('HYPE', { priority: true });
       const amounts = data.holders ?? {};
       const entries = Object.entries(amounts);
       // An empty list is an upstream hiccup: don't serve it as "nobody

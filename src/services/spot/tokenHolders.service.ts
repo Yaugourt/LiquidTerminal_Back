@@ -1,4 +1,4 @@
-import { HypurrscanTokenHoldersClient } from '../../clients/hypurrscan/tokenHolders.client';
+import { HoldersQueueError, HypurrscanTokenHoldersClient } from '../../clients/hypurrscan/tokenHolders.client';
 import { redisService } from '../../core/redis.service';
 import { AssetContext, MarketData, SpotContext } from '../../types/market.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -110,10 +110,15 @@ export class TokenHoldersService {
       // Re-insert: Map order is the recency order.
       this.views.delete(token);
     } else {
-      snapshot = new OnDemandSnapshot(() => this.fetchView(token), {
-        freshMs: TokenHoldersService.FRESH_MS,
-        maxStaleMs: TokenHoldersService.MAX_STALE_MS,
-      });
+      const created: OnDemandSnapshot<TokenHoldersView> = new OnDemandSnapshot(
+        // A download still queued when this view is evicted is skipped.
+        () => this.fetchView(token, () => this.views.get(token) === created),
+        {
+          freshMs: TokenHoldersService.FRESH_MS,
+          maxStaleMs: TokenHoldersService.MAX_STALE_MS,
+        }
+      );
+      snapshot = created;
     }
     this.views.set(token, snapshot);
 
@@ -125,11 +130,15 @@ export class TokenHoldersService {
     return snapshot;
   }
 
-  private async fetchView(token: string): Promise<TokenHoldersView> {
+  private async fetchView(token: string, stillWanted: () => boolean): Promise<TokenHoldersView> {
     try {
+      // Both lists or neither: half a view is a wasted download.
+      if (this.client.freeSlots() < 2) {
+        throw new HoldersQueueError('queue full');
+      }
       const [spot, staked] = await Promise.all([
-        this.client.getHolders(token),
-        this.client.getStakedHolders(token),
+        this.client.getHolders(token, { stillWanted }),
+        this.client.getStakedHolders(token, { stillWanted }),
       ]);
       const view = buildTokenHoldersView(token, spot, staked, TokenHoldersService.MAX_ROWS);
       logDeduplicator.info('Token holders view built', { token, holders: view.holdersCount });
