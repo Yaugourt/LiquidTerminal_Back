@@ -6,7 +6,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import express from 'express';
 import http from 'http';
-import type { AddressInfo } from 'net';
+import type { AddressInfo, Socket } from 'net';
 
 jest.mock('../../../src/middleware/apiRateLimiter', () => ({
   marketRateLimiter: (_req: Request, _res: Response, next: NextFunction) => {
@@ -74,16 +74,35 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   return { promise, resolve };
 }
 
-const tick = (ms = 30): Promise<void> => new Promise((r) => setTimeout(r, ms));
+/**
+ * Polls `done` until it holds, failing after 2 s: waits on what the server
+ * actually did instead of a fixed delay (which lost the race under load).
+ */
+async function waitFor(done: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/** Lets the route's pending continuations and close handlers run. */
+const settle = (): Promise<void> => new Promise((r) => setImmediate(r));
 
 describe('GET /hyperfolio/.../positions/stream — slot release', () => {
   let server: http.Server;
   let port: number;
+  /** Server-side sockets still open. */
+  const serverSockets = new Set<Socket>();
 
   beforeAll(async () => {
     const app = express();
     app.use('/hyperfolio', hyperfolioRoutes);
     server = http.createServer(app);
+    server.on('connection', (socket) => {
+      serverSockets.add(socket);
+      socket.on('close', () => serverSockets.delete(socket));
+    });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     port = (server.address() as AddressInfo).port;
   });
@@ -98,19 +117,24 @@ describe('GET /hyperfolio/.../positions/stream — slot release', () => {
     mockClient.checkRateLimit.mockReturnValue(true);
   });
 
-  /** Opens the stream and destroys the socket once `whenPending` resolves. */
+  /**
+   * Opens the stream, destroys the socket once `whenPending` resolves, and
+   * returns once the server has seen the close (its handlers have run).
+   */
   async function abortedRequest(whenPending: Promise<void>): Promise<void> {
-    const req = http.get({ host: '127.0.0.1', port, path: PATH });
+    // No keep-alive agent: every request has its own socket, closed with it.
+    const req = http.get({ host: '127.0.0.1', port, path: PATH, agent: false });
     req.on('error', () => undefined);
     await whenPending;
     req.destroy();
-    await tick();
+    await waitFor(() => serverSockets.size === 0, 'the server to see the client close');
+    await settle();
   }
 
   function fullRequest(): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
       http
-        .get({ host: '127.0.0.1', port, path: PATH }, (res) => {
+        .get({ host: '127.0.0.1', port, path: PATH, agent: false }, (res) => {
           let body = '';
           res.on('data', (c) => (body += c));
           res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
@@ -129,7 +153,7 @@ describe('GET /hyperfolio/.../positions/stream — slot release', () => {
       });
       await abortedRequest(called.promise);
       peek.resolve(null);
-      await tick();
+      await settle();
     }
     expect(mockClient.openPositionsStream).not.toHaveBeenCalled();
 
@@ -156,7 +180,7 @@ describe('GET /hyperfolio/.../positions/stream — slot release', () => {
       stream.cancel = cancel;
       cancels.push(cancel);
       open.resolve(stream);
-      await tick();
+      await waitFor(() => cancel.mock.calls.length > 0, 'the late upstream stream to be cancelled');
     }
     cancels.forEach((cancel) => expect(cancel).toHaveBeenCalled());
 
