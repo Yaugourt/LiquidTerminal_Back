@@ -104,10 +104,37 @@ Copy `.env.example` to `.env`. Key variables:
 | `JWKS_URL`, `NEXT_PUBLIC_PRIVY_AUDIENCE`, `FIRST_ADMIN_PRIVY_USER_ID` | Privy authentication |
 | `ALLOWED_ORIGINS`, `PORT`, `NODE_ENV` | Server config |
 | `HL_INDEXER_API_KEY` | HypeDexer / HL indexer access |
+| `HYPEDEXER_DAILY_CREDIT_BUDGET` | HypeDexer credits a UTC day before a warning is logged (optional, default 300000; warning only) |
+| `HYPERFOLIO_API_KEY` | Hyperfolio access: required for `/hyperfolio/*` (Yields page, tracker EVM panels), which answer 503 `HYPERFOLIO_NOT_CONFIGURED` without it |
+| `HYPERFOLIO_DAILY_BUDGET` | Upstream Hyperfolio calls a UTC day, all instances together (optional, default 50000) |
 | `TELEGRAM_BOT_API_KEY`, `TELEGRAM_BOT_USERNAME` | Telegram bot |
 | `R2_*` | Cloudflare R2 file uploads (optional) |
 
 See `.env.example` for the full list.
+
+## Deploy
+
+1. **Deploy the backend before the frontend.** The front calls routes that only exist from this release on (`/market/token-details`, `/market/holders`, `/market/twap`, `/market/revenue/af-buybacks`, `/liquidations/historical/top`, `/hyperfolio/*`) and has no fallback for their absence.
+2. **Environment.** Set `HYPERFOLIO_API_KEY` before the deploy (without it the Yields page and the tracker EVM panels fail). `HYPERFOLIO_DAILY_BUDGET` and `HYPEDEXER_DAILY_CREDIT_BUDGET` are optional.
+3. **Historical migration.** `20260924120000_repair_doubled_liquidation_time_ms` repairs liquidations stored with a doubled `time_ms` (dated around 2083), which every "since X" window counts. It is data-only, touches a handful of rows through the time index, and is idempotent. Check before and after:
+
+   ```sql
+   SELECT count(*) FROM raw_liquidations WHERE time > now() + interval '1 day';
+   ```
+
+   Apply it with `npm run prisma:migrate:historical` (also part of `prisma:migrate:predeploy`). If the count is still above 0 after the new code is live (the old ingestion stored a doubled row after the migration ran), run the migration's SQL again by hand: Prisma will not apply it a second time.
+4. **Smoke tests** once the backend is live (each should answer 200 with data):
+
+   ```bash
+   curl -s "$API/hyperfolio/yield?page=1&page_size=5"                       # not 503 HYPERFOLIO_NOT_CONFIGURED
+   curl -s "$API/market/token-details/0x0d01dc56dcaaca66ad901c959b4011ec"  # HYPE supply
+   curl -s "$API/market/holders/HYPE?page=1&limit=10"
+   curl -s "$API/market/twap?status=active"
+   curl -s "$API/market/revenue/af-buybacks"
+   curl -s "$API/liquidations/historical/top?period=24h&min_amount_dollars=100000&limit=3"
+   ```
+
+   Then deploy the frontend.
 
 ## Documentation
 
