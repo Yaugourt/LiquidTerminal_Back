@@ -3,6 +3,7 @@ import { redisService } from '../../core/redis.service';
 import { AssetContext, SpotContext } from '../../types/market.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../utils/guardedInterval';
+import { positiveIntEnv } from '../../utils/env';
 
 /** `tokenDetails`, the fields read here. */
 interface RawTokenGenesis {
@@ -101,8 +102,11 @@ class HyperliquidReserveClient extends BaseApiService {
  *   reserve and every WATCH_REFRESH_MS for a watched token. A watched token
  *   becomes a reserve, for good, once the address holds PARKED_SHARE of the
  *   circulating supply.
- * - A cycle spends MAX_WEIGHT_PER_CYCLE at most: the other pollers already use
- *   about half of Hyperliquid's 1,200 a minute per IP.
+ * - A cycle spends MAX_WEIGHT_PER_CYCLE at most. Nobody waits on this scan
+ *   (what it finds is kept in Redis), so it slows down first: the live
+ *   pollers and on-demand reads share the IP's 1,200 a minute. Steady state
+ *   is ~80 reserves × 2 every 5 min (~32 a minute); a cold rescan of every
+ *   listed token takes a few hours at 60 instead of ~50 min at 180.
  *
  * Tokens that start on HyperCore (HYPE, PURR…) are left alone: their system
  * address holds what users moved to HyperEVM (35% of the supply at most on
@@ -114,8 +118,8 @@ export class SpotBridgeReserveService {
   private static readonly STORE_KEY = 'spot:bridge-reserve:v1';
   private static readonly SPOT_META_CACHE_KEY = 'spot:raw_data';
   private static readonly CYCLE_MS = 60_000;
-  /** Hyperliquid weight spent per cycle at most. */
-  private static readonly MAX_WEIGHT_PER_CYCLE = 180;
+  /** Hyperliquid weight spent per cycle (a minute) at most; env BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE. */
+  private static readonly MAX_WEIGHT_PER_CYCLE = positiveIntEnv('BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE', 60);
   private static readonly GENESIS_WEIGHT = 20;
   private static readonly BALANCE_WEIGHT = 2;
   private static readonly RESERVE_REFRESH_MS = 5 * 60_000;

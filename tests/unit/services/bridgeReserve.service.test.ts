@@ -10,11 +10,14 @@
  *   a reserve and every 30 for a watched token, oldest first, before any
  *   genesis read; a watched token whose system address holds 99% of the
  *   circulating supply becomes a reserve for good;
- * - a cycle spends 180 weight at most and stops at the first failed read; a
- *   token whose read failed waits before its next try;
+ * - a cycle spends 60 weight at most (BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE;
+ *   these tests run at 180 to see several tokens per cycle) and stops at the
+ *   first failed read; a token whose read failed waits before its next try;
  * - while Redis can't be read the stored state is read again later, nothing
  *   is rescanned and a save never replaces the stored map with a partial one.
  */
+process.env.BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE = '180';
+
 jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
@@ -258,6 +261,18 @@ describe('SpotBridgeReserveService', () => {
     expect(balanceReads()).toEqual(['XAUT0', 'AAPL', 'USDE', 'AXL']);
     expect(reads().slice(0, 2).map((r) => r.type)).toEqual(['tokenDetails', 'spotClearinghouseState']);
     expect(weight()).toBe(8 * 20 + 4 * 2);
+  });
+
+  it('spends 60 weight a cycle by default', async () => {
+    delete process.env.BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE;
+    try {
+      await runCycle(fresh().SpotBridgeReserveService.getInstance());
+      // Two genesis reads and their balances; a third would pass 60.
+      expect(genesisReads()).toEqual(['XAUT0', 'AAPL']);
+      expect(weight()).toBe(2 * 20 + 2 * 2);
+    } finally {
+      process.env.BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE = '180';
+    }
   });
 
   it('serves the reserves: minted on the system address, or parked there by the only genesis holder', async () => {
