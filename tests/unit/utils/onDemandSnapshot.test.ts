@@ -66,4 +66,39 @@ describe('OnDemandSnapshot', () => {
     snap.clear();
     await expect(snap.get()).resolves.toBe(2);
   });
+
+  it('clear() detaches a refresh in flight: its callers get it, the snapshot does not keep it', async () => {
+    let releaseOld!: (v: number) => void;
+    const fetch = jest.fn()
+      .mockReturnValueOnce(new Promise<number>((resolve) => { releaseOld = resolve; }))
+      .mockResolvedValueOnce(2);
+    const snap = make(fetch);
+
+    const waiting = snap.get();
+    snap.clear();
+    // The next reader starts its own refresh instead of joining the detached one.
+    await expect(snap.get()).resolves.toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+
+    releaseOld(1);
+    await expect(waiting).resolves.toBe(1);
+    // The detached result did not replace the current value.
+    await expect(snap.get()).resolves.toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('a load that lands after clear() holds nothing (no eviction timer, nothing served)', async () => {
+    let release!: (v: number) => void;
+    const fetch = jest.fn()
+      .mockReturnValueOnce(new Promise<number>((resolve) => { release = resolve; }))
+      .mockResolvedValueOnce(2);
+    const snap = make(fetch);
+
+    const waiting = snap.get();
+    snap.clear();
+    release(1);
+    await expect(waiting).resolves.toBe(1);
+    expect(snap.getFetchedAt()).toBe(0);
+    expect(jest.getTimerCount()).toBe(0);
+  });
 });

@@ -27,6 +27,8 @@ export class OnDemandSnapshot<T> {
   private snapshot: Snapshot<T> | null = null;
   private inflight: Promise<Snapshot<T> | null> | null = null;
   private evictionTimer: NodeJS.Timeout | null = null;
+  /** Bumped by clear(): a load started before it is not kept. */
+  private generation = 0;
 
   constructor(
     private readonly fetch: () => Promise<T>,
@@ -54,28 +56,38 @@ export class OnDemandSnapshot<T> {
     return this.snapshot?.fetchedAt ?? 0;
   }
 
-  /** Drops the value and its timer (a refresh in flight still lands). */
+  /**
+   * Drops the value and its timer. A refresh in flight is detached: its
+   * callers still get its result, but it is not kept, and the next get()
+   * starts a new one.
+   */
   public clear(): void {
     if (this.evictionTimer) clearTimeout(this.evictionTimer);
     this.evictionTimer = null;
     this.snapshot = null;
+    this.inflight = null;
+    this.generation++;
   }
 
   /** One upstream fetch at a time, whatever the number of callers. */
   private refresh(): Promise<Snapshot<T> | null> {
     if (!this.inflight) {
-      this.inflight = this.load().finally(() => {
-        this.inflight = null;
+      const inflight = this.load(this.generation).finally(() => {
+        if (this.inflight === inflight) this.inflight = null;
       });
+      this.inflight = inflight;
     }
     return this.inflight;
   }
 
-  private async load(): Promise<Snapshot<T> | null> {
+  private async load(generation: number): Promise<Snapshot<T> | null> {
     try {
       const snapshot: Snapshot<T> = { value: await this.fetch(), fetchedAt: Date.now() };
-      this.snapshot = snapshot;
-      this.scheduleEviction(snapshot);
+      // Cleared while loading: an evicted or outdated value is not held again.
+      if (generation === this.generation) {
+        this.snapshot = snapshot;
+        this.scheduleEviction(snapshot);
+      }
       return snapshot;
     } catch {
       return null;
