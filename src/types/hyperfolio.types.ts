@@ -388,6 +388,8 @@ export interface HyperfolioYieldResponse {
       total_apy: number;
       opportunity_count: number;
     };
+    /** Set by this backend when `totals.total_value_usd` is absurd (spam pools priced with fake prices). */
+    totals_untrusted?: boolean;
   };
 }
 

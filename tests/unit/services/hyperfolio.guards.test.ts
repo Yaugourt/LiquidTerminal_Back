@@ -4,7 +4,9 @@
  * - no generic retry on 429 / timeouts, one retry on the burst 403 only;
  * - a process-wide budget caps calls per second;
  * - the service never calls upstream twice for one failed miss, caches bad
- *   input, meters misses per IP and only cools down on a real upstream throttle.
+ *   input, meters misses per IP and only cools down on a real upstream throttle;
+ *   the cooldown refuses misses only: cached answers are still served;
+ * - /yield drops the spam pools priced with fake prices and flags absurd totals.
  */
 const ADDRESS = '0x32309802C8feb2306240893BD79A2E4ba5314e55';
 
@@ -20,6 +22,22 @@ describe('HyperfolioClient guards', () => {
 
   beforeEach(() => {
     jest.resetModules();
+    // No real Redis: the client's daily upstream budget counts in a fake one.
+    jest.doMock('../../../src/core/redis.service', () => ({
+      redisService: {
+        multi: () => {
+          const chain = {
+            incr: () => chain,
+            expire: () => chain,
+            exec: async () => [
+              [null, 1],
+              [null, 1],
+            ],
+          };
+          return chain;
+        },
+      },
+    }));
     fetchMock = jest.fn();
     global.fetch = fetchMock as unknown as typeof fetch;
     HyperfolioClient = require('../../../src/clients/hyperfolio/hyperfolio.client').HyperfolioClient;
@@ -83,7 +101,10 @@ describe('HyperfolioService guards', () => {
   const clientMock = {
     checkRateLimit: jest.fn(() => true),
     getComposition: jest.fn(),
+    getYield: jest.fn(),
   };
+  /** The cache behind cacheService.getOrSet. */
+  const cache = new Map<string, unknown>();
 
   let HyperfolioService: typeof import('../../../src/services/hyperfolio/hyperfolio.service').HyperfolioService;
   let errs: typeof import('../../../src/errors/hyperfolio.errors');
@@ -92,22 +113,29 @@ describe('HyperfolioService guards', () => {
     jest.resetModules();
     clientMock.checkRateLimit.mockReset().mockReturnValue(true);
     clientMock.getComposition.mockReset();
+    clientMock.getYield.mockReset();
+    cache.clear();
     jest.doMock('../../../src/core/redis.service', () => ({
       redisService: { get: jest.fn(), set: jest.fn(), delete: jest.fn(), getClient: jest.fn() },
     }));
     jest.doMock('../../../src/clients/hyperfolio/hyperfolio.client', () => ({
       HyperfolioClient: { getInstance: () => clientMock },
     }));
-    // Same failure semantics as the real cacheService.getOrSet: a throwing
-    // fetchFn is called a second time by its catch-all fallback.
+    // Same semantics as the real cacheService.getOrSet: a hit is served
+    // without fetchFn, and a throwing fetchFn is called a second time by its
+    // catch-all fallback.
     jest.doMock('../../../src/core/cache.service', () => ({
       cacheService: {
-        getOrSet: async <T>(_key: string, fn: () => Promise<T>): Promise<T> => {
+        getOrSet: async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+          if (cache.has(key)) return cache.get(key) as T;
+          let value: T;
           try {
-            return await fn();
+            value = await fn();
           } catch {
-            return fn();
+            value = await fn();
           }
+          cache.set(key, value);
+          return value;
         },
       },
     }));
@@ -148,5 +176,85 @@ describe('HyperfolioService guards', () => {
     expect(service.isRateLimited()).toBe(true);
     await expect(service.getComposition(ADDRESS, '2.2.2.2')).rejects.toBeInstanceOf(errs.HyperfolioRateLimitedError);
     expect(clientMock.getComposition).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps serving cached answers during the cooldown, and refuses misses only', async () => {
+    const OTHER = '0x0000000000000000000000000000000000000001';
+    const service = HyperfolioService.getInstance();
+    clientMock.getComposition.mockResolvedValueOnce({ data: { tokens: ['cached'] } });
+    await service.getComposition(ADDRESS, '1.1.1.1');
+
+    clientMock.getComposition.mockRejectedValueOnce(new errs.HyperfolioRateLimitedError());
+    await expect(service.getComposition(OTHER, '1.1.1.1')).rejects.toBeInstanceOf(errs.HyperfolioRateLimitedError);
+    expect(service.isRateLimited()).toBe(true);
+
+    await expect(service.getComposition(ADDRESS, '2.2.2.2')).resolves.toEqual({ data: { tokens: ['cached'] } });
+    await expect(service.getComposition(OTHER, '2.2.2.2')).rejects.toBeInstanceOf(errs.HyperfolioRateLimitedError);
+    expect(clientMock.getComposition).toHaveBeenCalledTimes(2);
+  });
+
+  it('closes the cooldown 10 s after the upstream throttle, even under steady misses', async () => {
+    let now = 1_000_000;
+    const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const service = HyperfolioService.getInstance();
+      clientMock.getComposition.mockRejectedValueOnce(new errs.HyperfolioRateLimitedError());
+      await expect(service.getComposition(ADDRESS, '1.1.1.1')).rejects.toBeInstanceOf(
+        errs.HyperfolioRateLimitedError
+      );
+
+      // A miss refused by the cooldown 9 s later must not re-arm it.
+      now += 9_000;
+      const other = '0x0000000000000000000000000000000000000002';
+      await expect(service.getComposition(other, '2.2.2.2')).rejects.toBeInstanceOf(
+        errs.HyperfolioRateLimitedError
+      );
+      expect(clientMock.getComposition).toHaveBeenCalledTimes(1);
+
+      now += 2_000;
+      expect(service.isRateLimited()).toBe(false);
+      clientMock.getComposition.mockResolvedValueOnce({ data: { tokens: [] } });
+      await expect(service.getComposition(other, '2.2.2.2')).resolves.toEqual({ data: { tokens: [] } });
+      expect(clientMock.getComposition).toHaveBeenCalledTimes(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('drops /yield rows priced past $20B of TVL and flags totals past $50B', async () => {
+    const row = (id: string, tvlUsd?: number) => ({ id, pool: { address: id, name: id, tvlUsd } });
+    clientMock.getYield.mockResolvedValue({
+      data: [row('real', 1_900_000_000), row('lending'), row('spam', 4.2e13), row('edge', 20_000_000_000)],
+      pagination: { total: 4, page: 1, page_size: 25, total_pages: 1, next: null, prev: null },
+      metadata: {
+        filters: { categories: [], protocols: [] },
+        totals: { total_value_usd: 4.2e13, total_apy: 12, opportunity_count: 4 },
+      },
+    });
+    const service = HyperfolioService.getInstance();
+
+    const res = await service.getYield({ page: 1, page_size: 25 }, '1.1.1.1');
+    expect(res.data.map((r) => r.id)).toEqual(['real', 'lending', 'edge']);
+    expect(res.metadata.totals).toEqual({ total_value_usd: 4.2e13, total_apy: 12, opportunity_count: 4 });
+    expect(res.metadata.totals_untrusted).toBe(true);
+
+    // The cleaned answer is what gets cached.
+    await service.getYield({ page: 1, page_size: 25 }, '2.2.2.2');
+    expect(clientMock.getYield).toHaveBeenCalledTimes(1);
+    expect([...cache.values()][0]).toBe(res);
+  });
+
+  it('leaves sane /yield totals unflagged', async () => {
+    clientMock.getYield.mockResolvedValue({
+      data: [{ id: 'a', pool: { address: 'a', name: 'a', tvlUsd: 5e8 } }],
+      pagination: { total: 1, page: 1, page_size: 25, total_pages: 1, next: null, prev: null },
+      metadata: {
+        filters: { categories: [], protocols: [] },
+        totals: { total_value_usd: 50_000_000_000, total_apy: 8, opportunity_count: 1 },
+      },
+    });
+    const res = await HyperfolioService.getInstance().getYield({}, '1.1.1.1');
+    expect(res.data).toHaveLength(1);
+    expect(res.metadata.totals_untrusted).toBeUndefined();
   });
 });

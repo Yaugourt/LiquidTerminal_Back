@@ -21,6 +21,7 @@ import {
   HyperfolioYieldResponse,
 } from '../../types/hyperfolio.types';
 import { HyperfolioClient } from '../../clients/hyperfolio/hyperfolio.client';
+import { sanitizeYieldResponse } from '../../utils/hyperfolio-yield.util';
 
 /** After an upstream throttle, short-circuit callers for this long. */
 const RATE_LIMIT_COOLDOWN_MS = 10_000;
@@ -67,9 +68,10 @@ export class HyperfolioService {
 
   /**
    * Redis-cached read. Only a cache miss reaches Hyperfolio, and a miss is
-   * gated three ways: the shared cooldown opened by an upstream throttle, the
-   * caller's per-IP budget, and (in the client) the process-wide upstream
-   * budget.
+   * gated three ways: the shared cooldown opened by an upstream throttle
+   * (cached answers are still served meanwhile; only an upstream throttle
+   * arms it), the caller's per-IP budget, and (in the client) the
+   * process-wide upstream budget.
    *
    * cacheService.getOrSet calls `fetchFn` a second time when the first call
    * throws (its catch-all "fall back to direct fetch"). Here that would double
@@ -77,16 +79,16 @@ export class HyperfolioService {
    * request 90 s — so the first failure is memoised and replayed instead.
    */
   private async cached<T>(key: string, ttl: number, ip: string, fetchFn: () => Promise<T>): Promise<T> {
-    if (Date.now() < this.rateLimitedUntil) {
-      throw new HyperfolioRateLimitedError();
-    }
     let failure: unknown = null;
     const result = await cacheService.getOrSet<T | BadInputMarker>(key, async () => {
       if (failure) throw failure;
+      // Outside the try: a miss refused by the cooldown must not re-arm it,
+      // or steady traffic would keep it open forever.
+      if (Date.now() < this.rateLimitedUntil) {
+        failure = new HyperfolioRateLimitedError();
+        throw failure;
+      }
       try {
-        if (Date.now() < this.rateLimitedUntil) {
-          throw new HyperfolioRateLimitedError();
-        }
         if (!this.client.checkRateLimit(ip)) {
           throw new HyperfolioThrottledError();
         }
@@ -213,7 +215,7 @@ export class HyperfolioService {
       HYPERFOLIO_CACHE_KEYS.yield(signature(query)),
       HYPERFOLIO_TTL.yield,
       ip,
-      () => this.client.getYield(query)
+      async () => sanitizeYieldResponse(await this.client.getYield(query))
     );
   }
 }
