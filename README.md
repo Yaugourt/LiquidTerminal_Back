@@ -124,8 +124,8 @@ See `.env.example` for the full list.
 
 ## Deploy
 
-1. **Deploy the backend before the frontend.** The front calls routes that only exist from this release on (`/market/token-details`, `/market/holders`, `/market/twap`, `/market/revenue/af-buybacks`, `/liquidations/historical/top`, `/hyperfolio/*`) and has no fallback for their absence.
-2. **Environment.** Set `HYPERFOLIO_API_KEY` before the deploy (without it the Yields page and the tracker EVM panels fail). `HYPERFOLIO_DAILY_BUDGET` and `HYPEDEXER_DAILY_CREDIT_BUDGET` are optional. `CACHE_LAST_COPY_MAX_BYTES` was renamed `CACHE_LAST_COPY_MAX_CHARS`.
+1. **Deploy the backend before the frontend.** The front calls routes that only exist from this release on (`/market/token-details`, `/market/holders`, `/market/twap`, `/market/revenue/af-buybacks`, `/market/auction/perp`, `/defillama/fee-rank`, `/liquidations/historical/top`, `/explorer/deploys`, `/explorer/aliases`, `/indexer/hip4/live-volumes`, `/indexer/twaps/source` and `/source/deep`, `/hyperfolio/*`) and has no fallback for their absence. The previous front keeps working on this backend, so the backend can go first.
+2. **Environment.** Set `HYPERFOLIO_API_KEY` before the deploy (without it the Yields page and the tracker EVM panels fail). `HYPERFOLIO_DAILY_BUDGET` and `HYPEDEXER_DAILY_CREDIT_BUDGET` are optional.
    **Redis memory.** Check `redis-cli CONFIG GET maxmemory*`: set a `maxmemory` limit with `maxmemory-policy volatile-ttl` (or `volatile-lru`), not `noeviction` nor `allkeys-*` (see [docs/DATABASE_ARCHITECTURE.md](docs/DATABASE_ARCHITECTURE.md#redis-memory)). The backend assumes one instance per outbound IP for its Hyperliquid weight budget.
 3. **Historical migration.** `20260924120000_repair_doubled_liquidation_time_ms` repairs liquidations stored with a doubled `time_ms` (dated around 2083), which every "since X" window counts. It is data-only, touches a handful of rows through the time index, and is idempotent. Check before and after:
 
@@ -133,7 +133,7 @@ See `.env.example` for the full list.
    SELECT count(*) FROM raw_liquidations WHERE time > now() + interval '1 day';
    ```
 
-   Apply it with `npm run prisma:migrate:historical` (also part of `prisma:migrate:predeploy`). If the count is still above 0 after the new code is live (the old ingestion stored a doubled row after the migration ran), run the migration's SQL again by hand: Prisma will not apply it a second time.
+   Apply it with `npm run prisma:migrate:historical` (also part of `prisma:migrate:predeploy`). It is dated before historical migrations production already has (Elysium, builder growth): `prisma migrate status` lists it as not yet applied and `migrate deploy` applies it all the same. If the count is still above 0 after the new code is live (the old ingestion stored a doubled row after the migration ran), run the migration's SQL again by hand: Prisma will not apply it a second time.
 4. **Smoke tests** once the backend is live (each should answer 200 with data):
 
    ```bash
@@ -143,6 +143,13 @@ See `.env.example` for the full list.
    curl -s "$API/market/twap?status=active"
    curl -s "$API/market/revenue/af-buybacks"
    curl -s "$API/liquidations/historical/top?period=24h&min_amount_dollars=100000&limit=3"
+   curl -s "$API/market/auction/perp"
+   curl -s "$API/defillama/fee-rank"
+   curl -s "$API/explorer/deploys"
+   curl -s "$API/explorer/aliases"
+   curl -s "$API/indexer/hip4/live-volumes"
+   curl -s "$API/indexer/twaps/source"
+   curl -s "$API/indexer/twaps/source/deep"
    ```
 
    Then deploy the frontend.
