@@ -75,6 +75,7 @@ import elysiumAnalyticsRoutes from './routes/elysium/elysium-analytics.routes';
 import defillamaRoutes from './routes/defillama/defillama.routes';
 import hyperfolioRoutes from './routes/hyperfolio/hyperfolio.routes';
 import exportRoutes from './routes/export/export.routes';
+import portfolioMarginRoutes from './routes/portfolio-margin/portfolio-margin.routes';
 
 const app = express();
 const server = createServer(app);
@@ -153,6 +154,7 @@ app.use('/market/vaults', vaultsRoutes);
 app.use('/market/fees', feesRoutes);
 app.use('/market/revenue', revenueRoutes);
 app.use('/market/priority-fees', priorityFeesRoutes);
+app.use('/market/portfolio-margin', portfolioMarginRoutes);
 app.use('/wallet', walletRoutes);
 app.use('/project', projectRoutes);
 app.use('/project/csv', projectCsvRoutes);

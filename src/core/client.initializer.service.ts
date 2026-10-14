@@ -22,6 +22,7 @@ import { AggregatePositioningClient } from '../clients/hyperliquid/positioning/a
 import { MetricsSnapshotClient } from '../clients/metrics/metrics-snapshot.client';
 import { ElysiumIngestionService } from '../services/elysium/elysium-ingestion.service';
 import { BuilderGrowthService } from '../services/builders/builder-growth.service';
+import { PortfolioMarginService } from '../services/portfolio-margin/portfolio-margin.service';
 import { ElysiumAnalyticsService } from '../services/elysium/elysium-analytics.service';
 import { ElysiumEcosystemService } from '../services/elysium/elysium-ecosystem.service';
 import { HLIndexerActiveUsersClient } from '../clients/hypedexer/rest/activeusers/activeusers.client';
@@ -213,6 +214,11 @@ export class ClientInitializerService {
       // startPolling() is a no-op when BUILDER_GROWTH_ENABLED=false.
       this.clients.set('builderGrowth', BuilderGrowthService.getInstance());
       logDeduplicator.info('Builder growth service initialized successfully');
+
+      // Portfolio margin accounts (leaderboard scan + borrow/lend state, all through the HypeDexer proxy).
+      // startPolling() is a no-op when PM_SCAN_ENABLED=false.
+      this.clients.set('portfolioMargin', PortfolioMarginService.getInstance());
+      logDeduplicator.info('Portfolio margin service initialized successfully');
 
       // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
       const ingestionService = LiquidationsIngestionService.getInstance();
