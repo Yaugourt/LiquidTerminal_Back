@@ -418,6 +418,13 @@ Token pages also carry FR-49..51.
 | FR-79 | TradeExplorer rows; summary | `/indexer/completed-trades/`; `/summary` | 15 s (`src/services/market/trade-explorer/index.ts:53`); 60 s (`:69`) | 15 s (`hypedexer.cache.ts:101`) | 30 s; 75 s | P |
 | FR-80 | Yields directory | `/hyperfolio/yield` | 300 s (`src/services/market/yields/hooks/useYieldsDirectory.ts:42`) | 120 s | 7 min | P |
 
+#### `/market/portfolio-margin`
+
+| ID | Widget | Source | Cadence | Backend | Worst | Hidden |
+|---|---|---|---|---|---|---|
+| FR-146 | Ribbon, reserves, borrowers | `/market/portfolio-margin` | 60 s (`src/services/market/portfolio-margin/index.ts`) | reserves 30 s; accounts refreshed by BK-P-26 (borrowers 5 min, others 30 min) | reserves 90 s; a borrower ~6 min | P |
+| FR-147 | USDC borrowed, HYPE collateral charts | `/market/portfolio-margin/history?interval=4h` (token 0 and 150) | 300 s | 300 s (BK-R-44) | 10 min | P |
+
 #### `/market/tracker` (+`my-wallets`)
 
 | ID | Widget | Source | Cadence | Backend | Worst | Hidden |
