@@ -13,7 +13,7 @@ import type { LeaderboardResponse } from '../../types/leaderboard.types';
  * account with a balance, and each eligible one (account value between $10k
  * and $25M, the documented eligibility caps) is checked once with
  * `userAbstraction`. Found accounts are refreshed with `borrowLendUserState`
- * and `clearinghouseState`.
+ * and `clearinghouseState`: borrowers every 5 min, the others every 30 min.
  *
  * Every per-account call goes through the HypeDexer /info proxy (3 credits a
  * call), never api.hyperliquid.xyz, so the scan costs nothing against our
@@ -33,7 +33,9 @@ const MAX_ACCOUNT_VALUE = 25_000_000;
 const SCAN_PER_TICK = Number(process.env.PM_SCAN_PER_MIN || 120);
 /** A checked account is checked again after this long (people switch modes). */
 const RESCAN_AFTER_MS = 3 * 24 * 3600 * 1000;
-const REFRESH_EVERY_MS = 2 * 60 * 1000;
+/** Borrowers are re-read every 5 min, accounts without debt every 30 min (3 credits a call, 2 calls an account). */
+const REFRESH_EVERY_MS = 5 * 60 * 1000;
+const IDLE_REFRESH_EVERY_MS = 30 * 60 * 1000;
 /** HypeDexer starts answering 429 past a few calls in flight per key. */
 const CONCURRENCY = 2;
 const TIMEOUT_MS = 10_000;
@@ -251,7 +253,10 @@ export class PortfolioMarginService {
     if (!this.accounts.size) return;
     const reserves = await this.getReserves();
     const byToken = new Map(reserves.map((r) => [r.token, r]));
-    const addresses = [...this.accounts.keys()];
+    const now = Date.now();
+    const addresses = [...this.accounts.values()]
+      .filter((a) => a.debtUsd > 0 || now - a.updatedAt >= IDLE_REFRESH_EVERY_MS)
+      .map((a) => a.address);
     const fresh = await pool(addresses, CONCURRENCY, async (address) => {
       try {
         const [bl, ch] = await Promise.all([
