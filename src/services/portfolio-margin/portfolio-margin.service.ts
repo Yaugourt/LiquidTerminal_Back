@@ -2,14 +2,14 @@ import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../../clients/hypedexer
 import { redisService } from '../../core/redis.service';
 import { cacheService } from '../../core/cache.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import type { LeaderboardResponse } from '../../types/leaderboard.types';
+import { HyperliquidLeaderboardClient } from '../../clients/hyperliquid/leaderboard/leaderboard.client';
 
 /**
  * Hyperliquid portfolio margin: borrow/lend reserves and the accounts that
  * use them.
  *
  * Hyperliquid has no list of portfolio margin accounts, so we find them: the
- * leaderboard (already cached by HyperliquidLeaderboardClient) gives every
+ * leaderboard (HyperliquidLeaderboardClient, read every 6 h) gives every
  * account with a balance, and each eligible one (account value between $10k
  * and $25M, the documented eligibility caps) is checked once with
  * `userAbstraction`. Found accounts are refreshed with `borrowLendUserState`
@@ -22,7 +22,8 @@ import type { LeaderboardResponse } from '../../types/leaderboard.types';
  */
 
 const INFO_URL = `${HYPEDEXER_API_URL}/info`;
-const LEADERBOARD_KEY = 'leaderboard:data';
+/** The leaderboard (~40 MB) is downloaded on demand; we keep only the eligible addresses, re-read every 6 h. */
+const CANDIDATES_EVERY_MS = 6 * 3600 * 1000;
 const ACCOUNTS_KEY = 'pm:accounts';
 const SCANNED_KEY = 'pm:scanned';
 const ACCOUNTS_TTL_S = 7 * 24 * 3600;
@@ -149,6 +150,8 @@ export class PortfolioMarginService {
   private readonly scanned = new Map<string, { mode: string; at: number }>();
   private accounts = new Map<string, PmAccount>();
   private candidates = 0;
+  private eligible: { address: string; value: number }[] = [];
+  private eligibleAt = 0;
   private lastRefresh = 0;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -201,13 +204,18 @@ export class PortfolioMarginService {
 
   /** Check the account mode of the next eligible leaderboard accounts, largest first. */
   private async scanBatch(): Promise<void> {
-    const raw = await redisService.get(LEADERBOARD_KEY);
-    if (!raw) return;
-    const rows = (JSON.parse(raw) as LeaderboardResponse).leaderboardRows;
-    const eligible = rows
-      .map((r) => ({ address: r.ethAddress.toLowerCase(), value: Number(r.accountValue) }))
-      .filter((r) => r.value >= MIN_ACCOUNT_VALUE && r.value <= MAX_ACCOUNT_VALUE)
-      .sort((a, b) => b.value - a.value);
+    if (!this.eligible.length || Date.now() - this.eligibleAt > CANDIDATES_EVERY_MS) {
+      const board = await HyperliquidLeaderboardClient.getInstance().getLeaderboardData();
+      if (board) {
+        this.eligible = board.leaderboardRows
+          .map((r) => ({ address: r.ethAddress.toLowerCase(), value: Number(r.accountValue) }))
+          .filter((r) => r.value >= MIN_ACCOUNT_VALUE && r.value <= MAX_ACCOUNT_VALUE)
+          .sort((a, b) => b.value - a.value);
+        this.eligibleAt = Date.now();
+      }
+    }
+    const eligible = this.eligible;
+    if (!eligible.length) return;
     this.candidates = eligible.length;
 
     const now = Date.now();
