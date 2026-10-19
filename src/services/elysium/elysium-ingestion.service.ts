@@ -7,6 +7,7 @@ import { withDistributedLock } from '../../utils/distributedLock';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { rawLogger } from '../../utils/logger';
 import { ElysiumIngestRepository, ElysiumStream } from '../../repositories/prisma/prisma.elysium.repository';
+import { ElysiumRpcLogs } from './elysium-rpc-logs';
 import {
   dedupeBy,
   ELYSIUM_GENESIS,
@@ -60,6 +61,14 @@ class PageCapError extends Error {
 }
 /** At most ~2 upstream calls per second across every stream. */
 const MIN_CALL_GAP_MS = 500;
+/** How often the provider's last indexed block time is read. */
+const HEAD_REFRESH_MS = 30_000;
+/** Behind the clock by more than this, the provider counts as lagging. */
+const HEAD_LAG_MS = 2 * MINUTE_MS;
+
+/** Where a log window is read from: the provider's /logs, or the public RPC while the provider lags. */
+type LogSource = 'provider' | 'rpc';
+
 /** Work budget per tick so a lock never outlives its TTL. */
 const TICK_BUDGET_MS = 40_000;
 const LOCK_TTL_S = 120;
@@ -149,6 +158,11 @@ class IngestStoppedError extends Error {
  *   database every 30 min (cached permanently, misses retried daily).
  * - tokenstats: holder counts (/tokens/{address}) for the top tokens only.
  *
+ * Provider lag: no stream moves its cursor past the last block the provider
+ * has indexed (its /stats last_block_time), so an indexer outage leaves no
+ * hole once it recovers. Meanwhile the log streams (dex, launchpad) read the
+ * windows the provider has not reached from the public RPC (eth_getLogs).
+ *
  * Each stream is a self-rescheduling loop (single flight by construction),
  * guarded by a Redis lock, and never throws: failures are recorded in
  * elysium_ingest_state.last_error and the stream backs off.
@@ -159,6 +173,9 @@ export class ElysiumIngestionService {
   private readonly client = HypeDexerElysiumIndexerClient.getInstance();
   private readonly repo = ElysiumIngestRepository.getInstance();
   private readonly throttle = new CallThrottle();
+  private readonly rpcLogs = ElysiumRpcLogs.getInstance();
+  /** Last read of the provider's head, null until the first successful read. */
+  private head: { at: number; value: Date | null } | null = null;
 
   private stopped = true;
   private timers = new Map<ElysiumStream, NodeJS.Timeout>();
@@ -255,6 +272,50 @@ export class ElysiumIngestionService {
     return TOKENS_INTERVAL_MS;
   }
 
+  /**
+   * The time streams may ingest up to: now, or the provider's last indexed block time when it
+   * lags. A failed read keeps the last known head for a while, then falls back to the clock.
+   */
+  private async ingestHorizon(): Promise<{ now: Date; head: Date | null; lagging: boolean }> {
+    const clock = Date.now();
+    if (!this.head || clock - this.head.at >= HEAD_REFRESH_MS) {
+      try {
+        await this.throttle.wait();
+        this.head = { at: clock, value: await this.client.fetchIngestHead() };
+      } catch (error) {
+        if (!this.head || clock - this.head.at > 5 * HEAD_REFRESH_MS) this.head = { at: clock, value: null };
+        logDeduplicator.warn('Elysium ingest: provider head unavailable', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        });
+      }
+    }
+    const head = this.head?.value ?? null;
+    const lagging = head !== null && clock - head.getTime() > HEAD_LAG_MS;
+    return { now: lagging && head ? head : new Date(clock), head, lagging };
+  }
+
+  /** The source for a log window: the provider up to its head, the RPC beyond it. */
+  private logSource(end: Date, head: Date | null, lagging: boolean): LogSource {
+    return lagging && head !== null && end.getTime() > head.getTime() ? 'rpc' : 'provider';
+  }
+
+  /** Every log with `topic0` in the window, page by page, from the chosen source. */
+  private async pageLogs(
+    source: LogSource,
+    topic0: string,
+    start: Date,
+    end: Date,
+    onPage: (rows: unknown[]) => Promise<void>
+  ): Promise<void> {
+    if (source === 'rpc') {
+      this.ensureRunning();
+      await onPage(await this.rpcLogs.getLogs(topic0, start, end));
+      return;
+    }
+    const time = { start_time: toUpstreamTime(start), end_time: toUpstreamTime(end) };
+    await this.pageAll('/logs', { ...time, topic0 }, onPage, { truncate: true });
+  }
+
   private ensureRunning(): void {
     if (this.stopped) throw new IngestStoppedError();
   }
@@ -296,10 +357,11 @@ export class ElysiumIngestionService {
 
     while (Date.now() < deadline) {
       this.ensureRunning();
+      const { now } = await this.ingestHorizon();
       const w = planWindow({
         cursor,
         backfillDone,
-        now: new Date(),
+        now,
         genesis: ELYSIUM_GENESIS,
         stepMs: this.txStepMs,
         overlapMs: TX_OVERLAP_MS,
@@ -383,15 +445,18 @@ export class ElysiumIngestionService {
       let cursor = state?.cursor ?? null;
       while (Date.now() < deadline) {
         this.ensureRunning();
+        const { now, lagging } = await this.ingestHorizon();
         const w = planWindow({
           cursor,
           backfillDone: false,
-          now: new Date(),
+          now,
           genesis: ELYSIUM_GENESIS,
           stepMs: BRIDGE_BACKFILL_STEP_MS,
           overlapMs: 0,
           settleMs: 0,
         });
+        // Caught up with a lagging provider: stay in backfill until it moves on.
+        if (!w && lagging) return BRIDGE_LIVE_INTERVAL_MS;
         if (!w) {
           await this.repo.advance('bridge', { addRows: 0, backfillDone: true });
           break;
@@ -403,9 +468,10 @@ export class ElysiumIngestionService {
         await this.repo.advance('bridge', {
           cursor: w.end,
           addRows: changed,
-          ...(w.caughtUp ? { backfillDone: true } : {}),
+          ...(w.caughtUp && !lagging ? { backfillDone: true } : {}),
         });
         cursor = w.end;
+        if (w.caughtUp && lagging) return BRIDGE_LIVE_INTERVAL_MS;
         if (w.caughtUp) {
           void rawLogger.info('Elysium ingest: bridge backfill complete');
           break;
@@ -456,26 +522,25 @@ export class ElysiumIngestionService {
   // dex stream
   // ---------------------------------------------------------------------------
 
-  private async ingestDexWindow(start: Date, end: Date): Promise<number> {
-    const time = { start_time: toUpstreamTime(start), end_time: toUpstreamTime(end) };
+  private async ingestDexWindow(start: Date, end: Date, source: LogSource): Promise<number> {
     let inserted = 0;
     for (const topic0 of [DEX_TOPICS.v2PairCreated, DEX_TOPICS.v3PoolCreated]) {
-      await this.pageAll('/logs', { ...time, topic0 }, async (raw) => {
+      await this.pageLogs(source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(
           raw.map(decodePoolCreated).filter((r): r is DexPoolRow => r !== null),
           (r) => r.pool
         );
         inserted += await this.repo.insertDexPools(rows);
-      }, { truncate: true });
+      });
     }
     for (const topic0 of [DEX_TOPICS.v2Swap, DEX_TOPICS.v3Swap]) {
-      await this.pageAll('/logs', { ...time, topic0 }, async (raw) => {
+      await this.pageLogs(source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(
           raw.map(decodeSwap).filter((r): r is DexSwapRow => r !== null),
           (r) => `${r.tx_hash}:${r.log_index}`
         );
         inserted += await this.repo.insertDexSwaps(rows);
-      }, { truncate: true });
+      });
     }
     return inserted;
   }
@@ -488,6 +553,7 @@ export class ElysiumIngestionService {
 
     while (Date.now() < deadline) {
       this.ensureRunning();
+      const { head, lagging } = await this.ingestHorizon();
       const w = planWindow({
         cursor,
         backfillDone,
@@ -498,7 +564,7 @@ export class ElysiumIngestionService {
         settleMs: DEX_SETTLE_MS,
       });
       if (!w) return DEX_LIVE_INTERVAL_MS;
-      const inserted = await this.ingestDexWindow(w.start, w.end);
+      const inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging));
       const finishesBackfill = !backfillDone && w.caughtUp;
       await this.repo.advance('dex', {
         cursor: w.end,
@@ -609,7 +675,7 @@ export class ElysiumIngestionService {
     return processed < addresses.length ? 5_000 : TOKEN_STATS_INTERVAL_MS;
   }
   // ---------------------------------------------------------------------------
-  // launchpad stream (Chainzy, CorePad, Signal: launches, graduations, trades)
+  // launchpad stream (Chainzy, CorePad, Signal, Neuriio: launches, graduations, trades)
   // ---------------------------------------------------------------------------
 
   private async launchMarkets(): Promise<Map<string, LaunchMarket>> {
@@ -621,36 +687,38 @@ export class ElysiumIngestionService {
     return markets;
   }
 
-  private async ingestLaunchpadWindow(start: Date, end: Date): Promise<number> {
-    const time = { start_time: toUpstreamTime(start), end_time: toUpstreamTime(end) };
+  private async ingestLaunchpadWindow(start: Date, end: Date, source: LogSource): Promise<number> {
     let inserted = 0;
     // Launches first, so trades in the same window find their market.
     for (const topic0 of LAUNCH_TOPIC_ORDER) {
-      await this.pageAll('/logs', { ...time, topic0 }, async (raw) => {
+      await this.pageLogs(source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(
           raw.map(decodeLaunch).filter((r): r is LaunchRow => r !== null),
           (r) => r.token
         );
         inserted += await this.repo.insertLaunches(rows);
-      }, { truncate: true });
+      });
     }
-    const markets = await this.launchMarkets();
+    const known = await this.launchMarkets();
     for (const topic0 of GRADUATION_TOPICS) {
-      await this.pageAll('/logs', { ...time, topic0 }, async (raw) => {
-        const rows = raw
-          .map(decodeGraduation)
-          .filter((g): g is NonNullable<typeof g> => g !== null && markets.has(g.curve));
+      await this.pageLogs(source, topic0, start, end, async (raw) => {
+        const rows = raw.map(decodeGraduation).filter((g): g is NonNullable<typeof g> => {
+          const key = g?.curve ?? g?.token;
+          return key !== null && key !== undefined && known.has(key);
+        });
         await this.repo.markGraduated(rows);
-      }, { truncate: true });
+      });
     }
+    // Graduations can add a pair (Neuriio): rebuild the markets so its swaps in this window are kept.
+    const markets = await this.launchMarkets();
     for (const topic0 of TRADE_TOPICS) {
-      await this.pageAll('/logs', { ...time, topic0 }, async (raw) => {
+      await this.pageLogs(source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(
           raw.map((r) => decodeLaunchTrade(r, markets)).filter((r): r is LaunchTradeRow => r !== null),
           (r) => `${r.tx_hash}:${r.log_index}`
         );
         inserted += await this.repo.insertLaunchTrades(rows);
-      }, { truncate: true });
+      });
     }
     return inserted;
   }
@@ -663,6 +731,7 @@ export class ElysiumIngestionService {
 
     while (Date.now() < deadline) {
       this.ensureRunning();
+      const { head, lagging } = await this.ingestHorizon();
       const w = planWindow({
         cursor,
         backfillDone,
@@ -673,7 +742,7 @@ export class ElysiumIngestionService {
         settleMs: LAUNCHPAD_SETTLE_MS,
       });
       if (!w) return LAUNCHPAD_LIVE_INTERVAL_MS;
-      const inserted = await this.ingestLaunchpadWindow(w.start, w.end);
+      const inserted = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging));
       const finishesBackfill = !backfillDone && w.caughtUp;
       await this.repo.advance('launchpad', {
         cursor: w.end,

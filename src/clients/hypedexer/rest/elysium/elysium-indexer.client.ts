@@ -186,6 +186,17 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
     return this.fetchElysium(`/user/${address}/bridge`, params);
   }
 
+  /** Time of the last block the provider has indexed (from /stats), for the ingestion service. */
+  public async fetchIngestHead(): Promise<Date | null> {
+    const data = await this.ingestCircuitBreaker.execute(() => this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}/stats`));
+    const raw = data && typeof data === 'object' ? (data as Record<string, unknown>).last_block_time : null;
+    if (typeof raw !== 'string' || raw.trim() === '') return null;
+    const s = raw.trim();
+    // Upstream times are UTC without a zone suffix.
+    const d = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(s) ? s : `${s}Z`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
   /** Single token detail (holders, supply) for the ingestion service. */
   public async fetchIngestToken(address: string): Promise<Record<string, unknown>> {
     if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error('Elysium ingest: invalid token address');

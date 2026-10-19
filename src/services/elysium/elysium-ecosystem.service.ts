@@ -3,18 +3,36 @@ import { cacheService } from '../../core/cache.service';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { ELYSIUM_PROJECTS, ElysiumProject } from '../../constants/elysium-projects';
-import { CURVE_SALE_SUPPLY, HYPE_QUOTES, LAUNCH_TOTAL_SUPPLY } from './elysium-launchpad.util';
+import { CURVE_SALE_SUPPLY, HYPE_QUOTES, LAUNCH_TOTAL_SUPPLY, Launchpad, quoteDecimals, USD_QUOTES } from './elysium-launchpad.util';
 
 const CACHE_TTL_S = 60;
 /** How long a computed value is kept to be served while it refreshes. */
 const KEEP_S = 6 * 3600;
-const PROJECTS_KEY = 'elysium:ecosystem:projects:v3';
+const PROJECTS_KEY = 'elysium:ecosystem:projects:v4';
+const ALL_TIME_KEY = 'elysium:ecosystem:alltime:v1';
+/** All-time counts scan every tx ever sent to a project: refreshed every 10 min, not every minute. */
+const ALL_TIME_TTL_S = 600;
+const VERIFIED_KEY = 'elysium:ecosystem:verified:v1';
+const VERIFIED_TTL_MS = 6 * 3600_000;
+/** Etherscan-style API of the Kinetiq explorer (testnet), where Elysium contracts get verified. */
+const EXPLORER_API = 'https://elysium.kinetiq.xyz/api/';
+const EXPLORER_CONCURRENCY = 4;
 const TOKENS_KEY = 'elysium:ecosystem:launchpads:v1';
 const PERP_MARKETS_CACHE_KEY = 'perp:markets';
 const DAY_MS = 86_400_000;
 /** Length of the daily active-user series, in rolling 24h buckets ending now. */
 const SERIES_DAYS = 14;
-const WEI = 1e18;
+
+/** USD value of one unit of a launch quote: the HYPE price for HYPE quotes, $1 for test USDC, else null. */
+function quoteUsd(quote: string, hypeUsd: number | null): number | null {
+  if (USD_QUOTES.includes(quote)) return 1;
+  return HYPE_QUOTES.includes(quote) ? hypeUsd : null;
+}
+
+/** Raw quote amount (decimal string) to quote units. */
+function quoteUnits(raw: string | null, quote: string): number {
+  return raw ? Number(raw) / 10 ** quoteDecimals(quote) : 0;
+}
 
 export interface ElysiumProjectView extends Omit<ElysiumProject, 'contracts'> {
   contracts: number;
@@ -31,6 +49,21 @@ export interface ElysiumProjectView extends Omit<ElysiumProject, 'contracts'> {
   /** Launchpads only: traded volume (USD) and tokens launched over 7 days. */
   volume7d: number | null;
   launches7d: number | null;
+  /** Since the first block: non-spam txs and distinct wallets sent to the project's contracts; null without contracts. */
+  txsAll: number | null;
+  walletsAll: number | null;
+  /** First non-spam tx to one of its contracts (ISO), null if none yet. */
+  firstTxAt: string | null;
+  /** Listed contracts with verified source on the explorer; null until the first check ran. */
+  verifiedContracts: number | null;
+}
+
+interface AllTimeRow {
+  slug: string;
+  txs: number;
+  wallets: number;
+  /** Unix seconds. */
+  first_at: number | null;
 }
 
 export interface ElysiumLaunchTokenView {
@@ -114,6 +147,76 @@ export class ElysiumEcosystemService {
     return cacheService.getOrRefresh(TOKENS_KEY, () => this.computeTokens(), CACHE_TTL_S, KEEP_S);
   }
 
+  private verifying = false;
+
+  /** All-time activity per project, cached apart from the 60s refresh. */
+  private getAllTime(): Promise<AllTimeRow[]> {
+    return cacheService.getOrRefresh(ALL_TIME_KEY, () => this.computeAllTime(), ALL_TIME_TTL_S, KEEP_S);
+  }
+
+  private async computeAllTime(): Promise<AllTimeRow[]> {
+    const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
+    return prismaHistorical.$queryRaw<AllTimeRow[]>`
+      WITH reg AS (
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
+      )
+      SELECT reg.slug, count(*)::int AS txs, count(DISTINCT t.from_addr)::int AS wallets,
+             extract(epoch FROM min(t.block_time))::float8 AS first_at
+      FROM reg
+      JOIN elysium_tx t ON t.to_addr = reg.addr AND NOT t.is_spam
+      GROUP BY reg.slug`;
+  }
+
+  /**
+   * Addresses with verified source, from the explorer. Never blocks the directory: a stale or
+   * missing entry starts a background refresh and the last known set (or null) is served meanwhile.
+   */
+  private async readVerified(): Promise<Set<string> | null> {
+    let entry: { at: number; addresses: string[] } | null = null;
+    try {
+      const raw = await redisService.get(VERIFIED_KEY);
+      entry = raw ? (JSON.parse(raw) as { at: number; addresses: string[] }) : null;
+    } catch {
+      entry = null;
+    }
+    if ((!entry || Date.now() - entry.at > VERIFIED_TTL_MS) && !this.verifying) {
+      this.verifying = true;
+      void this.refreshVerified().finally(() => {
+        this.verifying = false;
+      });
+    }
+    return entry ? new Set(entry.addresses) : null;
+  }
+
+  private async refreshVerified(): Promise<void> {
+    const addresses = [...new Set(ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => c.address)))];
+    const verified: string[] = [];
+    let failed = 0;
+    for (let i = 0; i < addresses.length; i += EXPLORER_CONCURRENCY) {
+      await Promise.all(
+        addresses.slice(i, i + EXPLORER_CONCURRENCY).map(async (address) => {
+          try {
+            const res = await fetch(`${EXPLORER_API}?module=contract&action=getsourcecode&address=${address}`, {
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const body = (await res.json()) as { result?: Array<{ ContractName?: string; SourceCode?: string }> };
+            const hit = body.result?.[0];
+            if (hit?.ContractName || hit?.SourceCode) verified.push(address);
+          } catch {
+            failed++;
+          }
+        })
+      );
+    }
+    // A partial pass would undercount: keep the previous set if too many lookups failed.
+    if (failed > addresses.length / 4) {
+      logDeduplicator.warn('ElysiumEcosystemService: explorer verification lookups failed', { failed });
+      return;
+    }
+    await redisService.set(VERIFIED_KEY, JSON.stringify({ at: Date.now(), addresses: verified }), 7 * 24 * 3600);
+  }
+
   /** HYPE mid from the perp markets cache kept warm by the market pollers. */
   private async readHypeUsd(): Promise<number | null> {
     try {
@@ -137,7 +240,7 @@ export class ElysiumEcosystemService {
     const [since1, since2, since7, since14] = [ago(1), ago(2), ago(7), ago(SERIES_DAYS)];
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
 
-    const [activity, daily, pads, hypeUsd] = await Promise.all([
+    const [activity, daily, pads, padVolumes, hypeUsd, allTime, verified] = await Promise.all([
       prismaHistorical.$queryRaw<ActivityRow[]>`
         WITH reg AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
@@ -164,20 +267,34 @@ export class ElysiumEcosystemService {
         JOIN elysium_tx t ON t.to_addr = reg.addr AND t.block_time >= ${since14}::timestamptz
                          AND t.block_time <= ${nowIso}::timestamptz AND NOT t.is_spam
         GROUP BY 1, 2`,
-      prismaHistorical.$queryRaw<Array<{ launchpad: string; volume: string | null; launches: number }>>`
-        SELECT l.launchpad,
-               (SELECT sum(tr.quote_amount) FROM elysium_launch_trade tr
-                  JOIN elysium_launch l2 ON l2.token = tr.token
-                 WHERE l2.launchpad = l.launchpad AND l2.quote = ANY(${HYPE_QUOTES}::text[])
-                   AND tr.block_time >= ${since7}::timestamptz)::text AS volume,
-               count(*) FILTER (WHERE l.created_at >= ${since7}::timestamptz)::int AS launches
+      prismaHistorical.$queryRaw<Array<{ launchpad: string; launches: number }>>`
+        SELECT l.launchpad, count(*) FILTER (WHERE l.created_at >= ${since7}::timestamptz)::int AS launches
         FROM elysium_launch l
         GROUP BY l.launchpad`,
+      // Per quote, since a launchpad can price tokens in HYPE and in test USDC (Neuriio).
+      prismaHistorical.$queryRaw<Array<{ launchpad: string; quote: string; volume: string | null }>>`
+        SELECT l.launchpad, l.quote, sum(tr.quote_amount)::text AS volume
+        FROM elysium_launch_trade tr
+        JOIN elysium_launch l ON l.token = tr.token
+        WHERE tr.block_time >= ${since7}::timestamptz
+        GROUP BY l.launchpad, l.quote`,
       this.readHypeUsd(),
+      this.getAllTime(),
+      this.readVerified(),
     ]);
 
+    const allBySlug = new Map(allTime.map((r) => [r.slug, r]));
     const bySlug = new Map(activity.map((r) => [r.slug, r]));
     const byPad = new Map(pads.map((r) => [r.launchpad, r]));
+    // USD volume per launchpad. Trades on quotes we cannot value are left out; a HYPE quote
+    // without a HYPE price makes the whole figure unknown rather than understated.
+    const padUsd = new Map<string, number | null>();
+    for (const r of padVolumes) {
+      if (!HYPE_QUOTES.includes(r.quote) && !USD_QUOTES.includes(r.quote)) continue;
+      const usd = quoteUsd(r.quote, hypeUsd);
+      const prev = padUsd.has(r.launchpad) ? padUsd.get(r.launchpad)! : 0;
+      padUsd.set(r.launchpad, prev === null || usd === null ? null : prev + quoteUnits(r.volume, r.quote) * usd);
+    }
     const series = new Map<string, number[]>();
     for (const r of daily) {
       if (r.bucket < 0 || r.bucket >= SERIES_DAYS) continue;
@@ -187,9 +304,10 @@ export class ElysiumEcosystemService {
     }
     const projects = ELYSIUM_PROJECTS.map(({ contracts, ...p }) => {
       const hit = bySlug.get(p.slug);
+      const firstAt = allBySlug.get(p.slug)?.first_at ?? null;
       const has = contracts.length > 0;
       const pad = p.launchpad ? byPad.get(p.launchpad) : undefined;
-      const volumeHype = pad?.volume ? Number(pad.volume) / WEI : 0;
+      const volume = p.launchpad ? padUsd.get(p.launchpad) : undefined;
       return {
         ...p,
         contracts: contracts.length,
@@ -199,8 +317,12 @@ export class ElysiumEcosystemService {
         usersPrev24h: has ? (hit?.wallets_prev24 ?? 0) : null,
         usersPrev7d: has ? (hit?.wallets_prev7 ?? 0) : null,
         usersDaily: has ? (series.get(p.slug) ?? new Array<number>(SERIES_DAYS).fill(0)) : [],
-        volume7d: p.launchpad && hypeUsd !== null ? volumeHype * hypeUsd : null,
+        volume7d: p.launchpad ? (volume === undefined ? (hypeUsd === null ? null : 0) : volume) : null,
         launches7d: p.launchpad ? (pad?.launches ?? 0) : null,
+        txsAll: has ? (allBySlug.get(p.slug)?.txs ?? 0) : null,
+        walletsAll: has ? (allBySlug.get(p.slug)?.wallets ?? 0) : null,
+        firstTxAt: firstAt ? new Date(firstAt * 1000).toISOString() : null,
+        verifiedContracts: verified ? contracts.filter((c) => verified.has(c.address)).length : null,
       };
     });
     return { projects, computedAt: now.toISOString() };
@@ -248,11 +370,11 @@ export class ElysiumEcosystemService {
     ]);
 
     const tokens = rows.map((r): ElysiumLaunchTokenView => {
-      // Only HYPE-quoted launches get a USD value; anything else stays unpriced.
-      const usd = HYPE_QUOTES.includes(r.quote) ? hypeUsd : null;
+      // HYPE-quoted launches are valued at the HYPE price, test-USDC ones at $1; anything else stays unpriced.
+      const usd = quoteUsd(r.quote, hypeUsd);
       const priceUsd = r.price !== null && usd !== null ? r.price * usd : null;
       const change24h = r.price !== null && r.price_24h ? (r.price / r.price_24h - 1) * 100 : null;
-      const sale = r.launchpad === 'CorePad' || r.launchpad === 'Signal' ? CURVE_SALE_SUPPLY[r.launchpad] : null;
+      const sale = CURVE_SALE_SUPPLY[r.launchpad as Launchpad] ?? null;
       let curvePct: number | null = null;
       if (r.kind === 'curve' && sale) {
         curvePct = r.graduated ? 100 : Math.max(0, Math.min(100, (Number(r.sold ?? 0) / Number(sale)) * 100));
@@ -265,7 +387,7 @@ export class ElysiumEcosystemService {
         creator: r.creator,
         priceUsd,
         change24h,
-        volume24h: usd !== null ? (r.vol24 ? (Number(r.vol24) / WEI) * usd : 0) : null,
+        volume24h: usd !== null ? quoteUnits(r.vol24, r.quote) * usd : null,
         txns24h: r.txns24 ?? 0,
         traders24h: r.traders24 ?? 0,
         holders: r.holders,

@@ -413,18 +413,23 @@ export class ElysiumIngestRepository {
     );
   }
 
-  /** Marks curve launches as graduated (first graduation time wins). */
+  /**
+   * Marks curve launches as graduated (first graduation time wins), matched by curve contract or,
+   * for pads that hold every curve (Neuriio), by token; records the pair when the event names it.
+   */
   public async markGraduated(rows: GraduationRow[]): Promise<number> {
     if (rows.length === 0) return 0;
     return prismaHistorical.$executeRawUnsafe(
       `
-      UPDATE elysium_launch l SET graduated_at = g.graduated_at
+      UPDATE elysium_launch l
+      SET graduated_at = coalesce(l.graduated_at, g.graduated_at), pool = coalesce(l.pool, g.pool)
       FROM (
-        SELECT curve, min(graduated_at) AS graduated_at
-        FROM jsonb_to_recordset($1::jsonb) AS r(curve text, graduated_at timestamptz)
-        GROUP BY curve
+        SELECT curve, token, min(pool) AS pool, min(graduated_at) AS graduated_at
+        FROM jsonb_to_recordset($1::jsonb) AS r(curve text, token text, pool text, graduated_at timestamptz)
+        GROUP BY curve, token
       ) g
-      WHERE l.curve = g.curve AND l.graduated_at IS NULL
+      WHERE ((g.curve IS NOT NULL AND l.curve = g.curve) OR (g.token IS NOT NULL AND l.token = g.token))
+        AND (l.graduated_at IS NULL OR (l.pool IS NULL AND g.pool IS NOT NULL))
       `,
       JSON.stringify(rows)
     );

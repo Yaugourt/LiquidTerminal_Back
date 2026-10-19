@@ -1,5 +1,5 @@
 /**
- * Pure decoders for the Elysium launchpads (Chainzy, CorePad, Signal), read
+ * Pure decoders for the Elysium launchpads (Chainzy, CorePad, Signal, Neuriio), read
  * from /logs by topic0. No I/O so they stay unit-testable.
  *
  * Event layouts were matched against real logs and cross-checked with the
@@ -15,7 +15,10 @@ export const LAUNCHPAD_TOPICS = {
   chainzyLaunch: '0x51cbea940270ec71f9e25bc787e65264264ec325f179154420b26a013c42c2df',
   /** CorePad LaunchCreated(id, token, curve | creator, name, symbol). */
   corepadLaunch: '0x857f6038583a34516f405db6cc1a1112e32e20ddd3d9a5297662fbc7f730d3fc',
-  /** CorePad curve trade: topic2 trader | isBuy, hypeGross, tokens, fee, vHype, vToken. */
+  /**
+   * CorePad curve trade: topic2 trader | isBuy, hypeGross, tokens, fee, vHype, vToken.
+   * Neuriio pads emit the same event (Trade(token, trader, ...)) with the token in topic1.
+   */
   corepadTrade: '0x2c76e7a47fd53e2854856ac3f0a5f3ee40d15cfaa82266357ea9779c486ab9c3',
   /** CorePad curve graduation. */
   corepadGraduated: '0x7b0c29e799ed468266b4d070c03070137a95cb869c5eb7c18063fb7b1a7a09c5',
@@ -27,7 +30,13 @@ export const LAUNCHPAD_TOPICS = {
   signalGraduated: '0xcb64f2436060c9575db20c5dcf9cdc11657017ee5b0301949f531b3dd7da6b19',
   /** Signal V4 launch: topic1 poolId, topic2 token, topic3 creator | quote, ... */
   signalV4Launch: '0x2f2be0acb0654df0ab17fd0891f6769f8d1caa7e4b84a114befea912a3e86d37',
-  /** Uniswap V2 Swap (Signal pairs after graduation). */
+  /** Neuriio Launched(token, creator, xUserId | handle, category, profileHash, virtualQuote). */
+  neuriioLaunch: '0x096478a529366552bb1b4db7668203cf0d554c786f86c20059967309f535ab06',
+  /** Neuriio FtfLaunched(token, founder | name, ticker, memberXIds[4], members[4], profileHash, virtualQuote). */
+  neuriioFtfLaunch: '0xc654e8d698fc1aaf01d3e71758d7ce066f2303167c977fc9b8626ee1422b8745',
+  /** Neuriio Graduated(token, pair | quote, tokens, liquidityBurned), emitted by the pad. */
+  neuriioGraduated: '0x487dc7f66c623fb0ff13f9024a3ff9675453d069e075eceb12d9f8d7870e2374',
+  /** Uniswap V2 Swap (Signal and Neuriio pairs after graduation). */
   v2Swap: '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822',
   /** Uniswap V3 Swap (Chainzy pools). */
   v3Swap: '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67',
@@ -51,6 +60,29 @@ const EMITTERS = {
   v4PoolManager: new Set(['0x889a96eedb1df35a012d7e48baf7f9c780f1243b']),
 } as const;
 
+/** Wrapped HYPE of Neuriio's own Uniswap V2 fork (pairs of the HYPE-priced pads). */
+export const NEURIIO_WHYPE = '0x517f12d5d17c4755fbdf988fe9cc24334c3314c7';
+/** Test USDC (6 decimals) the current Neuriio pad is priced in. */
+export const NEURIIO_USDC = '0xe83c3630cab1c3d1d3b19a1f6ee393618c690c7b';
+
+/**
+ * Every NeuriioPad version (all deployed by Neuriio's deployer 0xef58...17a8) and the quote its
+ * tokens trade against. Older pads sell for native HYPE and graduate into TOKEN/WHYPE pairs, so
+ * their launches are stored with the WHYPE quote; the current pad sells for test USDC.
+ */
+const NEURIIO_PADS: ReadonlyMap<string, string> = new Map([
+  ['0x3a4b7a2604918ce8a4a055d353056f988355b98a', NEURIIO_WHYPE],
+  ['0xfd4b6e796456e2f76ddcccf46b9dea4c677cb5e1', NEURIIO_WHYPE],
+  ['0x1cc0838a1344577f5fb4547be8dd72456c3bc97e', NEURIIO_WHYPE],
+  ['0x6ef011b34d8c08e20a35f4d25cdcc84070e4cb53', NEURIIO_WHYPE],
+  ['0x3c1b64c5d4ecc1ffc7fa8ab2eb643e86aba8932f', NEURIIO_WHYPE],
+  ['0x440c1bd5395a7cbef870c91f600e39aa48433c73', NEURIIO_WHYPE],
+  ['0xc54c48e6ef90b53ef49e7bccdac2d5d0578e43a7', NEURIIO_WHYPE],
+  ['0x0ab518a961c77911ba9b2635cfe56b9ea54ec73e', NEURIIO_WHYPE],
+  ['0xd9943d81b72aa55e52580bbb595af797b04d5e59', NEURIIO_WHYPE],
+  ['0x892b08a9b3987516a4ae5ab7d7e4d56642268d76', NEURIIO_USDC],
+]);
+
 /** Uniswap V4 PoolManager(s): they hold V4 pool liquidity. */
 export const V4_POOL_MANAGERS = [...EMITTERS.v4PoolManager];
 
@@ -61,20 +93,28 @@ export const NATIVE_HYPE = '0x0000000000000000000000000000000000000000';
 /** Wrapped HYPE used as the quote by Signal (curves, pairs, V4 pools). */
 export const SIGNAL_WHYPE = '0xcd57f65c2b0e5881cfc2e609f7cd53b746e1f234';
 /** Quotes valued at the HYPE price; a launch on any other quote gets no USD value. */
-export const HYPE_QUOTES = [NATIVE_HYPE, CHAINZY_WHYPE, SIGNAL_WHYPE];
+export const HYPE_QUOTES = [NATIVE_HYPE, CHAINZY_WHYPE, SIGNAL_WHYPE, NEURIIO_WHYPE];
+/** Quotes valued at $1 (test stablecoins). */
+export const USD_QUOTES = [NEURIIO_USDC];
+
+/** Decimals of a quote token: every HYPE quote has 18, the test USDC 6. */
+export function quoteDecimals(quote: string): number {
+  return USD_QUOTES.includes(quote) ? 6 : 18;
+}
 
 /** Every launchpad token has 1B supply and 18 decimals. */
 export const LAUNCH_TOTAL_SUPPLY = 1e9;
 /** Tokens a curve sells before it graduates (raw, 18 decimals). */
-export const CURVE_SALE_SUPPLY: Record<'CorePad' | 'Signal', bigint> = {
+export const CURVE_SALE_SUPPLY: Partial<Record<Launchpad, bigint>> = {
   CorePad: 800_000_000n * 10n ** 18n,
   Signal: 750_000_000n * 10n ** 18n,
+  Neuriio: 793_100_000n * 10n ** 18n,
 };
 
 /** Wallets that hold supply on the creator's behalf: kept out of the top-10 share. */
 export const CHAINZY_CREATOR_LOCKER = '0x9c820a975526915c579a3c582a0c8bad32148888';
 
-export type Launchpad = 'Chainzy' | 'CorePad' | 'Signal';
+export type Launchpad = 'Chainzy' | 'CorePad' | 'Signal' | 'Neuriio';
 export type LaunchKind = 'curve' | 'v3' | 'v4';
 export type TradeVenue = 'curve' | 'v2' | 'v3' | 'v4';
 
@@ -112,8 +152,12 @@ export interface LaunchTradeRow {
   price: number;
 }
 
+/** A graduation, keyed by its curve contract (CorePad, Signal) or its token (Neuriio pads). */
 export interface GraduationRow {
-  curve: string;
+  curve: string | null;
+  token: string | null;
+  /** Pair the token moved to, when the event names it. */
+  pool: string | null;
   graduated_at: string;
 }
 
@@ -201,9 +245,9 @@ function wordString(data: string, i: number): string | null {
   return text === '' ? null : text;
 }
 
-/** Raw 18-decimal amount to a float (for prices only, never stored as amounts). */
-function toUnits(v: bigint): number {
-  return Number(v) / WEI;
+/** Raw amount to a float (for prices only, never stored as amounts). */
+function toUnits(v: bigint, decimals = 18): number {
+  return decimals === 18 ? Number(v) / WEI : Number(v) / 10 ** decimals;
 }
 
 /** Quote per token from a sqrtPriceX96, both sides 18 decimals. */
@@ -266,6 +310,27 @@ export function decodeLaunch(raw: unknown): LaunchRow | null {
     if (!token || !curve || !quote) return null;
     return { ...common, token, launchpad: 'Signal', kind: 'curve', creator: null, curve, pool: pair, quote, name: null, symbol: null };
   }
+  const neuriioQuote = NEURIIO_PADS.get(b.address);
+  if (neuriioQuote && (b.topic0 === LAUNCHPAD_TOPICS.neuriioLaunch || b.topic0 === LAUNCHPAD_TOPICS.neuriioFtfLaunch)) {
+    const token = topicAddress(b.l.topic1);
+    if (!token) return null;
+    // A solo launch is named after the creator's X handle (name @handle, ticker HANDLE); an FTF carries both.
+    const solo = b.topic0 === LAUNCHPAD_TOPICS.neuriioLaunch;
+    const handle = solo ? wordString(b.data, 0) : null;
+    return {
+      ...common,
+      token,
+      launchpad: 'Neuriio',
+      kind: 'curve',
+      creator: topicAddress(b.l.topic2),
+      // The curve lives inside the pad: Neuriio markets are keyed by the token (see launchMarketKeys).
+      curve: null,
+      pool: null,
+      quote: neuriioQuote,
+      name: solo ? (handle ? `@${handle}` : null) : wordString(b.data, 0),
+      symbol: solo ? (handle ? handle.toUpperCase() : null) : wordString(b.data, 1),
+    };
+  }
   if (b.topic0 === LAUNCHPAD_TOPICS.signalV4Launch && EMITTERS.signalV4.has(b.address)) {
     const poolId = lower(b.l.topic1);
     const token = topicAddress(b.l.topic2);
@@ -277,23 +342,49 @@ export function decodeLaunch(raw: unknown): LaunchRow | null {
   return null;
 }
 
-/** Graduation event emitted by a curve -> GraduationRow (the caller checks the curve is known). */
+/** Graduation event -> GraduationRow (the caller checks the curve or token is known). */
 export function decodeGraduation(raw: unknown): GraduationRow | null {
   const b = base(raw);
   if (!b) return null;
+  const graduated_at = b.time.toISOString();
+  if (b.topic0 === LAUNCHPAD_TOPICS.neuriioGraduated) {
+    const token = topicAddress(b.l.topic1);
+    if (!NEURIIO_PADS.has(b.address) || !token) return null;
+    return { curve: null, token, pool: topicAddress(b.l.topic2), graduated_at };
+  }
   if (b.topic0 !== LAUNCHPAD_TOPICS.corepadGraduated && b.topic0 !== LAUNCHPAD_TOPICS.signalGraduated) return null;
-  return { curve: b.address, graduated_at: b.time.toISOString() };
+  return { curve: b.address, token: null, pool: null, graduated_at };
 }
 
 /**
  * Trade log -> LaunchTradeRow. `markets` maps a market key to its token:
- * curve address (CorePad, Signal curves), V2 pair (Signal after graduation),
+ * curve address (CorePad, Signal curves), token (Neuriio), V2 pair (Signal and Neuriio after graduation),
  * V3 pool address (Chainzy) or V4 poolId (Signal V4). Logs for unknown markets are dropped.
  */
 export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarket>): LaunchTradeRow | null {
   const b = base(raw);
   if (!b) return null;
   const common = { tx_hash: b.txHash, log_index: b.logIndex, block_time: b.time.toISOString(), block_number: b.block };
+
+  if (b.topic0 === LAUNCHPAD_TOPICS.corepadTrade && NEURIIO_PADS.has(b.address)) {
+    // Same layout as CorePad, with the token in topic1; amounts exclude the fee.
+    const token = topicAddress(b.l.topic1);
+    const m = token ? markets.get(token) : undefined;
+    const w = [0, 1, 2, 4, 5].map((i) => word(b.data, i));
+    if (!m || m.launchpad !== 'Neuriio' || w.some((x) => x === null)) return null;
+    const [isBuy, quote, tokens, vQuote, vToken] = w.map((x) => wordUint(x as string));
+    if (tokens === 0n || vToken === 0n) return null;
+    return {
+      ...common,
+      token: m.token,
+      venue: 'curve',
+      trader: topicAddress(b.l.topic2),
+      is_buy: isBuy === 1n,
+      quote_amount: quote.toString(),
+      token_amount: tokens.toString(),
+      price: toUnits(vQuote, quoteDecimals(m.quote)) / toUnits(vToken),
+    };
+  }
 
   if (b.topic0 === LAUNCHPAD_TOPICS.corepadTrade) {
     const m = markets.get(b.address);
@@ -357,7 +448,7 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
       is_buy: tokenOut > 0n,
       quote_amount: quote.toString(),
       token_amount: tokens.toString(),
-      price: toUnits(quote) / toUnits(tokens),
+      price: toUnits(quote, quoteDecimals(m.quote)) / toUnits(tokens),
     };
   }
 
@@ -413,9 +504,10 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
 }
 
 /** Market keys a launch is traded under. */
-export function launchMarketKeys(l: Pick<LaunchRow, 'curve' | 'pool'>): string[] {
-  // A curve launch trades on its curve, then on its V2 pair once graduated.
-  return [l.curve, l.pool].filter((k): k is string => k !== null);
+export function launchMarketKeys(l: Pick<LaunchRow, 'token' | 'curve' | 'pool'> & { launchpad: string }): string[] {
+  // A curve launch trades on its curve (on Neuriio: the token, inside the pad), then on its V2 pair once graduated.
+  const curve = l.launchpad === 'Neuriio' ? l.token : l.curve;
+  return [curve, l.pool].filter((k): k is string => k !== null);
 }
 
 /** Topic order for one ingest window: launches first, so trades in the same window find their market. */
@@ -424,8 +516,14 @@ export const LAUNCH_TOPIC_ORDER = [
   LAUNCHPAD_TOPICS.corepadLaunch,
   LAUNCHPAD_TOPICS.signalCurveLaunch,
   LAUNCHPAD_TOPICS.signalV4Launch,
+  LAUNCHPAD_TOPICS.neuriioLaunch,
+  LAUNCHPAD_TOPICS.neuriioFtfLaunch,
 ] as const;
-export const GRADUATION_TOPICS = [LAUNCHPAD_TOPICS.corepadGraduated, LAUNCHPAD_TOPICS.signalGraduated] as const;
+export const GRADUATION_TOPICS = [
+  LAUNCHPAD_TOPICS.corepadGraduated,
+  LAUNCHPAD_TOPICS.signalGraduated,
+  LAUNCHPAD_TOPICS.neuriioGraduated,
+] as const;
 export const TRADE_TOPICS = [
   LAUNCHPAD_TOPICS.corepadTrade,
   LAUNCHPAD_TOPICS.signalRouterTrade,

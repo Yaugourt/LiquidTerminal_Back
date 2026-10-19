@@ -211,7 +211,7 @@ describe('elysium launchpad decoders', () => {
 
   it('reads graduation from either curve event', () => {
     const g = decodeGraduation({ ...corepadTrade, topic0: LAUNCHPAD_TOPICS.signalGraduated });
-    expect(g).toEqual({ curve: corepadTrade.address, graduated_at: '2026-10-01T00:00:00.000Z' });
+    expect(g).toEqual({ curve: corepadTrade.address, token: null, pool: null, graduated_at: '2026-10-01T00:00:00.000Z' });
   });
 
   it('turns a sqrtPriceX96 into quote per token on either side of the pool', () => {
