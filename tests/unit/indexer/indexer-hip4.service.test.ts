@@ -101,6 +101,73 @@ describe('IndexerHip4Service caching', () => {
     expect(storedTtl('"coin":"#9"')).toBe(HYPEDEXER_TTL.hip4QuietFills);
   });
 
+  describe('a dormant coin tape whose market left outcomeMeta', () => {
+    /** HL answers outcomeMeta with these outcome ids (or fails), allMids with nothing. */
+    const listOutcomes = (outcomes: number[] | 'fail') =>
+      fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+        if (String(init?.body ?? '').includes('outcomeMeta')) {
+          if (outcomes === 'fail') throw new Error('HL down');
+          return { ok: true, json: async () => ({ outcomes: outcomes.map((outcome) => ({ outcome })) }) } as Response;
+        }
+        return { ok: true, json: async () => ({}) } as Response;
+      });
+    const outcomeMetaReads = () =>
+      fetchSpy.mock.calls.filter(([, init]) => String((init as RequestInit | undefined)?.body ?? '').includes('outcomeMeta')).length;
+
+    it('is kept a day, while a dormant market still listed keeps the hour', async () => {
+      listOutcomes([5]);
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin?: string }) => [fill(coin ?? '#0', 2 * 24 * HOUR)]);
+
+      await svc.getFills({ coin: '#1100', limit: 1000 }); // outcome 110: gone
+      await svc.getFills({ coin: '#51', limit: 1000 }); // outcome 5: listed
+
+      expect(storedTtl('"coin":"#1100"')).toBe(HYPEDEXER_TTL.hip4DelistedFills);
+      expect(storedTtl('"coin":"#51"')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+      expect(HYPEDEXER_TTL.hip4DelistedFills).toBe(86400);
+      // The outcome ids are shared: one outcomeMeta read for both tapes.
+      expect(outcomeMetaReads()).toBe(1);
+    });
+
+    it('is only asked about for a dormant coin tape', async () => {
+      listOutcomes([5]);
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin?: string }) =>
+        coin === '#1100' ? [fill(coin, 5_000)] : [fill('#1110', 2 * 24 * HOUR)]);
+
+      await svc.getFills({ coin: '#1100', limit: 400 }); // active
+      await svc.getFills({ limit: 50 }); // the global tape, dormant
+
+      expect(storedTtl('"coin":"#1100"')).toBe(HYPEDEXER_TTL.hip4ActiveFills);
+      expect(storedTtl('fills:{"limit":50}')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+      expect(outcomeMetaReads()).toBe(0);
+    });
+
+    it('keeps the hour for reads the front does not make, without asking', async () => {
+      listOutcomes([5]);
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin?: string }) => [fill(coin ?? '#0', 2 * 24 * HOUR)]);
+
+      await svc.getFills({ coin: '#1100', limit: 1000, start: '2026-05-01' });
+      await svc.getFills({ coin: '#1100', limit: 1000, offset: 1000 });
+      await svc.getFills({ coin: '#1105', limit: 1000 }); // not a side coin
+
+      expect(storedTtl('"start":"2026-05-01"')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+      expect(storedTtl('"offset":1000')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+      expect(storedTtl('"coin":"#1105"')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+      expect(outcomeMetaReads()).toBe(0);
+    });
+
+    it('keeps the hour when outcomeMeta fails or lists nothing', async () => {
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin?: string }) => [fill(coin ?? '#0', 2 * 24 * HOUR)]);
+
+      listOutcomes('fail');
+      await svc.getFills({ coin: '#1100', limit: 1000 });
+      expect(storedTtl('"coin":"#1100"')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+
+      listOutcomes([]);
+      await svc.getFills({ coin: '#1110', limit: 1000 });
+      expect(storedTtl('"coin":"#1110"')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+    });
+  });
+
   it('keys a wallet’s fills on every filter', async () => {
     const user = '0x1111111111111111111111111111111111111111';
     mockClient.getFills.mockImplementation(async (p: { coin?: string }) => [fill(p.coin ?? '#0', 1_000)]);

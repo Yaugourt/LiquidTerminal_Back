@@ -76,6 +76,10 @@ export const HYPEDEXER_TTL = {
   hip4ActiveFills:        10,
   hip4QuietFills:         60,
   hip4DormantFills:     3600,
+  /** A dormant coin tape whose market Hyperliquid no longer lists
+   * (outcomeMeta): it cannot trade again, so its history (up to 1,000 fills,
+   * ~102 credits a read) is kept a day. */
+  hip4DelistedFills:   86400,
   /** HIP-4 metadata lists (markets, outcome tokens, questions) read by the
    * enriched endpoints and settlements; an empty answer is retried sooner. */
   hip4BaseList:          600,

@@ -39,6 +39,8 @@ interface RawAnalyticsBucket {
 type Hip4FillsQuery = NonNullable<Parameters<HypeDexerHip4Client['getFills']>[0]>;
 
 const HOUR_MS = 60 * 60 * 1000;
+/** A tape whose newest fill is this old is dormant. */
+const DORMANT_FILLS_MS = 24 * HOUR_MS;
 const HL_INFO_URL = 'https://api.hyperliquid.xyz/info';
 const OUTCOME_META_TIMEOUT_MS = 5_000;
 /** The backend validates the analytics `coin` filter as a string of at most 256 chars. */
@@ -114,23 +116,49 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
   return results;
 }
 
-/**
- * How long a market's fills stay cached, from the age of its newest fill. An
- * empty answer may be a market about to open, so it is only kept a minute.
- */
-function marketFillsTtl(rows: unknown): number {
-  if (!Array.isArray(rows) || rows.length === 0) return HYPEDEXER_TTL.hip4QuietFills;
+/** Age of the newest fill in ms; null without rows or a readable time. */
+function newestFillAgeMs(rows: unknown): number | null {
+  if (!Array.isArray(rows)) return null;
   let newest = 0;
   for (const row of rows) {
     const t = Number((row as { time_ms?: unknown } | null)?.time_ms);
     if (Number.isFinite(t) && t > newest) newest = t;
   }
+  return newest === 0 ? null : Date.now() - newest;
+}
+
+/**
+ * How long a market's fills stay cached, from the age of its newest fill. An
+ * empty answer may be a market about to open, so it is only kept a minute. A
+ * dormant tape is kept a day once its market is `delisted` from outcomeMeta.
+ */
+function marketFillsTtl(rows: unknown, delisted: boolean): number {
+  if (!Array.isArray(rows) || rows.length === 0) return HYPEDEXER_TTL.hip4QuietFills;
+  const age = newestFillAgeMs(rows);
   // No readable time (field renamed upstream?): don't mistake it for dormant.
-  if (newest === 0) return HYPEDEXER_TTL.hip4QuietFills;
-  const age = Date.now() - newest;
-  if (age >= 24 * HOUR_MS) return HYPEDEXER_TTL.hip4DormantFills;
+  if (age === null) return HYPEDEXER_TTL.hip4QuietFills;
+  if (age >= DORMANT_FILLS_MS) {
+    return delisted ? HYPEDEXER_TTL.hip4DelistedFills : HYPEDEXER_TTL.hip4DormantFills;
+  }
   if (age >= HOUR_MS) return HYPEDEXER_TTL.hip4QuietFills;
   return HYPEDEXER_TTL.hip4ActiveFills;
+}
+
+/** Raw outcome N behind a side coin `#<10N + side>`; null for any other filter. */
+function outcomeOfCoin(coin: string | undefined): number | null {
+  const m = /^#(\d+)$/.exec(coin ?? '');
+  if (!m) return null;
+  const id = Number(m[1]);
+  return id >= 10 && id % 10 <= 1 ? Math.floor(id / 10) : null;
+}
+
+/**
+ * A coin tape read the way the front reads it, a coin and a limit and nothing
+ * else: only that shape may be kept a day, so a caller can't mint day-long
+ * keys with date ranges or offsets.
+ */
+function isPlainCoinTape(p: Hip4FillsQuery): boolean {
+  return Object.entries(p).every(([k, v]) => v === undefined || k === 'coin' || k === 'limit');
 }
 
 /**
@@ -182,10 +210,24 @@ export class IndexerHip4Service {
     // A market's tape is the same for every visitor: the coin page polls
     // `limit=400` every 15 s and a settled question's chart reads N coins ×
     // 1 000 fills, which used to go upstream once per visitor and per poll.
+    // Only a dormant coin tape, read as the front reads it, asks whether its
+    // market is still listed.
+    const outcome = isPlainCoinTape(p) ? outcomeOfCoin(p.coin) : null;
+    let delisted = false;
     return cacheService.getOrSet(
       buildHypedexerCacheKey('hip4', 'fills', { ...p }),
-      () => this.client.getFills(p),
-      marketFillsTtl
+      async () => {
+        const rows = await this.client.getFills(p);
+        const age = newestFillAgeMs(rows);
+        delisted =
+          outcome !== null &&
+          age !== null &&
+          age >= DORMANT_FILLS_MS &&
+          (await this.isOutcomeListed(outcome)) === false;
+        return rows;
+      },
+      // getOrSet runs it on the value this call's own fetch just returned.
+      (rows) => marketFillsTtl(rows, delisted)
     );
   }
 
@@ -465,6 +507,19 @@ export class IndexerHip4Service {
       // Fixed name, read by every live-volumes refresh: kept an hour past a failed refresh.
       { lastCopyKeepS: SHARED_LAST_COPY_KEEP_S }
     );
+  }
+
+  /**
+   * Whether outcomeMeta still lists `outcome`; null when its ids can't be read
+   * or come back empty (that proves nothing).
+   */
+  private async isOutcomeListed(outcome: number): Promise<boolean | null> {
+    try {
+      const ids = await this.fetchOutcomeIds();
+      return ids.length > 0 ? ids.includes(outcome) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** One HL outcomeMeta read (weight 20, ~100 KB), reduced to the outcome ids. Throws on any failure. */
