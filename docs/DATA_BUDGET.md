@@ -203,7 +203,7 @@ Steady = nominal period, nobody on the on-demand pages. Worst = −10 % jitter o
 | BU-HL-14 | HIP-4 `allMids` (BK-R-27) | 0 | 24 | 12 × 2 |
 | BU-HL-15 | HIP-4 `outcomeTemplates` (on demand) | 0 (~0.3 while a HIP-4 page is open) | 20 | 1/h; 1/min while HL fails (`indexer-hip4.service.ts:551-555`) |
 | BU-HL-16 | TWAP `allPerpMetas` (BK-R-10) | 0 | 4 | 20 / 5 min |
-| BU-HL-17 | HIP-4 `outcomeMeta` (BK-R-41) | 0 (20 while a HIP-4 page is open) | 20 | 1 × 20 / min, ids shared 60 s (`src/services/indexer/indexer-hip4.service.ts:457-484`, `src/constants/hypedexer.cache.ts:71`) |
+| BU-HL-17 | HIP-4 `outcomeMeta` (BK-R-41) | 0 (20 while a HIP-4 page, `/dashboard/market` or `/market` is open) | 20 | 1 × 20 / min, ids shared 60 s (`src/services/indexer/indexer-hip4.service.ts:457-484`, `src/constants/hypedexer.cache.ts:71`) |
 | | **Total** | **~692** | **~1,134** | |
 | | **Margin under 1,200** | ~508 (42 %) | **~66 (5.5 %)** | |
 
@@ -237,7 +237,7 @@ Live shared keys while at least one viewer polls them (cost per key, the same fo
 | BU-HD-11 | HIP-3 overview + top movers (BK-R-28) | 3 each | 15 s | 24 | `hypedexer.cache.ts:46` |
 | BU-HD-12 | Builders top, limits 3 / 5 / 100 (BK-R-26) | 3 / 3 / 12 | 15 s | 72 | `hypedexer.cache.ts:58-60` |
 | BU-HD-13 | Builders stats, per timeframe or builder | 3 | 15 s | 12 each | `hypedexer.cache.ts:55-57` |
-| BU-HD-14 | HIP-4 live volumes, ~17 coin chunks read by the backend for one shared aggregate (BK-R-41, through BK-R-27's per-chunk keys), refreshed every 15 s while anyone has a HIP-4 page open | ~7 each | 15 s | **~476** | `hypedexer.cache.ts:64-68`, `src/services/indexer/indexer-hip4.service.ts:379-454` |
+| BU-HD-14 | HIP-4 live volumes, ~17 coin chunks read by the backend for one shared aggregate (BK-R-41, through BK-R-27's per-chunk keys), refreshed every 15 s while anyone has a HIP-4 page, `/dashboard/market` or `/market` open (FR-67, FR-28, FR-43) | ~7 each | 15 s | **~476** | `hypedexer.cache.ts:64-68`, `src/services/indexer/indexer-hip4.service.ts:379-454` |
 | BU-HD-15 | HIP-4 coin tape `limit=400`, per active coin viewed | 42 | 10 s | **252 per coin** | `hypedexer.cache.ts:76`, `front:src/app/(app)/market/hip4/[coin]/page.tsx:112` |
 | BU-HD-16 | HIP-4 global tape `limit=50` | 7 | 10 s | 42 | `front:src/app/(app)/market/hip4/page.tsx:31` |
 | BU-HD-17 | HIP-4 settlements | 7 (+3 per new market, once) | 30 s | 14 | `hypedexer.cache.ts:84` |
@@ -319,7 +319,7 @@ How to read the tables:
 | FR-25 | LiquidationsPanel | `/liquidations/data`; `/liquidations/historical/top` | 10 s (FR-13); 15 s (`src/services/explorer/liquidation/hooks/useTopLiquidations.ts:14`) | 10 s; 15 s (`liquidations.service.ts:53`) | 20 s; 30 s | P |
 | FR-26 | BuildersConcentrationCard | `/indexer/builders/stats` + `/top` | 15 s (`useBuildersGlobalStats.ts:9`, `useBuildersTop.ts:14`) | 15 s (`hypedexer.cache.ts:57`, `:60`) | 30 s | P |
 | FR-27 | Hip3MarketsPanel, Hip3AuctionRow | HL WS `allDexsAssetCtxs` (`src/services/market/perpDex/websocket.service.ts:105`) + HL `perpDexs` / `allPerpMetas` browser-direct (FR-D-04, FR-D-07) | push; metadata polled 60 s on a 5 min shared memo (`src/services/market/perpDex/hooks/usePerpDexMarketData.ts:20`, `:53`, `:64`) | — | push; metadata 5 min | S60 (`websocket.service.ts:97`) |
-| FR-28 | Hip4OutcomesCard | `/indexer/hip4/questions-with-outcomes` | 30 s (`src/services/indexer/hip4/hooks/useHip4QuestionsWithOutcomes.ts:14`) | 15 s (`hypedexer.cache.ts:117`, BK-R-27) | 45 s | P |
+| FR-28 | Hip4OutcomesCard (top 5) | The list page's Live pill (`src/services/indexer/hip4/hooks/useHip4ActiveMarkets.ts:39-59`): `/indexer/hip4/questions-with-outcomes` merged with the live markets (HL `outcomeMeta` + `allMids`, browser-direct, FR-66, FR-D-10) and their volumes (FR-67), kept on the effective status; nothing listed before `outcomeMeta` and the volumes answer (`:43`) | 30 s (`src/services/indexer/hip4/hooks/useHip4QuestionsWithOutcomes.ts:14`); 15 s (`src/services/indexer/hip4/hooks/useHip4LiveMarkets.ts:125`, `:43`) | 15 s (`hypedexer.cache.ts:117`, BK-R-27); one shared aggregate 15 s (BK-R-41) | 45 s; odds 15 s; volumes 30 s | P |
 | FR-29 | TraderPnlCard | `/indexer/overview/daily-pnl-10d` | 300 s (`src/services/market/trader-pnl/index.ts:45`) | 3,600 s (`hypedexer.cache.ts:43`) | 65 min | P |
 | FR-30 | MarketVolumeCard | `/indexer/overview/daily-volume-10d` | 300 s (`src/services/market/market-volume/index.ts:35`) | 300 s (`hypedexer.cache.ts:41`) + client 60 s | 11 min | P |
 
@@ -346,7 +346,7 @@ Also on the page: FR-02, FR-18, FR-19, FR-20, FR-22.
 | FR-40 | TwapFlowCard (hub) | `/indexer/twaps?limit=150` (`src/services/market/twap-flow/index.ts:36`) | 15 s (`:52`) | 15 s (`indexer-twaps.service.ts:102` → `hypedexer.cache.ts:101`) | 30 s | P |
 | FR-41 | HubRail / TrackerStatsBar top traders | `/top-traders` | 30 s | poller 60 s | 90 s | P |
 | FR-42 | HubLanes builders | `/indexer/builders/stats/all-timeframes`; `/top` | 60 s (`useBuildersStatsAllTimeframes.ts:11`); 15 s | 55 s, refreshed in background (`hypedexer.cache.ts:54`); 15 s | 115 s; 30 s | P |
-| FR-43 | HubLanes HIP-4 | as FR-28 | 30 s | 15 s | 45 s | P |
+| FR-43 | HubLanes HIP-4 (top 12) | as FR-28, same hook (`src/components/market/hub/HubLanes.tsx:80`) | 30 s; 15 s | 15 s; BK-R-41 | 45 s; odds 15 s; volumes 30 s | P |
 | FR-44 | AuctionStrip | as FR-20 + FR-24 | 30 s / 60 s | 20 s / — | 50 s / 60 s | P |
 
 Also on the page: FR-23, FR-32.
@@ -537,7 +537,7 @@ These leave from the **visitor's IP**, not the backend's: they never count again
 | FR-D-07 | HL info `perpDexs` + `allPerpMetas` | perpdex pages, `/dashboard/market` | memo 5 min across pages → 0.4/min | M (21 KB + 84 KB) |
 | FR-D-08 | HL info `perpDeployAuctionStatus` | dashboard/market, hub, perp, perp auction | 2/min | S (124 B) |
 | FR-D-09 | HL info `predictedFundings` | `/market/perp` (2/min); address pages (0.2/min) | 0.2–2/min | M (64 KB) |
-| FR-D-10 | HL info `outcomeMeta` + `allMids`; `outcomeTemplates` | `/market/hip4*` | 8/min; templates 1/h | M (100 KB + 23 KB; 53 KB) |
+| FR-D-10 | HL info `outcomeMeta` + `allMids`; `outcomeTemplates` | `/market/hip4*`, `/dashboard/market` (FR-28), `/market` (FR-43) | 8/min; templates 1/h | M (100 KB + 23 KB; 53 KB) |
 | FR-D-11 | HL info `l2Book #N` | `/market/hip4/[coin]` | 12/min | S |
 | FR-D-12 | HL UI info `allMids` + one `allMids {dex}` per HIP-3 dex seen in the TWAP list (`twap-source.ts:122-132`) | every TWAP widget (FR-19) | ≤ 5 reads/min × (1 + dexes) | M (23 KB each) |
 | FR-D-13 | HL info `spotClearinghouseState` + `clearinghouseState` per wallet; AF `spotClearinghouseState` | address pages, my-wallets (8/min); `/hype*` AF (2/min) | 2–8/min | S |
@@ -652,3 +652,4 @@ Q-01..Q-10 are about production or upstream facts the code cannot answer; Q-11..
 | 2026-10-14 | `ddfb2798` | `d17a9cb` | Production answers from Yaugourt: Q-01 answered (Redis `noeviction`, 16.8 GiB limit, 40 MB used, `volatile-lru` later), Q-02 answered (no CDN or extra proxy, so `trust proxy` 1 is right; what to change if Cloudflare is added), Q-03 answered (one instance; Railway's outbound IP may be shared with other tenants, so the deploy checks the logs for Hyperliquid 429s); §4.1 note. No number in the code changed. |
 | 2026-10-19 | Elysium upgrade 08 | Elysium upgrade 08 | Ecosystem directory: 11 projects added, all-time txs/wallets and first-tx date per project (own 600 s cache, ~18 s historical scan measured on prod data), verified-contract count from the Kinetiq explorer API (UP-11, every 6 h, never blocking). Launchpad stream (BK-P-24) gains the Neuriio topics and is replayed once from genesis by a historical migration (idempotent upserts; one-off ~50 day windows × 13 topics). |
 | 2026-10-19 | Elysium indexer stall | Elysium indexer stall | The provider's Elysium indexer stalled on 2026-10-17 01:39 UTC; cursors had kept advancing over empty pages. Streams are now capped at the provider's head (one `/stats` call per 30 s, BK-P-24), dex and launchpad fall back to the Kinetiq RPC past it (UP-11), and a historical migration rewinds tx, dex and bridge to 2026-10-17 00:00. |
+| 2026-10-21 | `hip4/followups` | doc copy | HIP-4 dashboard card and market hub lane on the list page's live markets (front `fix(hip4): list the live markets on the dashboard card and the hub lane`): FR-28 and FR-43 now merge the indexer questions with Hyperliquid's live markets and their volumes like `/market/hip4` (FR-66, FR-67) and keep the effective status, instead of the indexer's raw `status` (40 markets closed since May–June were listed as live, none of the ~210 live ones). Both pages gain the browser-direct `outcomeMeta` + `allMids` + templates reads (FR-D-10, from the visitor's IP) and the `/indexer/hip4/live-volumes` poll, so BU-HD-14 (~476 credits/min) and BU-HL-17 (20 weight/min) also stay warm while anyone has one of these two pages open, not only a HIP-4 page. They are the two busiest market pages, so expect BU-HD-14 warm around the clock: up to ~0.69M credits/day when no HIP-4 page would have kept it warm anyway. Flat in visitors; §4's worst cases already counted both warm, the daily background subtotal (§4.2) does not include it. |
