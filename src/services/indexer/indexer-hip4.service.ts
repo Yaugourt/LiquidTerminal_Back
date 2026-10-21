@@ -258,7 +258,7 @@ export class IndexerHip4Service {
         this.fetchOutcomeTemplates(),
       ]);
       const enriched = enrichMarkets(markets, outcomeTokens, questions, midPrices, templates);
-      return buildQuestionsWithOutcomes(enriched, questions);
+      return buildQuestionsWithOutcomes(enriched, questions, midPrices);
     };
 
     // Keyed on every param, like markets-enriched (limit 200 vs default 100).

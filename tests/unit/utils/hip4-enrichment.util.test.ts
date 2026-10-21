@@ -201,6 +201,119 @@ describe('enrichMarkets — names', () => {
   });
 });
 
+describe('buildQuestionsWithOutcomes — markets with no question', () => {
+  // Rows from the oldest list (2026-10-21), trimmed: 110 and 111 are two
+  // unrelated markets, 141 and 170 two games of the same series.
+  const ucl110 = row({
+    outcome_id: 110,
+    name: 'Champions League Winner',
+    side_specs: '[{"name":"PSG"},{"name":"Arsenal"}]',
+    total_volume: 1868551,
+  });
+  const btc111 = row({
+    outcome_id: 111,
+    name: 'Recurring',
+    description: 'class:priceBinary|underlying:BTC|expiry:20260528-0600|targetPrice:75668|period:1d',
+    class: 'priceBinary',
+    underlying: 'BTC',
+    expiry: '20260528-0600',
+    target_price: 75668,
+    period: '1d',
+    total_volume: 1512465,
+  });
+  const nbaSides = '[{"name":"San Antonio"},{"name":"New York"}]';
+  const game141 = row({ outcome_id: 141, name: 'NBA Finals Game 2', side_specs: nbaSides, total_volume: 380715 });
+  const game170 = row({ outcome_id: 170, name: 'NBA Finals Game 3', side_specs: nbaSides, total_volume: 745517 });
+
+  const questionsOf = (rows: RawHip4Market[], mids?: Map<string, number>) =>
+    buildQuestionsWithOutcomes(enrichMarkets(rows, [], []), [], mids);
+
+  it('never pairs raw outcomes 10N and 10N + 1 as the Yes and No of one market', () => {
+    const qs = questionsOf([ucl110, btc111]);
+    expect(qs).toHaveLength(2);
+    const ucl = qs.find((q) => q.singleton_outcome_id === 110);
+    const btc = qs.find((q) => q.singleton_outcome_id === 111);
+    expect(ucl).toMatchObject({ title: 'Champions League Winner', total_volume: 1868551 });
+    expect(ucl?.outcomes.map((o) => [o.display_name, o.coin])).toEqual([
+      ['PSG', '#1100'],
+      ['Arsenal', '#1101'],
+    ]);
+    expect(btc).toMatchObject({
+      title: 'BTC above 75,668 on May 28 at 6:00 AM UTC?',
+      class: 'priceBinary',
+      total_volume: 1512465,
+    });
+    expect(btc?.outcomes.map((o) => [o.display_name, o.coin])).toEqual([
+      ['Yes', '#1110'],
+      ['No', '#1111'],
+    ]);
+  });
+
+  it('gives a lone market both of its sides, each on its own coin', () => {
+    for (const m of [game141, game170]) {
+      const [q] = questionsOf([m]);
+      expect(q.outcome_count).toBe(2);
+      expect(q.outcomes.map((o) => o.display_name)).toEqual(['San Antonio', 'New York']);
+      expect(q.outcomes.map((o) => o.coin)).toEqual([`#${m.outcome_id * 10}`, `#${m.outcome_id * 10 + 1}`]);
+      expect(q.outcomes.every((o) => o.outcome_id === m.outcome_id)).toBe(true);
+    }
+  });
+
+  it("prices each side from its own coin, not from the row's #N label", () => {
+    // #141 is outcome 14's No coin: another market.
+    const mids = new Map([
+      ['#141', 0.99],
+      ['#1410', 0.25],
+      ['#1411', 0.75],
+    ]);
+    const [q] = questionsOf([game141], mids);
+    expect(q.outcomes.map((o) => o.mid_price)).toEqual([0.25, 0.75]);
+  });
+
+  it('keeps the market volume on the question, not repeated on each side', () => {
+    const [q] = questionsOf([game141]);
+    expect(q.total_volume).toBe(380715);
+    expect(q.outcomes.map((o) => o.total_volume)).toEqual([null, null]);
+  });
+
+  it('falls back to Yes and No sides when a market lists none', () => {
+    const [q] = questionsOf([row({ outcome_id: 142, name: '2026 NBA Finals champion', side_specs: null })]);
+    expect(q.title).toBe('2026 NBA Finals champion');
+    expect(q.outcomes.map((o) => [o.display_name, o.coin])).toEqual([
+      ['Yes', '#1420'],
+      ['No', '#1421'],
+    ]);
+  });
+
+  it('settles both sides with the market', () => {
+    const [q] = questionsOf([{ ...btc111, settled: 1, block_time: '2026-05-28T06:00:10' }]);
+    expect(q).toMatchObject({ status: 'settled', resolved_at: '2026-05-28T06:00:10Z' });
+    expect(q.outcomes.every((o) => o.is_settled && o.settled_at === '2026-05-28T06:00:10Z')).toBe(true);
+  });
+
+  it("leaves a grouped question's outcomes on their Yes coin (no coin field)", () => {
+    const q1: RawHip4Question = {
+      question_id: 1,
+      name: 'Recurring',
+      description: 'class:priceBucket|underlying:BTC|expiry:20260509-0600|priceThresholds:77991,81174|period:1d',
+      fallback_outcome: 11,
+      named_outcomes: [12, 13],
+      settled_named_outcomes: [],
+    };
+    const rows = enrichMarkets(
+      [
+        row({ outcome_id: 12, question_id: 1, name: 'Recurring Named Outcome', description: 'index:0' }),
+        row({ outcome_id: 13, question_id: 1, name: 'Recurring Named Outcome', description: 'index:1' }),
+      ],
+      [],
+      [q1]
+    );
+    const [q] = buildQuestionsWithOutcomes(rows, [q1], new Map([['#120', 0.4]]));
+    expect(q.outcomes.map((o) => o.outcome_id)).toEqual([12, 13]);
+    expect(q.outcomes.every((o) => o.coin === undefined)).toBe(true);
+  });
+});
+
 describe('enrichSettlements — names', () => {
   it('names a settlement after its market, rendered from the template', () => {
     const market = row({

@@ -133,6 +133,13 @@ export interface Hip4QuestionOutcome {
   open_interest: number | null;
   is_settled: boolean;
   settled_at: string | null;
+  /**
+   * The side's traded coin, `#(10N + side)`, on the two outcomes of a
+   * standalone market: both carry its raw outcome id N, the coin tells them
+   * apart. Absent on a grouped question's outcomes (each trades on its Yes
+   * coin, `#(10 × outcome_id)`).
+   */
+  coin?: string;
 }
 
 export interface Hip4QuestionWithOutcomes {
@@ -464,13 +471,15 @@ export function toSideCoinMarket(
 }
 
 /**
- * Group enriched markets by question_id; markets with a null question_id are
- * returned as singleton synthetic questions so the frontend treats everything
- * uniformly as a question-with-outcomes card.
+ * Group enriched markets by question_id; a market with a null question_id is
+ * returned as a question of its own (`standaloneQuestion`) so the frontend
+ * treats everything uniformly as a question-with-outcomes card. `midPrices`
+ * (Hyperliquid allMids) prices a standalone market's sides.
  */
 export function buildQuestionsWithOutcomes(
   enrichedMarkets: Hip4MarketEnriched[],
-  questions: RawHip4Question[]
+  questions: RawHip4Question[],
+  midPrices?: Map<string, number>
 ): Hip4QuestionWithOutcomes[] {
   const questionIdx = indexQuestions(questions);
   const groups = new Map<number, Hip4MarketEnriched[]>();
@@ -522,81 +531,62 @@ export function buildQuestionsWithOutcomes(
     });
   }
 
-  // Group YES (outcome_id % 10 === 0) and NO (outcome_id % 10 === 1) sides of binary markets
-  const binaryBuckets = new Map<number, Hip4MarketEnriched[]>();
-  const trueSingletons: Hip4MarketEnriched[] = [];
-
   for (const m of singletons) {
     if (m.outcome_id < 10) continue; // skip template/metadata markets
-    const sideIdx = m.outcome_id % 10;
-    if (sideIdx <= 1) {
-      const baseId = Math.floor(m.outcome_id / 10);
-      const bucket = binaryBuckets.get(baseId);
-      if (bucket) bucket.push(m);
-      else binaryBuckets.set(baseId, [m]);
-    } else {
-      trueSingletons.push(m);
-    }
-  }
-
-  for (const [, pair] of binaryBuckets.entries()) {
-    const yesSide = pair.find(m => m.outcome_id % 10 === 0) ?? pair[0];
-    const noSide = pair.find(m => m.outcome_id % 10 === 1);
-    const allSettled = pair.every(m => m.is_settled);
-    const resolvedAt = pair.map(m => m.settled_at).filter((v): v is string => v != null).sort().pop() ?? null;
-    const totalVolume = pair.reduce((s, m) => s + (m.total_volume ?? 0), 0);
-
-    const makeOutcome = (m: Hip4MarketEnriched, sideLabel: string): Hip4QuestionOutcome => ({
-      ...toQuestionOutcome(m),
-      side_name: m.side_name ?? sideLabel,
-      display_name: m.side_name ?? sideLabel,
-    });
-
-    const outcomes: Hip4QuestionOutcome[] = [makeOutcome(yesSide, 'Yes')];
-    if (noSide) outcomes.push(makeOutcome(noSide, 'No'));
-
-    grouped.push({
-      question_id: null,
-      title: yesSide.display_name,
-      description: yesSide.question_description,
-      class: yesSide.class,
-      underlying: yesSide.underlying,
-      outcome_count: outcomes.length,
-      total_volume: totalVolume,
-      created_at: null,
-      resolved_at: resolvedAt,
-      status: allSettled ? 'settled' : 'live',
-      singleton_outcome_id: outcomes.length === 1 ? yesSide.outcome_id : null,
-      expiry: yesSide.expiry,
-      period: yesSide.period,
-      target_price: yesSide.target_price,
-      outcomes,
-    });
-  }
-
-  for (const m of trueSingletons) {
-    const status: 'live' | 'settled' = m.is_settled ? 'settled' : 'live';
-    grouped.push({
-      question_id: null,
-      title: m.display_name,
-      description: m.question_description,
-      class: m.class,
-      underlying: m.underlying,
-      outcome_count: 1,
-      total_volume: m.total_volume ?? 0,
-      created_at: null,
-      resolved_at: m.settled_at,
-      status,
-      singleton_outcome_id: m.outcome_id,
-      expiry: m.expiry,
-      period: m.period,
-      target_price: m.target_price,
-      outcomes: [toQuestionOutcome(m)],
-    });
+    grouped.push(standaloneQuestion(m, midPrices));
   }
 
   grouped.sort((a, b) => b.total_volume - a.total_volume);
   return grouped;
+}
+
+/**
+ * A market with no question, as a question of its own: one outcome per side,
+ * both on its raw outcome id N and told apart by their coin `#(10N + side)`,
+ * the coin Hyperliquid prices and HypeDexer files fills under. Raw outcomes
+ * 10N and 10N + 1 are two unrelated markets, never the Yes and No of one.
+ */
+function standaloneQuestion(
+  m: Hip4MarketEnriched,
+  midPrices?: Map<string, number>
+): Hip4QuestionWithOutcomes {
+  const sides: ParsedSide[] = m.parsed_sides?.length
+    ? m.parsed_sides.slice(0, 2)
+    : [{ name: 'Yes' }, { name: 'No' }];
+  const outcomes: Hip4QuestionOutcome[] = sides.map((s, side) => {
+    const sideMarket = toSideCoinMarket(m, side, midPrices);
+    return {
+      outcome_id: m.outcome_id,
+      side_name: s.name,
+      display_name: s.name,
+      mid_price: sideMarket.mid_price,
+      volume_24h: null,
+      // The market's volume is the question's: no split per side.
+      total_volume: null,
+      open_interest: null,
+      is_settled: m.is_settled,
+      settled_at: m.settled_at,
+      coin: sideMarket.coin ?? undefined,
+    };
+  });
+
+  return {
+    question_id: null,
+    title: m.display_name,
+    description: m.question_description,
+    class: m.class,
+    underlying: m.underlying,
+    outcome_count: outcomes.length,
+    total_volume: m.total_volume ?? 0,
+    created_at: null,
+    resolved_at: m.settled_at,
+    status: m.is_settled ? 'settled' : 'live',
+    singleton_outcome_id: m.outcome_id,
+    expiry: m.expiry,
+    period: m.period,
+    target_price: m.target_price,
+    outcomes,
+  };
 }
 
 function toQuestionOutcome(m: Hip4MarketEnriched): Hip4QuestionOutcome {
