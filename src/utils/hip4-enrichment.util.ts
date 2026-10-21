@@ -532,12 +532,24 @@ export function buildQuestionsWithOutcomes(
   }
 
   for (const m of singletons) {
-    if (m.outcome_id < 10) continue; // skip template/metadata markets
+    if (!isTradedMarket(m)) continue;
     grouped.push(standaloneQuestion(m, midPrices));
   }
 
   grouped.sort((a, b) => b.total_volume - a.total_volume);
   return grouped;
+}
+
+/**
+ * False for a row that is no market to show: the USDC token row (outcome 0,
+ * no coin) and a side coin's bare placeholder row (named after its coin, no
+ * sides, no class; see `isBareMarketRow`). Outcomes 1–5 are real markets.
+ */
+function isTradedMarket(m: Hip4MarketEnriched): boolean {
+  const coin = (m.coin ?? '').trim();
+  if (!coin) return false;
+  const name = (m.name ?? '').trim();
+  return Boolean(m.parsed_sides?.length || m.class || (name && name !== coin));
 }
 
 /**
