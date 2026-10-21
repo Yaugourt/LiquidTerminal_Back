@@ -532,24 +532,14 @@ export function buildQuestionsWithOutcomes(
   }
 
   for (const m of singletons) {
-    if (!isTradedMarket(m)) continue;
+    // The USDC token row (outcome 0) has no coin: it is no market. A side
+    // coin's placeholder row is dropped upstream (`isBareMarketRow`).
+    if (!(m.coin ?? '').trim()) continue;
     grouped.push(standaloneQuestion(m, midPrices));
   }
 
   grouped.sort((a, b) => b.total_volume - a.total_volume);
   return grouped;
-}
-
-/**
- * False for a row that is no market to show: the USDC token row (outcome 0,
- * no coin) and a side coin's bare placeholder row (named after its coin, no
- * sides, no class; see `isBareMarketRow`). Outcomes 1–5 are real markets.
- */
-function isTradedMarket(m: Hip4MarketEnriched): boolean {
-  const coin = (m.coin ?? '').trim();
-  if (!coin) return false;
-  const name = (m.name ?? '').trim();
-  return Boolean(m.parsed_sides?.length || m.class || (name && name !== coin));
 }
 
 /**
@@ -562,6 +552,7 @@ function standaloneQuestion(
   m: Hip4MarketEnriched,
   midPrices?: Map<string, number>
 ): Hip4QuestionWithOutcomes {
+  // A HIP-4 outcome has two sides (coins #10N and #10N + 1).
   const sides: ParsedSide[] = m.parsed_sides?.length
     ? m.parsed_sides.slice(0, 2)
     : [{ name: 'Yes' }, { name: 'No' }];

@@ -140,6 +140,24 @@ describe('IndexerHip4Service caching', () => {
     expect(HYPEDEXER_TTL.hip4EnrichedList).toBe(15);
   });
 
+  it('lists a market with no question once, without the side-coin placeholder rows', async () => {
+    const base = { question_id: null, class: '', underlying: '', settled: 0 };
+    mockClient.getMarkets.mockResolvedValue([
+      { ...base, outcome_id: 1472, coin: '#1472', name: 'NBA Finals Game 5', description: '', side_specs: '[{"name":"San Antonio"},{"name":"New York"}]' },
+      // HypeDexer's row for a traded side coin: nothing of its own.
+      { ...base, outcome_id: 14720, coin: '#14720', name: '#14720', description: '', side_specs: null },
+      // Named after its coin but described: a market, as deep links read it.
+      { ...base, outcome_id: 14730, coin: '#14730', name: '#14730', description: 'Will it rain?', side_specs: null },
+    ]);
+    mockClient.getOutcomeTokens.mockResolvedValue([]);
+    mockClient.getQuestions.mockResolvedValue([]);
+
+    const questions = await svc.getQuestionsWithOutcomes();
+
+    expect(questions.map((q) => q.singleton_outcome_id).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([1472, 14730]);
+    expect(questions.find((q) => q.singleton_outcome_id === 1472)?.outcomes.map((o) => o.coin)).toEqual(['#14720', '#14721']);
+  });
+
   it('answers markets-enriched per limit instead of whichever limit came first', async () => {
     mockClient.getMarkets.mockImplementation(async ({ limit }: { limit?: number }) =>
       Array.from({ length: limit ?? 100 }, (_, i) => ({ outcome_id: 10 + i, question_id: null, coin: `#${10 + i}`, class: null, underlying: null, name: null }))

@@ -240,9 +240,9 @@ export class IndexerHip4Service {
   }
 
   /**
-   * Questions with nested outcomes. Singleton markets (no question_id) are
-   * surfaced as synthetic 1-outcome questions so the grid handles everything
-   * uniformly.
+   * Questions with nested outcomes. A market with no question_id comes as a
+   * question of its own with its two sides (`buildQuestionsWithOutcomes`), so
+   * the grid handles everything uniformly.
    */
   public async getQuestionsWithOutcomes(p: {
     question_id?: number;
@@ -257,7 +257,10 @@ export class IndexerHip4Service {
         this.fetchHlMidPrices(),
         this.fetchOutcomeTemplates(),
       ]);
-      const enriched = enrichMarkets(markets, outcomeTokens, questions, midPrices, templates);
+      // A side coin's placeholder row is no market (the deep links' rule):
+      // drop it before it becomes a question of its own.
+      const listed = markets.filter((m) => m.question_id != null || !isBareMarketRow(m));
+      const enriched = enrichMarkets(listed, outcomeTokens, questions, midPrices, templates);
       return buildQuestionsWithOutcomes(enriched, questions, midPrices);
     };
 

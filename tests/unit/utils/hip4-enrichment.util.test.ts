@@ -291,7 +291,7 @@ describe('buildQuestionsWithOutcomes — markets with no question', () => {
     expect(q.outcomes.every((o) => o.is_settled && o.settled_at === '2026-05-28T06:00:10Z')).toBe(true);
   });
 
-  it('keeps the first markets and drops the rows that are no market', () => {
+  it('keeps the first markets and drops the USDC row', () => {
     const usdc0 = row({ outcome_id: 0, coin: '', name: 'USDC', side_specs: null });
     const btc1 = row({
       outcome_id: 1,
@@ -304,9 +304,7 @@ describe('buildQuestionsWithOutcomes — markets with no question', () => {
       period: '1d',
       settled: 1,
     });
-    // A side coin's placeholder row: named after its coin, no sides, no class.
-    const placeholder = row({ outcome_id: 14720, name: '#14720', side_specs: null });
-    const qs = questionsOf([usdc0, btc1, placeholder]);
+    const qs = questionsOf([usdc0, btc1]);
     expect(qs.map((q) => q.singleton_outcome_id)).toEqual([1]);
     expect(qs[0]).toMatchObject({ title: 'BTC above 78,213 on May 4 at 6:00 AM UTC?', status: 'settled' });
   });
