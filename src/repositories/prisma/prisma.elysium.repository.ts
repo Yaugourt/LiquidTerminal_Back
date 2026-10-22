@@ -1,6 +1,6 @@
 import { prismaHistorical } from '../../core/prisma.historical.service';
 import { BRIDGE_TX_TYPES } from '../../services/elysium/elysium-ingest.util';
-import type { BridgeRow, TokenRow, TxRow } from '../../services/elysium/elysium-ingest.util';
+import type { BridgeRow, LiveTxRow, TokenRow, TxRow } from '../../services/elysium/elysium-ingest.util';
 import type { DexPoolRow, DexSwapRow } from '../../services/elysium/elysium-dex.util';
 import type {
   GraduationRow,
@@ -11,7 +11,16 @@ import type {
 /** Constant SQL list of the bridge tx types (no user input involved). */
 const BRIDGE_TYPES_SQL = BRIDGE_TX_TYPES.map((t) => `'${t}'`).join(', ');
 
-export type ElysiumStream = 'tx' | 'bridge' | 'tokens' | 'dex' | 'methods' | 'tokenstats' | 'launchpad' | 'launchstats';
+export type ElysiumStream =
+  | 'tx'
+  | 'txlive'
+  | 'bridge'
+  | 'tokens'
+  | 'dex'
+  | 'methods'
+  | 'tokenstats'
+  | 'launchpad'
+  | 'launchstats';
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -112,6 +121,27 @@ export class ElysiumIngestRepository {
       JSON.stringify(rows)
     );
     return { inserted: result[0]?.inserted ?? 0, contracts: result[0]?.contracts ?? 0 };
+  }
+
+  /** Inserts RPC-read calls to the project contracts; a tx already stored is skipped. */
+  public async insertLiveTxs(rows: LiveTxRow[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    return prismaHistorical.$executeRawUnsafe(
+      `INSERT INTO elysium_tx_live (tx_hash, block_number, block_time, from_addr, to_addr)
+       SELECT tx_hash, block_number, block_time, from_addr, to_addr
+       FROM jsonb_to_recordset($1::jsonb) AS r(
+         tx_hash text, block_number bigint, block_time timestamptz, from_addr text, to_addr text)
+       ON CONFLICT (tx_hash) DO NOTHING`,
+      JSON.stringify(rows)
+    );
+  }
+
+  /** Drops RPC-read calls the provider's own tx stream has covered for a while. */
+  public async pruneLiveTxs(before: Date): Promise<number> {
+    return prismaHistorical.$executeRawUnsafe(
+      `DELETE FROM elysium_tx_live WHERE block_time < $1::timestamptz`,
+      before.toISOString()
+    );
   }
 
   /** Upserts bridge transfers; only rows whose tracked fields changed are rewritten. */

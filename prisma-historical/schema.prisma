@@ -315,6 +315,20 @@ model ElysiumLaunchTrade {
 }
 
 /// Watermark per ingestion stream (tx, bridge, tokens) for resume + monitoring.
+/// Calls to the ecosystem project contracts read from the public RPC while the
+/// provider's indexer lags (no gas, status or spam flag in that view).
+model ElysiumTxLive {
+  txHash      String   @id @map("tx_hash") @db.VarChar(66)
+  blockNumber BigInt   @map("block_number")
+  blockTime   DateTime @map("block_time") @db.Timestamptz(3)
+  fromAddr    String   @map("from_addr") @db.VarChar(42)
+  toAddr      String   @map("to_addr") @db.VarChar(42)
+
+  @@index([toAddr, blockTime])
+  @@index([blockTime])
+  @@map("elysium_tx_live")
+}
+
 model ElysiumIngestState {
   stream       String    @id @db.VarChar(32)
   cursor       DateTime? @db.Timestamptz(3)

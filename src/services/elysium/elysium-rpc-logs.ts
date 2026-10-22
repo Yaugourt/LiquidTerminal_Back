@@ -2,7 +2,8 @@
  * Elysium logs read straight from a public RPC (eth_getLogs), as a fallback
  * for the log-based ingest streams (dex, launchpad) while the provider's
  * indexer lags behind the chain. Logs come back in the provider's /logs row
- * shape, so the existing decoders read them unchanged.
+ * shape, so the existing decoders read them unchanged. Whole blocks
+ * (eth_getBlockByNumber, batched) feed the live tx fallback the same way.
  *
  * The streams plan their windows in time; the RPC filters by block. A time
  * is turned into a block by interpolation search over block timestamps
@@ -22,6 +23,11 @@ const SEARCH_TOLERANCE_BLOCKS = 2;
 /** Interpolation and bisection alternate, so ~2 x log2(blocks) steps always converge. */
 const SEARCH_MAX_STEPS = 64;
 const MEMO_MAX = 512;
+/**
+ * The public RPC answers ~34 items of a burst and sustains ~12 blocks/s at 25 per batch with a 1s
+ * gap (measured 2026-10-22); the chain makes ~8 blocks/s.
+ */
+export const BLOCK_BATCH = 25;
 
 interface RpcLog {
   address: string;
@@ -67,6 +73,21 @@ export function toUpstreamLog(l: RpcLog): UpstreamLogRow | null {
   };
 }
 
+/** A transaction as eth_getBlockByNumber(n, true) returns it on Elysium. */
+export interface RpcBlockTx {
+  hash: string;
+  from: string;
+  to: string | null;
+  type?: string;
+  input?: string;
+}
+
+export interface RpcBlock {
+  number: number;
+  timestamp: number;
+  transactions: RpcBlockTx[];
+}
+
 export class ElysiumRpcLogs {
   private static instance: ElysiumRpcLogs;
 
@@ -103,8 +124,30 @@ export class ElysiumRpcLogs {
     return rows;
   }
 
+  /**
+   * Blocks `from` .. `from + count - 1` with their transactions, in one batched call. Only the
+   * leading run of blocks the RPC answered is returned (it refuses part of a burst), so a caller
+   * that advances by the result length never skips a block.
+   */
+  public async getBlocks(from: number, count: number): Promise<RpcBlock[]> {
+    const body = Array.from({ length: count }, (_, i) => ({
+      jsonrpc: '2.0',
+      id: i,
+      method: 'eth_getBlockByNumber',
+      params: [`0x${(from + i).toString(16)}`, true],
+    }));
+    const replies = await this.callBatch<{ number: string; timestamp: string; transactions: RpcBlockTx[] } | null>(body);
+    const blocks: RpcBlock[] = [];
+    for (let i = 0; i < count; i++) {
+      const b = replies.get(i);
+      if (!b) break;
+      blocks.push({ number: parseInt(b.number, 16), timestamp: parseInt(b.timestamp, 16), transactions: b.transactions ?? [] });
+    }
+    return blocks;
+  }
+
   /** Last block whose timestamp is at or before `ts` (seconds); only past times are memoised. */
-  private async blockAtOrBefore(ts: number): Promise<number> {
+  public async blockAtOrBefore(ts: number): Promise<number> {
     const key = Math.floor(ts);
     const known = this.blockAt.get(key);
     if (known !== undefined) return known;
@@ -120,7 +163,7 @@ export class ElysiumRpcLogs {
   private headCache: { at: number; block: number } | null = null;
 
   /** Current head, read at most every few seconds. */
-  private async headBlock(): Promise<number> {
+  public async headBlock(): Promise<number> {
     if (this.headCache && Date.now() - this.headCache.at < 5_000) return this.headCache.block;
     const block = parseInt(await this.call<string>('eth_blockNumber', []), 16);
     this.headCache = { at: Date.now(), block };
@@ -189,6 +232,23 @@ export class ElysiumRpcLogs {
       errorType: lastError instanceof Error ? lastError.name : typeof lastError,
     });
     throw lastError instanceof Error ? lastError : new Error(`Elysium RPC: ${method} failed`);
+  }
+
+  /** Serialised batch call; ids that came back with a result, errored items left out. */
+  private async callBatch<T>(body: Array<{ id: number }>): Promise<Map<number, T>> {
+    await this.wait();
+    const res = await fetch(this.url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`Elysium RPC: HTTP ${res.status}`);
+    const replies = (await res.json()) as Array<{ id: number; result?: T | null }>;
+    const out = new Map<number, T>();
+    if (!Array.isArray(replies)) return out;
+    for (const r of replies) if (r && r.result) out.set(r.id, r.result);
+    return out;
   }
 
   private wait(): Promise<void> {
