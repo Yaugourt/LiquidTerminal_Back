@@ -18,6 +18,7 @@ import {
 } from '../types/websocket.types';
 import { CompletedTrade } from '../types/wallet-events.types';
 import { positiveIntEnv } from '../utils/env';
+import { normalizeLiquidationFilters } from './liquidationFilters';
 
 /**
  * Internal WebSocket Server
@@ -432,18 +433,37 @@ export class InternalWebSocketServer {
       return;
     }
 
+    // Only `liquidation` carries filters, and they come from an anonymous
+    // client: validate and normalize them before storing anything, so the
+    // broadcast loop only ever sees well-formed values. Other channels never
+    // read filters, so they keep an empty set.
+    let filters: WSLiquidationFilters = {};
+    if (subType === 'liquidation') {
+      const normalized = normalizeLiquidationFilters(message.subscription?.filters);
+      if (!normalized.ok) {
+        this.sendMessage(ws, {
+          type: 'error',
+          error: normalized.error,
+          code: 'INVALID_FILTERS',
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+      filters = normalized.filters;
+    }
+
     // Check if already subscribed to this type
     const existingIndex = client.subscriptions.findIndex((s) => s.type === subType);
     if (existingIndex >= 0) {
       // Update existing subscription filters (wallet_event, liquidation_alert have no filters)
       if (subType === 'liquidation') {
-        client.subscriptions[existingIndex].filters = message.subscription?.filters || {};
+        client.subscriptions[existingIndex].filters = filters;
       }
     } else {
       // Add new subscription
       client.subscriptions.push({
         type: subType,
-        filters: message.subscription?.filters || {},
+        filters,
         subscribedAt: Date.now(),
       });
     }
@@ -452,7 +472,7 @@ export class InternalWebSocketServer {
       type: 'subscribed',
       data: {
         type: subType,
-        filters: subType === 'liquidation' ? (message.subscription?.filters || {}) : {},
+        filters,
       },
       timestamp: new Date().toISOString(),
     });
@@ -602,37 +622,46 @@ export class InternalWebSocketServer {
     let sentCount = 0;
 
     for (const [ws, clientId] of this.clientsBySocket) {
-      const client = this.clients.get(clientId);
-      if (!client) continue;
+      // One client's failure must never stop delivery to the clients after it
+      // in the Map (the caller only logs and drops the whole broadcast).
+      try {
+        const client = this.clients.get(clientId);
+        if (!client) continue;
 
-      // Check if client is subscribed to liquidations
-      const subscription = client.subscriptions.find((s) => s.type === 'liquidation');
-      if (!subscription) continue;
+        // Check if client is subscribed to liquidations
+        const subscription = client.subscriptions.find((s) => s.type === 'liquidation');
+        if (!subscription) continue;
 
-      const filters = subscription.filters;
-      const hasFilters =
-        (filters.coins && filters.coins.length > 0) ||
-        (filters.minAmountUsd !== undefined && filters.minAmountUsd !== null) ||
-        (filters.wallets && filters.wallets.length > 0);
+        const filters = subscription.filters;
+        const hasFilters =
+          (filters.coins && filters.coins.length > 0) ||
+          (filters.minAmountUsd !== undefined && filters.minAmountUsd !== null) ||
+          (filters.wallets && filters.wallets.length > 0);
 
-      if (hasFilters) {
-        // Filter first, then send matching pre-serialized messages
-        const filtered = serializedMessages.filter((m) =>
-          this.matchesFilters(m.liq, filters)
-        );
-        if (filtered.length === 0) continue;
+        if (hasFilters) {
+          // Filter first, then send matching pre-serialized messages
+          const filtered = serializedMessages.filter((m) =>
+            this.matchesFilters(m.liq, filters)
+          );
+          if (filtered.length === 0) continue;
 
-        for (const { serialized } of filtered) {
-          this.sendRawMessage(ws, serialized);
+          for (const { serialized } of filtered) {
+            this.sendRawMessage(ws, serialized);
+          }
+        } else {
+          // No filters — send all pre-serialized messages directly
+          for (const { serialized } of serializedMessages) {
+            this.sendRawMessage(ws, serialized);
+          }
         }
-      } else {
-        // No filters — send all pre-serialized messages directly
-        for (const { serialized } of serializedMessages) {
-          this.sendRawMessage(ws, serialized);
-        }
+
+        sentCount++;
+      } catch (error) {
+        logDeduplicator.warn('InternalWebSocketServer: Liquidation broadcast failed for one client', {
+          clientId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-
-      sentCount++;
     }
 
     if (sentCount > 0) {
