@@ -51,13 +51,18 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-import { marketRateLimiter, passthroughRateLimiter } from '../../../src/middleware/apiRateLimiter';
+import {
+  indexerAddressQueryRateLimiter,
+  indexerAddressRateLimiter,
+  marketRateLimiter,
+  passthroughRateLimiter,
+} from '../../../src/middleware/apiRateLimiter';
 
-type Limiter = (req: Request, res: Response, next: NextFunction) => Promise<void>;
+type Limiter = (req: Request, res: Response, next: NextFunction) => Promise<void> | void;
 
 let lastRetryAfter: string | undefined;
 
-async function hit(limiter: Limiter, ip: string): Promise<number> {
+async function hit(limiter: Limiter, ip: string, query: Record<string, unknown> = {}): Promise<number> {
   let status = 200;
   const res = {
     setHeader(name: string, value: string) {
@@ -72,7 +77,7 @@ async function hit(limiter: Limiter, ip: string): Promise<number> {
       return this;
     },
   } as unknown as Response;
-  await limiter({ ip, path: '/x' } as Request, res, () => undefined);
+  await limiter({ ip, path: '/x', query } as Request, res, () => undefined);
   return status;
 }
 
@@ -169,5 +174,68 @@ describe('rate limiters', () => {
     } finally {
       process.env = saved;
     }
+  });
+
+  describe('IPv6 clients share one budget per /64', () => {
+    it.each([
+      ['market', marketRateLimiter, 200],
+      ['passthrough', passthroughRateLimiter, 300],
+    ] as const)('%s limiter: addresses of one /64 share a counter, another /64 does not', async (_name, limiter, max) => {
+      const statuses = await burst(limiter, '2001:db8:1:2::1', max);
+      expect(statuses.every((s) => s === 200)).toBe(true);
+      // Any other address of the same /64 (full or compressed) is the same caller.
+      expect(await hit(limiter, '2001:db8:1:2:dead:beef:0:99')).toBe(429);
+      expect(await hit(limiter, '2001:0db8:0001:0002:ffff:ffff:ffff:ffff')).toBe(429);
+      // A different /64 has its own budget.
+      expect(await hit(limiter, '2001:db8:1:3::1')).toBe(200);
+    });
+
+    it('keeps IPv4 per address and maps IPv4-mapped IPv6 to its IPv4 address', async () => {
+      await burst(marketRateLimiter, '9.9.9.9', 200);
+      expect(await hit(marketRateLimiter, '9.9.9.9')).toBe(429);
+      expect(await hit(marketRateLimiter, '::ffff:9.9.9.9')).toBe(429);
+      expect(await hit(marketRateLimiter, '9.9.9.10')).toBe(200);
+    });
+
+    it('applies the /64 key to the in-memory fallback too', async () => {
+      mockRedis.fail = 'reject';
+      const statuses = await burst(marketRateLimiter, '2001:db8:aaaa:1::1', 200);
+      expect(statuses.every((s) => s === 200)).toBe(true);
+      expect(await hit(marketRateLimiter, '2001:db8:aaaa:1::2')).toBe(429);
+      expect(await hit(marketRateLimiter, '2001:db8:aaaa:2::1')).toBe(200);
+    });
+  });
+
+  describe('indexer address limiter', () => {
+    it('lets ten wallet pages open in one second and refuses the 61st call', async () => {
+      // A wallet page makes 6 per-address indexer calls in its first second.
+      const statuses = await burst(indexerAddressRateLimiter, '10.0.0.1', 61);
+      expect(statuses.slice(0, 60).every((s) => s === 200)).toBe(true);
+      expect(statuses[60]).toBe(429);
+      // Its own counters: the general and passthrough budgets are untouched.
+      expect(await hit(marketRateLimiter, '10.0.0.1')).toBe(200);
+      expect(await hit(passthroughRateLimiter, '10.0.0.1')).toBe(200);
+    });
+
+    it('caps a sweep at 1200 a minute per IP (per /64 for IPv6)', async () => {
+      const statuses: number[] = [];
+      for (let second = 0; second < 21; second++) {
+        statuses.push(...(await burst(indexerAddressRateLimiter, '2001:db8:bbbb:1::1', 58)));
+        now += 1000;
+      }
+      expect(statuses.filter((s) => s === 200).length).toBe(1200);
+      expect(await hit(indexerAddressRateLimiter, '2001:db8:bbbb:1::77')).toBe(429);
+    });
+
+    it('the query variant only counts requests that name a user', async () => {
+      // Market-wide polls (no `user`) never spend the budget.
+      for (let i = 0; i < 100; i++) expect(await hit(indexerAddressQueryRateLimiter, '10.0.0.2')).toBe(200);
+      expect(await hit(indexerAddressQueryRateLimiter, '10.0.0.2', { user: '' })).toBe(200);
+      const wallet = { user: '0x' + 'a'.repeat(40) };
+      const named: number[] = [];
+      for (let i = 0; i < 61; i++) named.push(await hit(indexerAddressQueryRateLimiter, '10.0.0.2', wallet));
+      expect(named.slice(0, 60).every((s) => s === 200)).toBe(true);
+      expect(named[60]).toBe(429);
+    });
   });
 });

@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import { indexerTime } from './bounds';
 
 const ethUser = z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user');
 
 const timeRangeQuery = {
-  start_time: z.string().max(64).optional(),
-  end_time: z.string().max(64).optional(),
+  start_time: indexerTime,
+  end_time: indexerTime,
 };
 
 export const indexerUsersLeaderboardQuerySchema = z.object({

@@ -1,17 +1,19 @@
 import { z } from 'zod';
+import { indexerBoundedNumber, indexerOffset, indexerTime } from './bounds';
 
 const optionalString = z.string().max(256).optional();
-const optionalNum = z.coerce.number().optional();
+/** Realized-PnL filters: finite, within any real trade. */
+const pnlBound = indexerBoundedNumber(1e12);
 
 const listQueryShape = {
   user: optionalString,
   coin: optionalString,
   direction: z.string().max(16).optional(),
-  start_time: optionalString,
-  end_time: optionalString,
-  min_pnl: optionalNum,
-  max_pnl: optionalNum,
-  offset: z.coerce.number().int().min(0).optional(),
+  start_time: indexerTime,
+  end_time: indexerTime,
+  min_pnl: pnlBound,
+  max_pnl: pnlBound,
+  offset: indexerOffset,
   // Every row returned is billed upstream: an unbounded limit let one request
   // spend thousands of credits.
   limit: z.coerce.number().int().min(1).max(1000).optional(),
@@ -30,8 +32,8 @@ export const indexerCompletedTradesSummaryQuerySchema = z.object({
     user: optionalString,
     coin: optionalString,
     direction: z.string().max(16).optional(),
-    start_time: optionalString,
-    end_time: optionalString,
+    start_time: indexerTime,
+    end_time: indexerTime,
   }),
   params: z.object({}),
 });

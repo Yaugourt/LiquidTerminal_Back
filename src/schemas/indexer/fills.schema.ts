@@ -1,7 +1,15 @@
 import { z } from 'zod';
+import {
+  indexerBoundedNumber,
+  indexerCursor,
+  indexerOffset,
+  indexerTime,
+  indexerTimeRange,
+} from './bounds';
 
 const optionalString = z.string().max(256).optional();
-const optionalNum = z.coerce.number().optional();
+/** Notional floor in USD: finite, so it cannot be an Infinity/NaN cache key. */
+const sizeUsd = indexerBoundedNumber(1e12);
 
 /** Query param boolean: only true/false strings (coerce.boolean treats "false" as true). */
 const optionalHasPriorityGas = z.preprocess((val: unknown) => {
@@ -18,12 +26,12 @@ const fillsQueryShape = {
   user: optionalString,
   coin: optionalString,
   side: z.string().max(8).optional(),
-  size_usd: optionalNum,
-  start_time: optionalString,
-  end_time: optionalString,
-  offset: z.coerce.number().int().min(0).optional(),
+  size_usd: sizeUsd,
+  start_time: indexerTime,
+  end_time: indexerTime,
+  offset: indexerOffset,
   limit: z.coerce.number().int().min(1).max(1000).optional(),
-  cursor: optionalString,
+  cursor: indexerCursor,
   order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
   has_priority_gas: optionalHasPriorityGas,
 };
@@ -43,11 +51,11 @@ const ethAddress = z
   .regex(/^0x[a-fA-F0-9]{40}$/, 'Invalid user address');
 
 const userFillsQueryShape = {
-  time_range: z.string().max(64).optional(),
+  time_range: indexerTimeRange,
   coin: optionalString,
-  offset: z.coerce.number().int().min(0).optional(),
+  offset: indexerOffset,
   limit: z.coerce.number().int().min(1).max(1000).optional(),
-  cursor: optionalString,
+  cursor: indexerCursor,
   order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
   has_priority_gas: optionalHasPriorityGas,
 };
@@ -64,9 +72,9 @@ const spotFillsQueryShape = {
   coin: optionalString,
   coins: optionalString,
   side: z.string().max(8).optional(),
-  start_time: optionalString,
-  end_time: optionalString,
-  offset: z.coerce.number().int().min(0).optional(),
+  start_time: indexerTime,
+  end_time: indexerTime,
+  offset: indexerOffset,
   limit: z.coerce.number().int().min(1).max(1000).optional(),
   order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
   has_priority_gas: optionalHasPriorityGas,
@@ -81,9 +89,9 @@ export const indexerFillsSpotUserQuerySchema = z.object({
   query: z.object({
     coin: optionalString,
     coins: optionalString,
-    start_time: optionalString,
-    end_time: optionalString,
-    offset: z.coerce.number().int().min(0).optional(),
+    start_time: indexerTime,
+    end_time: indexerTime,
+    offset: indexerOffset,
     limit: z.coerce.number().int().min(1).max(1000).optional(),
     order: z.enum(['ASC', 'DESC', 'asc', 'desc']).optional(),
     has_priority_gas: optionalHasPriorityGas,

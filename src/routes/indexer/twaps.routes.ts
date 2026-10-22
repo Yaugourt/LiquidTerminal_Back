@@ -1,5 +1,10 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import {
+  marketRateLimiter,
+  passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
+  indexerAddressRateLimiter,
+} from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   twapsListQuerySchema,
@@ -97,6 +102,7 @@ router.get(
   '/user/:user_address',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(twapsUserQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -130,6 +136,7 @@ router.get(
   '/',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(twapsListQuerySchema),
   (async (req: Request, res: Response) => {
     try {

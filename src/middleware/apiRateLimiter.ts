@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { redisService } from '../core/redis.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { positiveIntEnv } from '../utils/env';
+import { rateLimitKeyForIp } from '../utils/client-ip';
 
 // Configuration des limites
 //
@@ -142,10 +143,13 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
     });
     return;
   }
+  // An IPv6 host owns a whole /64 and can pick any address in it, so the
+  // budget is per /64 (IPv4 stays per address).
+  const key = rateLimitKeyForIp(ip);
 
   try {
     // Vérification multi-niveaux avec Redis
-    const [burstCount, minuteCount, hourCount] = await countRequest(`ratelimit:${ip}`, MARKET_WINDOWS);
+    const [burstCount, minuteCount, hourCount] = await countRequest(`ratelimit:${key}`, MARKET_WINDOWS);
 
     // Vérification des limites
     if (burstCount > RATE_LIMITS.BURST_LIMIT.MAX_REQUESTS) {
@@ -168,7 +172,7 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
       ip: req.ip
     });
     // Fail-secure: use in-memory fallback instead of letting everything through
-    if (checkInMemoryFallback(ip)) {
+    if (checkInMemoryFallback(key)) {
       next();
     } else {
       // The fallback counts one-second windows.
@@ -224,8 +228,10 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
       res.status(400).json({ error: 'IP address not found', message: 'Could not determine client IP address' });
       return;
     }
+    // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4.
+    const key = rateLimitKeyForIp(ip);
     try {
-      const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${ip}`, windows);
+      const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${key}`, windows);
       if (burstCount > limits.BURST.MAX_REQUESTS) {
         return sendLimitExceededResponse(res, `Too many ${what} requests per second`, limits.BURST.WINDOW);
       }
@@ -242,7 +248,7 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
       });
       // Fail-secure, same as the general limiter, at this limiter's own burst.
       // Distinct key namespace so the fallbacks don't share a counter.
-      if (checkInMemoryFallback(`${namespace}:${ip}`, limits.BURST.MAX_REQUESTS)) {
+      if (checkInMemoryFallback(`${namespace}:${key}`, limits.BURST.MAX_REQUESTS)) {
         next();
       } else {
         sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
@@ -254,8 +260,8 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
 export const passthroughRateLimiter = createIpLimiter('pt', PASSTHROUGH_LIMITS, 'indexer');
 
 /**
- * Per-address lookups (Elysium address / contract profiles, per-user indexer
- * pass-through). Any valid address is a fresh cache key, so each request can
+ * Per-address lookups (Elysium address / contract profiles; the paid indexer's
+ * per-address routes have their own, wider limiter below). Any valid address is a fresh cache key, so each request can
  * run a batch of SQL or a paid upstream call: a page view makes 1-4 of them.
  * 300 a minute per IP (20 a second) lets dozens of people behind one address
  * browse profiles and still caps a scripted sweep.
@@ -268,6 +274,38 @@ export const addressLookupRateLimiter = createIpLimiter(
   },
   'address lookup'
 );
+
+/**
+ * Per-address passthrough to the paid indexer (wallet fills, funding, TWAPs,
+ * profile aggregates). Any address is a fresh cache key and a billed upstream
+ * call, so these get a counter of their own on top of the general passthrough
+ * one. addressLookupRateLimiter (20 a second) is too tight for them: opening
+ * one wallet page makes 6 of these calls in its first second (overview,
+ * performance, coins, coin distribution, funding summary, round-trips) and
+ * ~5 a minute while it stays open, so four people opening a wallet in the same
+ * second behind one IP would hit it. 60 a second fits ten simultaneous
+ * openings; 1,200 a minute is ~200 wallet openings or ~230 open wallet pages
+ * per IP, far above browsing, well below a scripted address sweep.
+ */
+export const indexerAddressRateLimiter = createIpLimiter(
+  'iaddr',
+  {
+    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('INDEXER_ADDRESS_RATE_LIMIT_BURST', 60) },
+    MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('INDEXER_ADDRESS_RATE_LIMIT_MINUTE', 1200) },
+  },
+  'indexer address'
+);
+
+/**
+ * Same budget for list routes whose address is an optional `user` query param:
+ * only requests that name one are counted, so market-wide polls of the same
+ * route (biggest trades, live fills) never spend it.
+ */
+export const indexerAddressQueryRateLimiter = (req: Request, res: Response, next: NextFunction): Promise<void> | void => {
+  const user = req.query.user;
+  if (typeof user !== 'string' || user === '') return next();
+  return indexerAddressRateLimiter(req, res, next);
+};
 
 /**
  * Account and write routes (auth, CSV uploads): stacked on the general

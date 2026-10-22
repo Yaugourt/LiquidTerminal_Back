@@ -1,5 +1,10 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import {
+  marketRateLimiter,
+  passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
+  indexerAddressRateLimiter,
+} from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   indexerFillsQuerySchema,
@@ -81,6 +86,7 @@ router.get(
   '/recent',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(indexerFillsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -120,6 +126,7 @@ router.get(
   '/spot/user/:user_address',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(indexerFillsSpotUserQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -143,6 +150,7 @@ router.get(
   '/spot',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(indexerFillsSpotQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -163,6 +171,7 @@ router.get(
   '/user/:user_address',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(indexerFillsUserAddressQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -186,6 +195,7 @@ router.get(
   '/',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(indexerFillsQuerySchema),
   (async (req: Request, res: Response) => {
     try {

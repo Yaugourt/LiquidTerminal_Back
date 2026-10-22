@@ -1,5 +1,9 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import {
+  marketRateLimiter,
+  passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
+} from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   indexerCompletedTradesListQuerySchema,
@@ -53,6 +57,7 @@ router.get(
   '/summary',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(indexerCompletedTradesSummaryQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -98,6 +103,7 @@ router.get(
   '/',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(indexerCompletedTradesListQuerySchema),
   (async (req: Request, res: Response) => {
     try {

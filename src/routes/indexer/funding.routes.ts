@@ -1,5 +1,9 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import {
+  marketRateLimiter,
+  passthroughRateLimiter,
+  indexerAddressRateLimiter,
+} from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   indexerFundingHistoryQuerySchema,
@@ -65,6 +69,7 @@ router.get(
   '/userFunding',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(indexerFundingUserFundingQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -93,6 +98,7 @@ router.get(
   '/userFunding/summary',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(indexerFundingUserFundingQuerySchema),
   (async (req: Request, res: Response) => {
     try {
