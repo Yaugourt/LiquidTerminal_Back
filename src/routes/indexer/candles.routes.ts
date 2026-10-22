@@ -1,5 +1,5 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import { candlesQuerySchema } from '../../schemas/indexer/candles.schema';
 import { HypeDexerCandlesClient, type CandleInterval } from '../../clients/hypedexer/rest/candles/candles.client';
@@ -15,10 +15,15 @@ const STEP_MS: Record<CandleInterval, number> = { '5s': 5e3, '30s': 30e3, '1m': 
 /**
  * GET /indexer/candles: OHLCV bars from the indexer, Hyperliquid candle
  * format, intervals 5s to 1d. The window is clamped to MAX_BARS bars.
+ *
+ * Each distinct (coin, interval, start, end) is a paid upstream read of up to
+ * 5000 bars, so it sits behind the pass-through limiter, and the schema only
+ * accepts the coins and the end times (now, up to a day back) the charts send.
  */
 router.get(
   '/',
   marketRateLimiter,
+  passthroughRateLimiter,
   validateGetRequest(candlesQuerySchema),
   (async (req: Request, res: Response) => {
     try {
