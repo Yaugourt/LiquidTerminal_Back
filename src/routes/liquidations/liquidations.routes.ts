@@ -9,18 +9,28 @@ import { HistoricalStatsService, HistoricalStatsPeriod } from '../../services/li
 import { HistoricalChartService } from '../../services/liquidations/liquidations.historical-chart.service';
 import { HistoricalChartPeriod } from '../../types/historical.types';
 import { LiquidationQueryParams, LiquidationsError, ChartPeriod, TopLiquidationsPeriod } from '../../types/liquidations.types';
-import { marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
-import { liquidationsQuerySchema, recentLiquidationsQuerySchema } from '../../schemas/liquidations.schema';
+import { liquidationsQuerySchema, recentLiquidationsQuerySchema, analyticsStatsQuerySchema } from '../../schemas/liquidations.schema';
 import { sseStreamQuerySchema } from '../../schemas/sse.schema';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { serializeBigInts } from '../../utils/bigint.utils';
+import { rateLimitKeyForIp } from '../../utils/client-ip';
 
 const router = Router();
 const liquidationsService = LiquidationsService.getInstance();
 const sseManager = SSEManagerService.getInstance();
 const historicalStatsService = HistoricalStatsService.getInstance();
 const historicalChartService = HistoricalChartService.getInstance();
+
+/**
+ * start_time / end_time as a canonical ISO string floored to the minute: the
+ * schema already checked the format, and a minute is below what the data can
+ * show, but without it every millisecond is its own paid upstream read.
+ */
+function normalizeTime(value: string): string {
+  return new Date(Math.floor(Date.parse(value) / 60_000) * 60_000).toISOString();
+}
 
 /**
  * Parse validated query parameters into LiquidationQueryParams
@@ -36,21 +46,26 @@ function parseQueryParams(query: Request['query']): LiquidationQueryParams {
     params.user = query.user;
   }
 
-  if (typeof query.start_time === 'string') {
-    params.start_time = query.start_time;
-  }
-
-  if (typeof query.end_time === 'string') {
-    params.end_time = query.end_time;
-  }
-
   // Hours parameter for time-based filtering
   if (query.hours !== undefined) {
     const hours = typeof query.hours === 'number'
       ? query.hours
       : parseInt(query.hours as string, 10);
-    if (!isNaN(hours) && hours >= 1) {
+    // 168 h is what /recent's schema allows; `/` has no schema for it.
+    if (!isNaN(hours) && hours >= 1 && hours <= 168) {
       params.hours = hours;
+    }
+  }
+
+  // `hours` wins upstream (it sets start_time itself), so explicit times next
+  // to it would only split the cache key.
+  if (params.hours === undefined) {
+    if (typeof query.start_time === 'string') {
+      params.start_time = normalizeTime(query.start_time);
+    }
+
+    if (typeof query.end_time === 'string') {
+      params.end_time = normalizeTime(query.end_time);
     }
   }
 
@@ -92,6 +107,8 @@ function parseQueryParams(query: Request['query']): LiquidationQueryParams {
  */
 router.get('/',
   marketRateLimiter,
+  // Reaches HypeDexer (billed per call).
+  passthroughRateLimiter,
   validateRequest(liquidationsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -217,6 +234,9 @@ router.get('/data',
  */
 router.get('/analytics/stats',
   marketRateLimiter,
+  // Reaches HypeDexer (billed per call).
+  passthroughRateLimiter,
+  validateRequest(analyticsStatsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
       // Parse days param (default 1, clamp 1-30)
@@ -320,6 +340,8 @@ router.get('/stats/all',
  */
 router.get('/recent',
   marketRateLimiter,
+  // Reaches HypeDexer (billed per call).
+  passthroughRateLimiter,
   validateRequest(recentLiquidationsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -379,7 +401,9 @@ router.get('/stream',
     req.setTimeout(0);
     res.setTimeout(0);
 
-    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    // One client per IPv6 /64, like the rate limiters: a host owns the whole
+    // prefix, so the raw address would give it 2^64 connection slots.
+    const ip = rateLimitKeyForIp(req.ip || req.socket.remoteAddress || 'unknown');
 
     // Parse filters from query
     const filters = {

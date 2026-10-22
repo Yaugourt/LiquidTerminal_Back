@@ -499,8 +499,11 @@ export class LiquidationsService implements LiquidationDataProvider {
   // ANALYTICS — passthrough to HypeDexer analytics API
   // ============================================================================
 
-  public async getAnalyticsStats(days: number = 1, coin?: string): Promise<AnalyticsLiquidationStatsResponse> {
-    const cacheKey = `liquidations:analytics:${days}d${coin ? `:${coin.toUpperCase()}` : ''}`;
+  public async getAnalyticsStats(days: number = 1, rawCoin?: string): Promise<AnalyticsLiquidationStatsResponse> {
+    // The upstream matches the coin case-insensitively: one key (and one paid
+    // read) for BTC, btc and Btc, and the same query whichever came first.
+    const coin = rawCoin?.toUpperCase();
+    const cacheKey = `liquidations:analytics:${days}d${coin ? `:${coin}` : ''}`;
 
     try {
       const cached = await redisService.get(cacheKey);
