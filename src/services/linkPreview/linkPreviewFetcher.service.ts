@@ -18,22 +18,58 @@ const gunzipAsync = promisify(gunzip);
  * process's link-preview outbound work regardless of how many callers arrive.
  */
 const MAX_CONCURRENT_PREVIEW_FETCHES = 6;
+/**
+ * The wait line is bounded too. Without it a handful of requests to slow or
+ * redirecting hosts keep every slot busy while an unbounded line of waiters
+ * piles up behind them, starving the other user of the slots (educational
+ * resource creation). Past either limit a fetch fails at once as "preview
+ * unavailable" and the batch route still answers with the other previews.
+ */
+const MAX_QUEUED_PREVIEW_FETCHES = 50;
+const MAX_QUEUE_WAIT_MS = 15_000;
+/** Wall-clock ceiling for one URL once it holds a slot: every attempt and redirect hop included. */
+const PREVIEW_TOTAL_DEADLINE_MS = 20_000;
+
 let activePreviewFetches = 0;
-const previewFetchQueue: Array<() => void> = [];
+interface PreviewWaiter {
+  grant: () => void;
+  timer: NodeJS.Timeout;
+}
+const previewFetchQueue: PreviewWaiter[] = [];
 
 async function acquirePreviewSlot(): Promise<void> {
   if (activePreviewFetches < MAX_CONCURRENT_PREVIEW_FETCHES) {
     activePreviewFetches += 1;
     return;
   }
-  await new Promise<void>((resolve) => previewFetchQueue.push(resolve));
-  activePreviewFetches += 1;
+  if (previewFetchQueue.length >= MAX_QUEUED_PREVIEW_FETCHES) {
+    throw new LinkPreviewFetchError('Preview temporarily unavailable');
+  }
+  // The slot is handed over by releasePreviewSlot() without being freed, so a
+  // newcomer can never slip in between the release and the waiter waking up.
+  await new Promise<void>((resolve, reject) => {
+    const waiter: PreviewWaiter = {
+      grant: () => {
+        clearTimeout(waiter.timer);
+        resolve();
+      },
+      timer: setTimeout(() => {
+        const i = previewFetchQueue.indexOf(waiter);
+        if (i >= 0) previewFetchQueue.splice(i, 1);
+        reject(new LinkPreviewTimeoutError('Preview temporarily unavailable'));
+      }, MAX_QUEUE_WAIT_MS),
+    };
+    previewFetchQueue.push(waiter);
+  });
 }
 
 function releasePreviewSlot(): void {
-  activePreviewFetches = Math.max(0, activePreviewFetches - 1);
   const next = previewFetchQueue.shift();
-  if (next) next();
+  if (next) {
+    next.grant();
+    return;
+  }
+  activePreviewFetches = Math.max(0, activePreviewFetches - 1);
 }
 
 export class LinkPreviewFetcherService {
@@ -82,9 +118,16 @@ export class LinkPreviewFetcherService {
     ) {
       return false;
     }
+    // A timeout is not retried: a host that is too slow once will hold a slot
+    // for another 8 s per attempt. The overall deadline cancels (ERR_CANCELED).
     if (
       code === 'ETIMEDOUT' ||
       code === 'ECONNABORTED' ||
+      code === 'ERR_CANCELED'
+    ) {
+      return false;
+    }
+    if (
       code === 'ECONNRESET' ||
       code === 'EPIPE' ||
       code === 'EAI_AGAIN'
@@ -100,7 +143,7 @@ export class LinkPreviewFetcherService {
    * destination hostname at every hop — auto-follow would let a server redirect
    * us to a private/metadata address after the first DNS check.
    */
-  private async fetchOneHop(url: string): Promise<{ data: unknown; status: number }> {
+  private async fetchOneHop(url: string, deadline: number): Promise<{ data: unknown; status: number }> {
     const urlObj = new URL(url);
     if (!['http:', 'https:'].includes(urlObj.protocol)) {
       throw new LinkPreviewFetchError('Invalid protocol');
@@ -120,6 +163,14 @@ export class LinkPreviewFetcherService {
     // still use the original hostname from `url`, so HTTPS stays correct.
     const safe = await resolveSafeAddress(urlObj.hostname);
 
+    // Whatever is left of this URL's overall budget caps the hop. axios'
+    // `timeout` only covers socket inactivity, so a host dripping bytes would
+    // outlive it: the abort signal is the hard stop.
+    const budget = deadline - Date.now();
+    if (budget <= 0) {
+      throw new LinkPreviewTimeoutError('Timeout fetching preview');
+    }
+
     const response = await axios.get<Buffer>(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; LinkPreviewBot/1.0)',
@@ -127,7 +178,8 @@ export class LinkPreviewFetcherService {
         'Accept-Language': 'en-US,en;q=0.5',
         'Accept-Encoding': 'gzip',
       },
-      timeout: this.REQUEST_TIMEOUT,
+      timeout: Math.min(this.REQUEST_TIMEOUT, budget),
+      signal: AbortSignal.timeout(budget),
       maxRedirects: 0,
       maxContentLength: this.MAX_CONTENT_LENGTH,
       // The remote host picks the Content-Encoding, whatever we asked for, and
@@ -178,6 +230,7 @@ export class LinkPreviewFetcherService {
    */
   private async fetchWithRetry(url: string): Promise<{ data: unknown; status: number }> {
     let lastError: unknown;
+    const deadline = Date.now() + PREVIEW_TOTAL_DEADLINE_MS;
 
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       try {
@@ -186,7 +239,7 @@ export class LinkPreviewFetcherService {
         let currentUrl = url;
         let response: Awaited<ReturnType<typeof this.fetchOneHop>> | null = null;
         for (let hop = 0; hop <= this.MAX_REDIRECTS; hop++) {
-          response = await this.fetchOneHop(currentUrl);
+          response = await this.fetchOneHop(currentUrl, deadline);
           if (response.status < 300) break;
           const locationHeader =
             (response as unknown as { headers?: Record<string, string | undefined> }).headers
@@ -221,6 +274,12 @@ export class LinkPreviewFetcherService {
           });
           throw new LinkPreviewFetchError('This URL is not allowed');
         }
+        if (error instanceof LinkPreviewTimeoutError || Date.now() >= deadline) {
+          logDeduplicator.warn('Preview fetch hit its overall deadline', { url, attempt });
+          throw error instanceof LinkPreviewTimeoutError
+            ? error
+            : new LinkPreviewTimeoutError(`Timeout fetching preview for ${url}`);
+        }
         logDeduplicator.warn('Preview fetch attempt failed', {
           url,
           attempt,
@@ -231,6 +290,10 @@ export class LinkPreviewFetcherService {
           throw lastError;
         }
         if (attempt < this.MAX_RETRIES) {
+          // No point retrying when the deadline would hit during the wait.
+          if (deadline - Date.now() <= this.RETRY_DELAY) {
+            throw lastError;
+          }
           await this.delay(this.RETRY_DELAY);
         }
       }
@@ -336,7 +399,11 @@ export class LinkPreviewFetcherService {
     } catch (error: unknown) {
       // Aperçu best-effort : DNS down / 404 / timeout sont des cas d’exploitation courants, pas des incidents serveur
       logDeduplicator.warn('Preview fetch failed (URL unreachable or bad response)', { url, error: error instanceof Error ? error.message : String(error) });
-      
+
+      if (error instanceof LinkPreviewTimeoutError) {
+        throw error;
+      }
+
       if (axios.isAxiosError(error)) {
         if (error.code === 'ECONNABORTED' || (error.message && error.message.includes('timeout'))) {
           throw new LinkPreviewTimeoutError(`Timeout fetching preview for ${url}`);
