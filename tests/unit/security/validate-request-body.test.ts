@@ -3,9 +3,6 @@
  * one: handlers spread req.body into writes, so a key the schema does not
  * declare (status, reviewerId…) would otherwise reach the database.
  */
-jest.mock('../../../src/core/redis.service', () => ({
-  redisService: { get: jest.fn(), set: jest.fn() },
-}));
 jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));

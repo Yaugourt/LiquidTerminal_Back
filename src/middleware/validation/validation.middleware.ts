@@ -1,33 +1,20 @@
 import { Request, Response, NextFunction, RequestHandler } from 'express';
 import { ZodObject, ZodError } from 'zod';
-import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 /**
  * Middleware de validation générique utilisant Zod
  * @param schema Schéma Zod pour valider la requête
- * @param validateCacheKey Clé de cache optionnelle pour stocker les résultats de validation
- * @param cacheTTL Durée de vie du cache en secondes (par défaut: 300 secondes / 5 minutes)
+ *
+ * No validation cache: one keyed by URL (the old optional cache key, never
+ * used) let every later request to that URL skip validation and the body
+ * replacement below, whatever its body.
  */
 export const validateRequest = (
-  schema: ZodObject<any>,
-  validateCacheKey?: string,
-  cacheTTL: number = 300
+  schema: ZodObject<any>
 ): RequestHandler => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      // Vérifier si nous avons un cache de validation
-      if (validateCacheKey && redisService) {
-        const cacheKey = `validation:${validateCacheKey}:${req.originalUrl}`;
-        const cachedValidation = await redisService.get(cacheKey);
-        
-        if (cachedValidation) {
-          // Si la validation est en cache et valide, on continue
-          next();
-          return;
-        }
-      }
-
       // Valider la requête avec le schéma Zod
       const parsed = (await schema.parseAsync({
         body: req.body,        // ✅ Pas de double wrapping !
@@ -41,12 +28,6 @@ export const validateRequest = (
       // getter in Express 5, and a schema without a body leaves it untouched.
       if (parsed.body !== undefined) {
         req.body = parsed.body;
-      }
-
-      // Si la validation réussit et qu'on a une clé de cache, on met en cache
-      if (validateCacheKey && redisService) {
-        const cacheKey = `validation:${validateCacheKey}:${req.originalUrl}`;
-        await redisService.set(cacheKey, 'valid', cacheTTL);
       }
 
       // Continuer vers le prochain middleware
@@ -146,39 +127,17 @@ export const validateBody = (
  * Middleware de validation spécifique pour les routes GET
  * Ne valide que les query params et les params de route, ignore le body
  * @param schema Schéma Zod pour valider la requête GET (query et params uniquement)
- * @param validateCacheKey Clé de cache optionnelle pour stocker les résultats de validation
- * @param cacheTTL Durée de vie du cache en secondes (par défaut: 300 secondes / 5 minutes)
  */
 export const validateGetRequest = (
-  schema: ZodObject<any>,
-  validateCacheKey?: string,
-  cacheTTL: number = 300
+  schema: ZodObject<any>
 ): RequestHandler => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      // Vérifier si nous avons un cache de validation
-      if (validateCacheKey && redisService) {
-        const cacheKey = `validation:${validateCacheKey}:${req.originalUrl}`;
-        const cachedValidation = await redisService.get(cacheKey);
-        
-        if (cachedValidation) {
-          // Si la validation est en cache et valide, on continue
-          next();
-          return;
-        }
-      }
-
       // Valider seulement query et params pour les routes GET
       await schema.parseAsync({
         query: req.query,
         params: req.params,
       });
-
-      // Si la validation réussit et qu'on a une clé de cache, on met en cache
-      if (validateCacheKey && redisService) {
-        const cacheKey = `validation:${validateCacheKey}:${req.originalUrl}`;
-        await redisService.set(cacheKey, 'valid', cacheTTL);
-      }
 
       // Continuer vers le prochain middleware
       next();
