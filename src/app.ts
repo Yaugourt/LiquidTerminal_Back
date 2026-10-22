@@ -9,6 +9,7 @@ import { SECURITY_CONSTANTS } from './constants/security.constants';
 import { securityHeaders } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import { compressionMiddleware } from './middleware/compression.middleware';
+import { jsonBodyParser, urlencodedBodyParser } from './middleware/bodyParsers.middleware';
 
 import { ClientInitializerService } from './core/client.initializer.service';
 import { startPoolMonitor } from './core/poolRegistry';
@@ -128,11 +129,10 @@ app.use(cors({
 // Ajouter les en-têtes de sécurité
 app.use(securityHeaders);
 
-// Parser le body avant la sanitization. Explicit limits: JSON bodies here are
-// small (uploads go through multer, not this parser), so a tight cap bounds the
-// per-request work the sanitizer does on the body.
-app.use(express.json({ limit: '100kb' }));
-app.use(express.urlencoded({ extended: true, limit: '100kb', parameterLimit: 100 }));
+// Parser le body avant la sanitization (limits and the refusal of compressed
+// bodies: see bodyParsers.middleware.ts).
+app.use(jsonBodyParser);
+app.use(urlencodedBodyParser);
 
 // Appliquer la sanitization globalement
 app.use(sanitizeInput);
