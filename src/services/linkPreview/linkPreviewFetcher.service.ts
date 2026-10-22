@@ -1,9 +1,13 @@
 import * as cheerio from 'cheerio';
 import axios from 'axios';
+import { promisify } from 'util';
+import { gunzip } from 'zlib';
 import { ExtractedPreviewData } from '../../types/linkPreview.types';
 import { LinkPreviewFetchError, LinkPreviewTimeoutError } from '../../errors/linkPreview.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { resolveSafeAddress, SsrfBlockedError } from '../../utils/ssrf';
+
+const gunzipAsync = promisify(gunzip);
 
 /**
  * Bounded concurrency for outbound preview fetches. The batch endpoint is
@@ -116,20 +120,51 @@ export class LinkPreviewFetcherService {
     // still use the original hostname from `url`, so HTTPS stays correct.
     const safe = await resolveSafeAddress(urlObj.hostname);
 
-    return axios.get(url, {
+    const response = await axios.get<Buffer>(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; LinkPreviewBot/1.0)',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
+        'Accept-Encoding': 'gzip',
       },
       timeout: this.REQUEST_TIMEOUT,
       maxRedirects: 0,
       maxContentLength: this.MAX_CONTENT_LENGTH,
+      // The remote host picks the Content-Encoding, whatever we asked for, and
+      // axios would decode any of them, Brotli included (Node CVE-2026-111497).
+      // Take the raw bytes and decode them in decodeBody().
+      decompress: false,
+      responseType: 'arraybuffer',
       // Accept 3xx as success so we can handle redirects ourselves.
       validateStatus: (s) => (s >= 200 && s < 300) || (s >= 300 && s < 400),
       lookup: (async () => [safe.address, safe.family] as [string, number]),
     });
+
+    // A redirect's body is never read.
+    if (response.status >= 300) {
+      return response;
+    }
+    return {
+      ...response,
+      data: await this.decodeBody(response.data, response.headers?.['content-encoding']),
+    };
+  }
+
+  /**
+   * Identity or gzip only (the one encoding we ask for). The inflated size is
+   * capped like the raw body, so a hostile host can neither reach another
+   * decoder nor send a decompression bomb.
+   */
+  private async decodeBody(raw: Buffer, contentEncoding: unknown): Promise<string> {
+    const encoding = String(contentEncoding ?? '').trim().toLowerCase();
+    if (encoding === '' || encoding === 'identity') {
+      return raw.toString('utf8');
+    }
+    if (encoding === 'gzip' || encoding === 'x-gzip') {
+      const inflated = await gunzipAsync(raw, { maxOutputLength: this.MAX_CONTENT_LENGTH });
+      return inflated.toString('utf8');
+    }
+    throw new LinkPreviewFetchError(`Unsupported content encoding: ${encoding}`);
   }
 
   /**
