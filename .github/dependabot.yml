@@ -19,3 +19,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  # The Dockerfile's node base image: a Node security release arrives as a PR
+  # (the October 2026 one sat unnoticed on an end-of-life 20.x). Stays on the
+  # current major; a major move is a deliberate change.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
