@@ -54,6 +54,15 @@ describe('link preview response decoding', () => {
     await expect(service.fetchPreviewData('https://example.com/')).resolves.toMatchObject({ title: 'Liquid Terminal' });
   });
 
+  it('reads a truncated or empty gzip body, as axios did', async () => {
+    const gzipped = gzipSync(Buffer.from(page));
+    respond(gzipped.subarray(0, gzipped.length - 8), 'gzip');
+    await expect(service.fetchPreviewData('https://example.com/')).resolves.toMatchObject({ title: 'Liquid Terminal' });
+
+    respond(Buffer.alloc(0), 'gzip');
+    await expect(service.fetchPreviewData('https://example.com/')).resolves.toMatchObject({ title: null });
+  });
+
   it.each(['br', 'deflate', 'zstd', 'gzip, br'])('refuses a %s body', async (encoding) => {
     respond(brotliCompressSync(Buffer.from(page)), encoding);
     await expect(service.fetchPreviewData('https://example.com/')).rejects.toBeInstanceOf(LinkPreviewFetchError);

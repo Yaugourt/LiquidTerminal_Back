@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import axios from 'axios';
 import { promisify } from 'util';
-import { gunzip } from 'zlib';
+import { constants, gunzip } from 'zlib';
 import { ExtractedPreviewData } from '../../types/linkPreview.types';
 import { LinkPreviewFetchError, LinkPreviewTimeoutError } from '../../errors/linkPreview.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -161,7 +161,12 @@ export class LinkPreviewFetcherService {
       return raw.toString('utf8');
     }
     if (encoding === 'gzip' || encoding === 'x-gzip') {
-      const inflated = await gunzipAsync(raw, { maxOutputLength: this.MAX_CONTENT_LENGTH });
+      // SYNC_FLUSH like axios' own decoder: a truncated or empty gzip body
+      // still reads instead of failing the preview.
+      const inflated = await gunzipAsync(raw, {
+        maxOutputLength: this.MAX_CONTENT_LENGTH,
+        finishFlush: constants.Z_SYNC_FLUSH,
+      });
       return inflated.toString('utf8');
     }
     throw new LinkPreviewFetchError(`Unsupported content encoding: ${encoding}`);
