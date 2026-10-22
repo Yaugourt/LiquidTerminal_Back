@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+// z.string().url() accepts any scheme (javascript:, data:…): links must be web
+// URLs, and images only ever come from our https bucket.
+const WEB_URL = /^https?:\/\//i;
+const HTTPS_URL = /^https:\/\//i;
+
 // Schema pour la création d'un Public Good (avec gestion FormData)
 export const publicGoodCreateSchema = z.object({
   body: z.object({
@@ -15,10 +20,11 @@ export const publicGoodCreateSchema = z.object({
     
     githubUrl: z.string()
       .url('GitHub URL must be valid')
+      .regex(WEB_URL, 'Only http(s) URLs are allowed')
       .regex(/github\.com/, 'Must be a valid GitHub URL'),
     
-    demoUrl: z.string().url('Demo URL must be valid').optional(),
-    websiteUrl: z.string().url('Website URL must be valid').optional(),
+    demoUrl: z.string().url('Demo URL must be valid').regex(WEB_URL, 'Only http(s) URLs are allowed').optional(),
+    websiteUrl: z.string().url('Website URL must be valid').regex(WEB_URL, 'Only http(s) URLs are allowed').optional(),
     
     category: z.string()
       .min(3, 'Category must be at least 3 characters')
@@ -30,19 +36,17 @@ export const publicGoodCreateSchema = z.object({
 
     // Visuels (optionnels car gérés par upload)
     logo: z.union([
-      z.string().url().optional(),
+      z.string().regex(HTTPS_URL, 'Only https image URLs are allowed'),
       z.object({}).optional(), // Pour FormData vides
-      z.string().optional()
     ]).optional(),
     
     banner: z.union([
-      z.string().url().optional(),
+      z.string().regex(HTTPS_URL, 'Only https image URLs are allowed'),
       z.object({}).optional(),
-      z.string().optional()
     ]).optional(),
     
     screenshots: z.union([
-      z.array(z.string().url()).optional(),
+      z.array(z.string().url().regex(HTTPS_URL, 'Only https image URLs are allowed')).optional(),
       z.string().optional() // JSON stringifié
     ]).optional(),
 
@@ -141,27 +145,25 @@ export const publicGoodUpdateSchema = z.object({
   body: z.object({
     name: z.string().min(3).max(255).trim().optional(),
     description: z.string().min(100).trim().optional(),
-    githubUrl: z.string().url().regex(/github\.com/).optional(),
-    demoUrl: z.string().url().optional(),
-    websiteUrl: z.string().url().optional(),
+    githubUrl: z.string().url().regex(WEB_URL).regex(/github\.com/).optional(),
+    demoUrl: z.string().url().regex(WEB_URL, 'Only http(s) URLs are allowed').optional(),
+    websiteUrl: z.string().url().regex(WEB_URL, 'Only http(s) URLs are allowed').optional(),
     category: z.string().min(3).max(100).trim().optional(),
     discordContact: z.string().optional(),
     telegramContact: z.string().optional(),
     
     logo: z.union([
-      z.string().url().optional(),
+      z.string().regex(HTTPS_URL, 'Only https image URLs are allowed'),
       z.object({}).optional(),
-      z.string().optional()
     ]).optional(),
     
     banner: z.union([
-      z.string().url().optional(),
+      z.string().regex(HTTPS_URL, 'Only https image URLs are allowed'),
       z.object({}).optional(),
-      z.string().optional()
     ]).optional(),
     
     screenshots: z.union([
-      z.array(z.string().url()).optional(),
+      z.array(z.string().url().regex(HTTPS_URL, 'Only https image URLs are allowed')).optional(),
       z.string().optional()
     ]).optional(),
     

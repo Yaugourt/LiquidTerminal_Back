@@ -8,13 +8,14 @@ export const projectBaseSchema = z.object({
   desc: z.string()
     .min(10, 'Description must be at least 10 characters')
     .max(1000, 'Description cannot exceed 1000 characters'),
-  logo: z.string().url('Logo must be a valid URL'),
-  banner: z.string().url('Banner must be a valid URL').optional(),
+  // url() alone accepts javascript: and data:, hence the https check.
+  logo: z.string().url('Logo must be a valid URL').regex(/^https:\/\//i, 'Only https URLs are allowed'),
+  banner: z.string().url('Banner must be a valid URL').regex(/^https:\/\//i, 'Only https URLs are allowed').optional(),
   token: z.string().max(255, 'Token cannot exceed 255 characters').optional(),
-  twitter: z.string().url('Twitter URL must be valid').optional(),
-  discord: z.string().url('Discord URL must be valid').optional(),
-  telegram: z.string().url('Telegram URL must be valid').optional(),
-  website: z.string().url('Website URL must be valid').optional(),
+  twitter: z.string().url('Twitter URL must be valid').regex(/^https:\/\//i, 'Only https URLs are allowed').optional(),
+  discord: z.string().url('Discord URL must be valid').regex(/^https:\/\//i, 'Only https URLs are allowed').optional(),
+  telegram: z.string().url('Telegram URL must be valid').regex(/^https:\/\//i, 'Only https URLs are allowed').optional(),
+  website: z.string().url('Website URL must be valid').regex(/^https:\/\//i, 'Only https URLs are allowed').optional(),
   defillamaSlug: z.string()
     .max(120, 'DefiLlama slug cannot exceed 120 characters')
     .regex(/^[a-z0-9][a-z0-9-]*$/, 'Invalid DefiLlama slug')
@@ -118,18 +119,20 @@ export const projectCreateWithUploadSchema = z.object({
       .max(1000, 'La description ne doit pas dépasser 1000 caractères')
       .trim(),
     
-    // Le logo peut être soit une URL, soit un objet vide (FormData), soit absent
+    // Le logo peut être soit une URL, soit un objet vide (FormData), soit absent.
+    // The last branch keeps uploaded R2 URLs past imageUrlSchema's 255 chars
+    // (the key embeds the file name), https only.
     logo: z.union([
       imageUrlSchema,
       z.object({}).optional(), // Pour les objets vides de FormData
-      z.string().optional()
+      z.string().regex(/^https:\/\//i, 'Seules les URLs HTTPS sont autorisées').optional()
     ]).optional(),
     
     // Banner optionnel
     banner: z.union([
       imageUrlSchema,
       z.object({}).optional(), // Pour les objets vides de FormData
-      z.string().optional()
+      z.string().regex(/^https:\/\//i, 'Seules les URLs HTTPS sont autorisées').optional()
     ]).optional(),
     
     // Token optionnel

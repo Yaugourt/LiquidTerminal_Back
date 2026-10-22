@@ -226,10 +226,15 @@ export class CsvProjectService {
           (normalized as any)[field] = url;
         }
         
+        let parsed: URL;
         try {
-          new URL(url);
+          parsed = new URL(url);
         } catch {
           throw new Error(`${field} doit être une URL valide`);
+        }
+        // new URL() also parses javascript: or data:, which would land in an href.
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+          throw new Error(`${field} doit être une URL http(s)`);
         }
       }
     }
@@ -257,10 +262,10 @@ export class CsvProjectService {
    * Valide si le logo est une URL valide ou un nom de fichier valide
    */
   private isValidLogoPath(logo: string): boolean {
-    // Essayer d'abord comme URL complète
+    // Essayer d'abord comme URL complète (web only: new URL() also parses javascript: or data:)
     try {
-      new URL(logo);
-      return true;
+      const { protocol } = new URL(logo);
+      return protocol === 'https:' || protocol === 'http:';
     } catch {
       // Si ce n'est pas une URL, vérifier si c'est un nom de fichier valide
       return this.isValidFileName(logo);
