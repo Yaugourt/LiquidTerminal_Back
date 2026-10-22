@@ -69,7 +69,7 @@ describe('GET /indexer/candles', () => {
       { interval: '5s', startTime: now - 5000 * 5000, endTime: now - 6 * HOUR },
       { interval: '1d', startTime: HYPE_LISTING_MS, endTime: now },
       { interval: '1d', startTime: now - 90 * DAY },
-      { interval: '30s', startTime: now - 1000 * 30_000, endTime: now - (DAY - HOUR) },
+      { interval: '30s', startTime: now - (DAY - HOUR) - 1000 * 30_000, endTime: now - (DAY - HOUR) },
     ];
     for (const w of windows) {
       const res = await request(buildApp()).get('/indexer/candles').query({ coin: '@107', ...w });
@@ -99,6 +99,17 @@ describe('GET /indexer/candles', () => {
       .get('/indexer/candles')
       .query({ coin: 'BTC', interval: '1d', startTime: now - 400 * DAY, endTime: now - 2 * DAY });
     expect(res.status).toBe(400);
+    expect(client.getCandles).not.toHaveBeenCalled();
+  });
+
+  it('rejects a start after its end, or after now without an end', async () => {
+    const now = Date.now();
+    const inverted = await request(buildApp())
+      .get('/indexer/candles')
+      .query({ coin: 'BTC', interval: '5s', startTime: now - HOUR, endTime: now - 2 * HOUR });
+    expect(inverted.status).toBe(400);
+    const future = await request(buildApp()).get('/indexer/candles').query({ coin: 'BTC', interval: '5s', startTime: now + HOUR });
+    expect(future.status).toBe(400);
     expect(client.getCandles).not.toHaveBeenCalled();
   });
 

@@ -43,7 +43,9 @@ export class HypeDexerCandlesClient extends HypeDexerBaseClient {
   /**
    * Cached per (coin, interval, start/end rounded to one bar): every viewer of
    * a chart asks for "the last N bars", which lands on the same key within a
-   * bar. TTL = one bar, at least 2s. No last copy: the key moves on with the
+   * bar. TTL = one bar, at least 2s and at most 60 s: the route is public, so
+   * a 1d key held a day would let anyone park day-long entries (the front
+   * only reads 5s and 30s bars here). No last copy: the key moves on with the
    * next bar, so a copy (~150 KB for 1 000 bars) would never be read.
    */
   public getCandles(coin: string, interval: CandleInterval, startTime: number, endTime: number): Promise<Candle[]> {
@@ -55,7 +57,7 @@ export class HypeDexerCandlesClient extends HypeDexerBaseClient {
         this.circuitBreaker.execute(() =>
           this.post<Candle[]>('/info', { type: 'candleSnapshot', req: { coin, interval, startTime, endTime } })
         ),
-      Math.max(2, STEP_S[interval]),
+      Math.min(60, Math.max(2, STEP_S[interval])),
       { lastCopy: false }
     );
   }

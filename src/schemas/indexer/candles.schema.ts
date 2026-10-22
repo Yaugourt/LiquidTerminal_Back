@@ -29,4 +29,8 @@ export const candlesQuerySchema = z.object({
 }).refine(
   ({ query }) => query.endTime === undefined || query.endTime >= Date.now() - MAX_END_AGE_MS,
   { message: 'endTime is too old', path: ['query', 'endTime'] }
+).refine(
+  // An inverted window went upstream as is: one more axis of fresh keys.
+  ({ query }) => query.startTime <= (query.endTime ?? Date.now()),
+  { message: 'startTime is after endTime', path: ['query', 'startTime'] }
 );
