@@ -10,6 +10,30 @@ import {
   attachSubmitterAndReviewerOne
 } from '../../utils/cross-db-enrich';
 
+/**
+ * Columns a submitter may write through create/update. The routes spread
+ * req.body into these inputs, so anything else (status, submitterId,
+ * reviewerId, reviewedAt, reviewNotes) would let a submitter approve their
+ * own entry or hand it to someone else. Those belong to `review()` only.
+ */
+const PUBLIC_GOOD_WRITABLE_FIELDS = [
+  'name', 'description', 'githubUrl', 'demoUrl', 'websiteUrl', 'category',
+  'discordContact', 'telegramContact', 'logo', 'banner', 'screenshots',
+  'problemSolved', 'targetUsers', 'hlIntegration', 'developmentStatus',
+  'leadDeveloperName', 'leadDeveloperContact', 'teamSize', 'experienceLevel',
+  'technologies', 'supportTypes', 'contributorTypes', 'budgetRange',
+] as const satisfies ReadonlyArray<keyof PublicGoodUpdateInput>;
+
+function pickWritableFields<T extends PublicGoodUpdateInput>(data: T): T {
+  const writable: Record<string, unknown> = {};
+  for (const key of PUBLIC_GOOD_WRITABLE_FIELDS) {
+    if (data[key] !== undefined) {
+      writable[key] = data[key];
+    }
+  }
+  return writable as T;
+}
+
 export class PrismaPublicGoodRepository extends BasePrismaRepository implements PublicGoodRepository {
   constructor() {
     super();
@@ -125,7 +149,7 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
       async () => {
         const publicGood = await this.prismaClient.publicGood.create({
           data: {
-            ...data,
+            ...pickWritableFields(data),
             submitterId: data.submitterId!,
             status: 'PENDING' as ProjectStatus
           }
@@ -148,7 +172,7 @@ export class PrismaPublicGoodRepository extends BasePrismaRepository implements 
       async () => {
         const publicGood = await this.prismaClient.publicGood.update({
           where: { id },
-          data
+          data: pickWritableFields(data)
         });
 
         const enriched = await attachSubmitterAndReviewerOne(
