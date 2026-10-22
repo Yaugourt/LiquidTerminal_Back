@@ -91,6 +91,16 @@ export const HYPEDEXER_TTL = {
    * its volume and settlement. */
   hip4SettledMarket:   86400,
   hip4OpenMarket:        300,
+  /** How the markets that no longer trade ended (`getResolutions`): the
+   * aggregate is recomputed at most hourly, from the per-market reads below,
+   * and kept 30 days so only a cold start waits for it. */
+  hip4Resolutions:      3600,
+  hip4ResolutionsKeep: 2592000,
+  /** A delisted market's last trades (10 fills, 3 credits) and a settled
+   * market's settlement (3 credits): neither changes again, so they are kept
+   * a week. Trades younger than a day keep the dormant hour, an empty
+   * settlement answer the settled-market day. */
+  hip4FinalReads:     604800,
   /** Hyperliquid's HIP-4 template registry (not HypeDexer, free): a template
    * added upstream titles its markets within the hour. */
   hip4OutcomeTemplates: 3600,
@@ -209,6 +219,8 @@ export const HYPEDEXER_HIP4_CACHE_KEY = {
   outcomeIds: 'hyperliquid:hip4:outcome-ids',
   /** Every live outcome side's volume in one entry: the HIP-4 pages' poll. */
   liveVolumes: 'hypedexer:hip4:live-volumes',
+  /** How the list's markets that no longer trade ended, in one entry. */
+  resolutions: 'hypedexer:hip4:resolutions',
 } as const;
 
 /** TWAP source keys (indexer-twaps.service.ts); the pages themselves use buildHypedexerCacheKey. */

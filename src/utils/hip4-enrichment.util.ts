@@ -311,7 +311,7 @@ function indexQuestions(questions: RawHip4Question[]): Map<number, RawHip4Questi
  * HypeDexer sends UTC times without a zone designator, which `new Date()`
  * reads as local time.
  */
-function asUtcIso(time: string | null | undefined): string | null {
+export function asUtcIso(time: string | null | undefined): string | null {
   if (!time) return null;
   return /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(time) ? time : `${time}Z`;
 }

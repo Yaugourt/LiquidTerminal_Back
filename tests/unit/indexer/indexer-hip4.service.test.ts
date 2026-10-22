@@ -412,6 +412,222 @@ describe('IndexerHip4Service caching', () => {
     });
   });
 
+  describe('how the markets that no longer trade ended', () => {
+    const DAY = 24 * HOUR;
+    const side = (outcome_id: number, display_name: string, coin?: string) => ({
+      outcome_id,
+      side_name: display_name,
+      display_name,
+      mid_price: null,
+      volume_24h: null,
+      total_volume: null,
+      open_interest: null,
+      is_settled: false,
+      settled_at: null,
+      ...(coin ? { coin } : {}),
+    });
+    const question = (question_id: number | null, status: 'live' | 'settled', outcomes: ReturnType<typeof side>[]) => ({
+      question_id,
+      title: 'Q',
+      description: null,
+      class: null,
+      underlying: null,
+      outcome_count: outcomes.length,
+      total_volume: 0,
+      created_at: null,
+      resolved_at: null,
+      status,
+      singleton_outcome_id: null,
+      expiry: null,
+      period: null,
+      target_price: null,
+      outcomes,
+    });
+    const QUESTIONS = [
+      question(null, 'settled', [side(154, 'Yes', '#1540'), side(154, 'No', '#1541')]),
+      question(null, 'settled', [side(155, 'Yes', '#1550'), side(155, 'No', '#1551')]), // no settlement on record
+      question(null, 'live', [side(110, 'PSG', '#1100'), side(110, 'Arsenal', '#1101')]), // delisted
+      question(50, 'live', [side(300, 'Below'), side(301, 'Exactly'), side(302, 'Above'), side(303, 'Other / Disputed')]),
+      question(null, 'live', [side(1480, 'Yes', '#14800'), side(1480, 'No', '#14801')]), // still listed
+    ];
+    const LAST_PX: Record<string, number> = {
+      '#1540': 0.001, '#1541': 0.999,
+      '#1550': 0.6, '#1551': 0.4,
+      '#1100': 0.99991, '#1101': 0.0001,
+      '#3000': 0.001, '#3010': 0.999, '#3020': 0,
+    };
+    const trade = (coin: string, px: number, ageMs: number) => ({ coin, px, sz: 1, dir: 'Buy', time_ms: Date.now() - ageMs, fee_usdc: 0 });
+    /** A merge after the last trade: protocol actions are no trades. */
+    const tape = (coin: string, ageMs = 3 * DAY) => [
+      { coin, px: 0.5, sz: 1, dir: 'Merge Outcome', time_ms: Date.now() - ageMs + HOUR, fee_usdc: 0 },
+      trade(coin, LAST_PX[coin], ageMs),
+    ];
+    const listOutcomes = (outcomes: number[] | 'fail') =>
+      fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+        if (String(init?.body ?? '').includes('outcomeMeta')) {
+          if (outcomes === 'fail') throw new Error('HL down');
+          return { ok: true, json: async () => ({ outcomes: outcomes.map((outcome) => ({ outcome })) }) } as Response;
+        }
+        return { ok: true, json: async () => ({}) } as Response;
+      });
+    const ttlOf = (...fragments: string[]) => {
+      const key = [...mockRedis.ttls.keys()].find((k) => fragments.every((f) => k.includes(f)));
+      return key ? mockRedis.ttls.get(key) : undefined;
+    };
+    let questions: jest.SpyInstance;
+
+    beforeEach(() => {
+      questions = jest.spyOn(svc, 'getQuestionsWithOutcomes').mockResolvedValue(QUESTIONS);
+      listOutcomes([1480, 5]);
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin: string }) => tape(coin));
+      mockClient.getSettlements.mockImplementation(async ({ outcome_id }: { outcome_id: number }) =>
+        outcome_id === 154 ? [{ outcome_id: 154, settle_fraction: 0, block_time: '2026-06-05T06:00:04' }] : []
+      );
+    });
+
+    it('names the winner from a settlement, else from the last trades, and leaves listed markets out', async () => {
+      const { coins } = await svc.getResolutions();
+
+      expect(coins['#1541']).toMatchObject({ won: true, won_by: 'settlement', final_price: 0.999 });
+      expect(coins['#1540']).toMatchObject({ won: false, won_by: 'settlement' });
+      expect(coins['#1550']).toMatchObject({ won: null, won_by: null, final_price: 0.6 });
+      expect(coins['#1100']).toMatchObject({ won: true, won_by: 'final_price', final_price: 0.99991 });
+      expect(coins['#1101']).toMatchObject({ won: false, won_by: 'final_price' });
+      expect(coins['#3010']).toMatchObject({ won: true, won_by: 'final_price' });
+      expect(coins['#3000']).toMatchObject({ won: false, won_by: 'final_price' });
+      // The last trade, not the newer merge.
+      expect(Date.now() - Date.parse(coins['#1100'].final_trade_at ?? '')).toBeGreaterThanOrEqual(3 * DAY);
+      // A listed market and the residual outcome are never read.
+      expect(Object.keys(coins).sort()).toEqual(['#1100', '#1101', '#1540', '#1541', '#1550', '#1551', '#3000', '#3010', '#3020']);
+      expect(mockClient.getFills).toHaveBeenCalledTimes(9);
+      // Only settled markets look for a settlement.
+      expect(mockClient.getSettlements.mock.calls.map(([p]) => p.outcome_id).sort()).toEqual([154, 155]);
+      expect(questions).toHaveBeenCalledWith({ limit: 200 });
+    });
+
+    it('trusts a settlement over last trades that point the other way', async () => {
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin: string }) =>
+        [trade(coin, coin === '#1540' ? 0.999 : coin === '#1541' ? 0.001 : LAST_PX[coin], 3 * DAY)]
+      );
+
+      const { coins } = await svc.getResolutions();
+
+      expect(coins['#1541']).toMatchObject({ won: true, won_by: 'settlement', final_price: 0.001 });
+    });
+
+    it('keeps the reads a week, a trade less than a day old an hour, an empty answer a day', async () => {
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin: string }) =>
+        coin === '#3020' ? [] : tape(coin, coin === '#1100' ? 2 * HOUR : 3 * DAY)
+      );
+
+      await svc.getResolutions();
+
+      expect(ttlOf('final-trade', '"#1101"')).toBe(HYPEDEXER_TTL.hip4FinalReads);
+      expect(ttlOf('final-trade', '"#1100"')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+      expect(ttlOf('final-trade', '"#3020"')).toBe(HYPEDEXER_TTL.hip4SettledMarket);
+      expect(ttlOf('settlement-of', ':154}')).toBe(HYPEDEXER_TTL.hip4FinalReads);
+      expect(ttlOf('settlement-of', ':155}')).toBe(HYPEDEXER_TTL.hip4SettledMarket);
+      expect(HYPEDEXER_TTL.hip4FinalReads).toBe(7 * 86400);
+    });
+
+    it('is one shared entry, recomputed hourly and kept 30 days', async () => {
+      await svc.getResolutions();
+      await svc.getResolutions();
+
+      expect(questions).toHaveBeenCalledTimes(1);
+      expect(mockRedis.ttls.get('hypedexer:hip4:resolutions:swr')).toBe(HYPEDEXER_TTL.hip4ResolutionsKeep);
+      expect(HYPEDEXER_TTL.hip4Resolutions).toBe(3600);
+    });
+
+    it('fails, storing nothing, when outcomeMeta lists nothing or cannot be read', async () => {
+      listOutcomes([]);
+      await expect(svc.getResolutions()).rejects.toThrow();
+
+      mockRedis.store.clear();
+      listOutcomes('fail');
+      await expect(svc.getResolutions()).rejects.toThrow();
+
+      expect(mockRedis.store.has('hypedexer:hip4:resolutions:swr')).toBe(false);
+      expect(mockClient.getFills).not.toHaveBeenCalled();
+    });
+
+    /** Ages the stored entry past its hour, then waits for the background recompute to store a new one. */
+    async function recomputeStale(): Promise<Record<string, { won: boolean | null; final_price: number | null }>> {
+      const key = 'hypedexer:hip4:resolutions:swr';
+      const entry = JSON.parse(mockRedis.store.get(key) ?? '{}');
+      mockRedis.store.set(key, JSON.stringify({ ...entry, at: Date.now() - 2 * HOUR }));
+      await svc.getResolutions(); // serves the stale entry, recomputes in the background
+      for (let i = 0; i < 100 && JSON.parse(mockRedis.store.get(key) ?? '{}').at < Date.now() - HOUR; i++) {
+        await new Promise((r) => setImmediate(r));
+      }
+      return JSON.parse(mockRedis.store.get(key) ?? '{}').value.coins;
+    }
+
+    it('lets a failed read hold back only its market, read again at the next recompute', async () => {
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin: string }) => {
+        if (coin === '#3020') throw new Error('HypeDexer 402');
+        return tape(coin);
+      });
+
+      const { coins } = await svc.getResolutions();
+
+      // Stored anyway: the other markets are named, the question with the failed coin is not yet.
+      expect(mockRedis.store.has('hypedexer:hip4:resolutions:swr')).toBe(true);
+      expect(coins['#1100']).toMatchObject({ won: true, won_by: 'final_price' });
+      expect(coins['#3010']).toMatchObject({ won: null, won_by: null, final_price: 0.999 });
+      expect(coins['#3020']).toMatchObject({ won: null, final_price: null });
+
+      mockClient.getFills.mockClear();
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin: string }) => tape(coin));
+      const next = await recomputeStale();
+
+      expect(mockClient.getFills.mock.calls.map(([p]) => p.coin)).toEqual(['#3020']);
+      expect(next['#3010']).toMatchObject({ won: true, won_by: 'final_price' });
+    });
+
+    it('keeps the last entry\'s winner for a market whose re-read fails', async () => {
+      await svc.getResolutions();
+      // A week later its keys expire and HypeDexer fails on one of them.
+      for (const k of [...mockRedis.store.keys()]) if (k.includes('final-trade') && k.includes('#3020')) mockRedis.store.delete(k);
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin: string }) => {
+        if (coin === '#3020') throw new Error('HypeDexer 402');
+        return tape(coin);
+      });
+
+      const next = await recomputeStale();
+
+      expect(next['#3010']).toMatchObject({ won: true, won_by: 'final_price' });
+      expect(next['#3020']).toMatchObject({ won: false, final_price: 0 });
+    });
+
+    describe('while Redis is down', () => {
+      afterEach(() => {
+        mockRedis.isHealthy = () => true;
+      });
+
+      it('computes once, then serves that entry instead of ~270 reads per caller', async () => {
+        mockRedis.isHealthy = () => false;
+
+        const [a, b] = await Promise.all([svc.getResolutions(), svc.getResolutions()]);
+        const c = await svc.getResolutions();
+
+        expect(questions).toHaveBeenCalledTimes(1);
+        expect(mockClient.getFills).toHaveBeenCalledTimes(9);
+        expect(b).toBe(a);
+        expect(c).toBe(a);
+        expect(a.coins['#1100']).toMatchObject({ won: true });
+      });
+
+      it('serves the entry it last had from Redis', async () => {
+        const warm = await svc.getResolutions();
+        mockRedis.isHealthy = () => false;
+
+        expect(await svc.getResolutions()).toBe(warm);
+        expect(questions).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
   it('retries an empty metadata list sooner than a populated one', async () => {
     mockClient.getMarkets.mockResolvedValue([]);
     mockClient.getOutcomeTokens.mockResolvedValue([]);

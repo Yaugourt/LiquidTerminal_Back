@@ -34,11 +34,11 @@ function send502(res: Response, code: string, error: unknown): void {
 }
 
 /** Nothing computed and nothing kept: a temporary condition, the client retries. */
-function send503(res: Response, code: string, error: unknown): void {
+function send503(res: Response, code: string, error: unknown, what: string): void {
   logDeduplicator.error(`HIP4 ${code}`, { error: error instanceof Error ? error.message : String(error) });
   res.set('Retry-After', '15').status(503).json({
     success: false,
-    error: 'HIP-4 volumes temporarily unavailable',
+    error: `HIP-4 ${what} temporarily unavailable`,
     code,
   });
 }
@@ -177,7 +177,23 @@ router.get(
     try {
       res.json({ success: true, data: await svc.getLiveVolumes() });
     } catch (e) {
-      send503(res, 'INDEXER_HIP4_LIVE_VOLUMES_UNAVAILABLE', e);
+      send503(res, 'INDEXER_HIP4_LIVE_VOLUMES_UNAVAILABLE', e, 'volumes');
+    }
+  }) as RequestHandler
+);
+
+/**
+ * How the markets that no longer trade ended, one shared entry: no params,
+ * so behind marketRateLimiter only, like live-volumes.
+ */
+router.get(
+  '/resolutions',
+  marketRateLimiter,
+  (async (_req: Request, res: Response) => {
+    try {
+      res.json({ success: true, data: await svc.getResolutions() });
+    } catch (e) {
+      send503(res, 'INDEXER_HIP4_RESOLUTIONS_UNAVAILABLE', e, 'resolutions');
     }
   }) as RequestHandler
 );

@@ -1,6 +1,7 @@
 import { HypeDexerHip4Client } from '../../clients/hypedexer/rest/hip4/hip4.client';
 import { buildHypedexerCacheKey } from '../../clients/hypedexer/rest/shared/hypedexer-cache.helper';
 import { cacheService, SHARED_LAST_COPY_KEEP_S } from '../../core/cache.service';
+import { redisService } from '../../core/redis.service';
 import {
   HYPEDEXER_HIP4_CACHE_KEY,
   HYPEDEXER_TTL,
@@ -21,6 +22,15 @@ import {
   type RawHip4Settlement,
 } from '../../utils/hip4-enrichment.util';
 import { indexOutcomeTemplates, type Hip4TemplateIndex } from '../../utils/hip4-market-names.util';
+import {
+  latestSettlement,
+  resolutionMarket,
+  winnerFromFinalPrices,
+  winnerFromSettlements,
+  type Hip4CoinResolution,
+  type Hip4Resolutions,
+  type Hip4WonBy,
+} from '../../utils/hip4-resolution.util';
 
 /** Cumulative notional volume per outcome side coin (10N, 10N+1), as the live-volumes route sends it. */
 export interface Hip4LiveVolumes {
@@ -100,6 +110,12 @@ export class SharedHip4Mids {
 /** Markets read one by one to name a settlements page (the list page asks 50 rows, ~17 markets). */
 const SETTLEMENT_LOOKUP_CAP = 50;
 const SETTLEMENT_LOOKUP_CONCURRENCY = 4;
+/** The questions read the way the HIP-4 pages read them (the same cached entry). */
+const RESOLUTION_QUESTIONS_LIMIT = 200;
+/** A coin's newest fills read for its last trade (3 credits): the last ones can be splits or merges. */
+const FINAL_TRADE_FILLS = 10;
+/** Per-market reads in flight at once, for each of the two kinds. */
+const RESOLUTION_READ_CONCURRENCY = 4;
 
 /** Run `fn` over `items`, at most `limit` in flight, preserving order. */
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -125,6 +141,34 @@ function newestFillAgeMs(rows: unknown): number | null {
     if (Number.isFinite(t) && t > newest) newest = t;
   }
   return newest === 0 ? null : Date.now() - newest;
+}
+
+/** The newest trade in fills rows; splits, merges and negations are no trades. */
+function lastTrade(rows: unknown): { px: number; at: number } | null {
+  if (!Array.isArray(rows)) return null;
+  let last: { px: number; at: number } | null = null;
+  for (const row of rows) {
+    const r = row as { dir?: unknown; px?: unknown; time_ms?: unknown } | null;
+    if (r?.dir !== 'Buy' && r?.dir !== 'Sell') continue;
+    const px = Number(r.px);
+    const at = Number(r.time_ms);
+    if (Number.isFinite(px) && Number.isFinite(at) && (!last || at > last.at)) last = { px, at };
+  }
+  return last;
+}
+
+/** One coin's entry in the resolutions. */
+function coinResolution(
+  trade: { px: number; at: number } | null,
+  won: boolean | null,
+  wonBy: Hip4WonBy | null
+): Hip4CoinResolution {
+  return {
+    final_price: trade?.px ?? null,
+    final_trade_at: trade ? new Date(trade.at).toISOString() : null,
+    won,
+    won_by: wonBy,
+  };
 }
 
 /**
@@ -178,6 +222,9 @@ export class IndexerHip4Service {
   private readonly mids = new SharedHip4Mids(() => this.readHlMidPrices());
   /** The last aggregate served in this process: a partial read is merged over it. */
   private lastLiveVolumes: Hip4LiveVolumes | null = null;
+  /** The last resolutions entry served in this process, and a computation running without Redis. */
+  private lastResolutions: Hip4Resolutions | null = null;
+  private resolutionsInflight: Promise<Hip4Resolutions> | null = null;
 
   public static getInstance(): IndexerHip4Service {
     if (!IndexerHip4Service.instance) {
@@ -367,6 +414,123 @@ export class IndexerHip4Service {
       if (!existing || s.settled_at > existing.settled_at) seen.set(s.outcome_id, s);
     }
     return Array.from(seen.values());
+  }
+
+  /**
+   * How the HIP-4 pages' markets that no longer trade ended, per side or
+   * outcome coin: its last traded price, and whether it won, from the on-chain
+   * settlement when there is one, else from the last traded prices
+   * (`winnerFromFinalPrices`). One shared entry, recomputed at most hourly
+   * from per-market reads kept a week; only a cold start waits for it.
+   */
+  public async getResolutions(): Promise<Hip4Resolutions> {
+    // Without Redis, getOrRefresh recomputes for every caller and none of the
+    // ~270 HypeDexer reads is kept: serve this process's last entry instead,
+    // and compute one at a time when there is none.
+    if (!redisService.isHealthy()) {
+      if (this.lastResolutions) return this.lastResolutions;
+      this.resolutionsInflight ??= this.computeResolutions().finally(() => {
+        this.resolutionsInflight = null;
+      });
+      this.lastResolutions = await this.resolutionsInflight;
+      return this.lastResolutions;
+    }
+    this.lastResolutions = await cacheService.getOrRefresh(
+      HYPEDEXER_HIP4_CACHE_KEY.resolutions,
+      () => this.computeResolutions(),
+      HYPEDEXER_TTL.hip4Resolutions,
+      HYPEDEXER_TTL.hip4ResolutionsKeep
+    );
+    return this.lastResolutions;
+  }
+
+  /**
+   * The questions none of whose outcomes outcomeMeta still lists: settled
+   * ones read their settlements, all read their coins' last trades. Throws
+   * when outcomeMeta can't be read or lists nothing (no market can be told
+   * delisted). A failed read only holds back its own market, which keeps what
+   * the last entry said until the next recompute reads it again.
+   */
+  private async computeResolutions(): Promise<Hip4Resolutions> {
+    const [questions, listed] = await Promise.all([
+      this.getQuestionsWithOutcomes({ limit: RESOLUTION_QUESTIONS_LIMIT }),
+      this.fetchOutcomeIds(),
+    ]);
+    if (listed.length === 0) throw new Error('outcomeMeta listed no outcome');
+    const listedIds = new Set(listed);
+    const markets = questions
+      .map(resolutionMarket)
+      .filter((m) => m.legs.length > 0 && m.legs.every((l) => !listedIds.has(l.outcomeId)));
+    const settledIds = [
+      ...new Set(markets.filter((m) => m.status === 'settled').flatMap((m) => m.legs.map((l) => l.outcomeId))),
+    ];
+    const coins = [...new Set(markets.flatMap((m) => m.legs.map((l) => l.coin)))];
+    // `undefined`: the read failed.
+    const [settlements, trades] = await Promise.all([
+      mapWithConcurrency(settledIds, RESOLUTION_READ_CONCURRENCY, (id) => this.fetchSettlementOf(id).catch(() => undefined)),
+      mapWithConcurrency(coins, RESOLUTION_READ_CONCURRENCY, (coin) => this.fetchFinalTrade(coin).catch(() => undefined)),
+    ]);
+    const failed = new Set<number | string>([
+      ...settledIds.filter((_, i) => settlements[i] === undefined),
+      ...coins.filter((_, i) => trades[i] === undefined),
+    ]);
+    const settlementOf = new Map(settledIds.map((id, i) => [id, settlements[i] ?? null]));
+    const tradeOf = new Map(coins.map((coin, i) => [coin, trades[i] ?? null]));
+    const previous = this.lastResolutions?.coins ?? {};
+
+    const out: Record<string, Hip4CoinResolution> = {};
+    for (const m of markets) {
+      if (m.legs.some((l) => failed.has(l.coin) || (m.status === 'settled' && failed.has(l.outcomeId)))) {
+        for (const l of m.legs) out[l.coin] = previous[l.coin] ?? coinResolution(tradeOf.get(l.coin) ?? null, null, null);
+        continue;
+      }
+      const bySettlement = m.status === 'settled' ? winnerFromSettlements(m, settlementOf) : null;
+      const byPrice =
+        bySettlement === null ? winnerFromFinalPrices(m.legs.map((l) => tradeOf.get(l.coin)?.px ?? null), m.sides) : null;
+      const winner = bySettlement ?? byPrice;
+      const wonBy: Hip4WonBy | null = bySettlement !== null ? 'settlement' : byPrice !== null ? 'final_price' : null;
+      m.legs.forEach((l, i) => {
+        out[l.coin] = coinResolution(tradeOf.get(l.coin) ?? null, winner === null ? null : i === winner, wonBy);
+      });
+    }
+    return { coins: out, computed_at: new Date().toISOString() };
+  }
+
+  /**
+   * A delisted coin's last trade, from its newest fills, shared: kept a week;
+   * an hour while its newest fill is less than a day old (it may be settling),
+   * a day when there is no fill (more likely an indexing gap than the truth).
+   */
+  private async fetchFinalTrade(coin: string): Promise<{ px: number; at: number } | null> {
+    const read = await cacheService.getOrSet(
+      buildHypedexerCacheKey('hip4', 'final-trade', { coin }),
+      async () => {
+        const rows = await this.client.getFills({ coin, limit: FINAL_TRADE_FILLS });
+        const age = newestFillAgeMs(rows);
+        const keepS =
+          age === null
+            ? HYPEDEXER_TTL.hip4SettledMarket
+            : age < DORMANT_FILLS_MS
+            ? HYPEDEXER_TTL.hip4DormantFills
+            : HYPEDEXER_TTL.hip4FinalReads;
+        return { trade: lastTrade(rows), keepS };
+      },
+      (r) => r.keepS
+    );
+    return read.trade;
+  }
+
+  /** A settled outcome's latest settlement record, shared: kept a week, an empty answer a day. */
+  private fetchSettlementOf(outcomeId: number): Promise<RawHip4Settlement | null> {
+    return cacheService.getOrSet(
+      buildHypedexerCacheKey('hip4', 'settlement-of', { outcome_id: outcomeId }),
+      async () =>
+        latestSettlement(
+          asArray<RawHip4Settlement>(await this.client.getSettlements<RawHip4Settlement[]>({ outcome_id: outcomeId })),
+          outcomeId
+        ),
+      (s) => (s ? HYPEDEXER_TTL.hip4FinalReads : HYPEDEXER_TTL.hip4SettledMarket)
+    );
   }
 
   /**
