@@ -1,5 +1,9 @@
+# Node 22 LTS, pinned to the October 2026 security release (Brotli decoder RCE,
+# CVE-2026-111497, and nine others). 20.x is end-of-life and got no fix.
+# Keep both stages on the same tag.
+
 # Stage 1: Build
-FROM node:20.19.0-alpine AS builder
+FROM node:22.23.4-alpine3.24 AS builder
 
 WORKDIR /app
 
@@ -37,7 +41,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # Stage 2: Production
-FROM node:20.19.0-alpine AS production
+FROM node:22.23.4-alpine3.24 AS production
 
 WORKDIR /app
 
