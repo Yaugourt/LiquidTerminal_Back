@@ -7,7 +7,7 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
  * hyperliquid-names.gitbook.io/hyperliquid-names/dapp-integration).
  *
  * Every lookup is cached in Redis so the whole site costs their API a few
- * calls per address per day: names 6h, "no name" 6h, failures are not cached.
+ * calls per address per day: names 6h, "no name" 5 min, failures are not cached.
  * Batch reverse lookups go in chunks of 150 (their endpoint fails past ~200).
  */
 
@@ -15,6 +15,13 @@ const BASE = process.env.HLNAMES_API_URL || 'https://api.hlnames.xyz/api';
 // Public key published in their integration docs; override with a partner key.
 const KEY = process.env.HLNAMES_API_KEY || 'CPEPKMI-HUSUX6I-SE2DHEA-YYWFG5Y';
 const TTL_S = 6 * 3600;
+/**
+ * "No name" answers live far shorter than names. Any visitor can ask about any
+ * address, and almost every random address has no name, so a 6 h negative entry
+ * would let one caller park 500 six-hour keys per request in Redis. Five
+ * minutes still absorbs the repeated lookups of a page being browsed.
+ */
+const NEGATIVE_TTL_S = 300;
 const CHUNK = 150;
 const TIMEOUT_MS = 6_000;
 const NONE = '';
@@ -128,13 +135,18 @@ export class HlNamesClient {
         });
         if (status !== 200 || !Array.isArray(body)) throw new Error(`status ${status}`);
         const found = new Map(body.map((r) => [r.address.toLowerCase(), r.primaryName || null]));
-        const writes: [string, string][] = [];
+        const named: [string, string][] = [];
+        const unnamed: [string, string][] = [];
         for (const a of chunk) {
           const name = found.get(a) ?? null; // left out of the response = no name
           out[a] = name;
-          writes.push([keyPrimary(a), name ?? NONE]);
+          if (name) named.push([keyPrimary(a), name]);
+          else unnamed.push([keyPrimary(a), NONE]);
         }
-        await redisService.msetEx(writes, TTL_S);
+        await Promise.all([
+          redisService.msetEx(named, TTL_S),
+          redisService.msetEx(unnamed, NEGATIVE_TTL_S),
+        ]);
       } catch (error) {
         logDeduplicator.warn('HlNames: batch reverse lookup failed', {
           count: chunk.length,
@@ -153,7 +165,7 @@ export class HlNamesClient {
     if (hit !== null) return hit === NONE ? null : hit;
     const { status, body } = await call<{ address?: string }>(`/resolve/address/${encodeURIComponent(n)}`);
     if (status === 404 || status === 422) {
-      await redisService.set(keyForward(n), NONE, TTL_S);
+      await redisService.set(keyForward(n), NONE, NEGATIVE_TTL_S);
       return null;
     }
     if (status !== 200 || !body?.address) throw new Error(`hlnames resolve status ${status}`);
@@ -186,7 +198,8 @@ export class HlNamesClient {
       avatar: safeUrl(body.avatar),
       records: sanitizeRecords(records),
     };
-    await redisService.set(keyProfile(a), JSON.stringify(profile), TTL_S);
+    // An address without a name gets the short negative TTL, like primaryNames().
+    await redisService.set(keyProfile(a), JSON.stringify(profile), profile.name ? TTL_S : NEGATIVE_TTL_S);
     return profile;
   }
 
