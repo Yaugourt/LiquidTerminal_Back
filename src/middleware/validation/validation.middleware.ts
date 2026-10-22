@@ -29,11 +29,19 @@ export const validateRequest = (
       }
 
       // Valider la requête avec le schéma Zod
-      await schema.parseAsync({
+      const parsed = (await schema.parseAsync({
         body: req.body,        // ✅ Pas de double wrapping !
         query: req.query,      // ✅ Pas de double wrapping !
         params: req.params,    // ✅ Pas de double wrapping !
-      });
+      })) as { body?: unknown };
+
+      // Hand the handler the body Zod validated, unknown keys stripped, so a
+      // smuggled field (status, reviewerId…) never reaches a handler that
+      // spreads req.body into a write. Body only: req.query is a read-only
+      // getter in Express 5, and a schema without a body leaves it untouched.
+      if (parsed.body !== undefined) {
+        req.body = parsed.body;
+      }
 
       // Si la validation réussit et qu'on a une clé de cache, on met en cache
       if (validateCacheKey && redisService) {

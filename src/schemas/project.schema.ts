@@ -139,6 +139,10 @@ export const projectCreateWithUploadSchema = z.object({
     discord: urlSchema,
     telegram: urlSchema,
     website: urlSchema,
+    defillamaSlug: z.string()
+      .max(120, 'DefiLlama slug cannot exceed 120 characters')
+      .regex(/^[a-z0-9][a-z0-9-]*$/, 'Invalid DefiLlama slug')
+      .optional(),
     
     categoryIds: z.array(z.number().int().positive()).optional()
   }),
