@@ -327,8 +327,10 @@ export class ReadListService extends BaseService<
       });
 
       // 5. Copier tous les items de la read list originale en batch (optimisé)
-      if (originalReadList.items && originalReadList.items.length > 0) {
-        const itemsData = originalReadList.items.map((item, index) => ({
+      // Les items dont la ressource a disparu (resource: null) ne sont pas copiés
+      const copyableItems = (originalReadList.items ?? []).filter((item) => item.resource);
+      if (copyableItems.length > 0) {
+        const itemsData = copyableItems.map((item, index) => ({
           readListId: newReadList.id,
           resourceId: item.resource.id,
           notes: item.notes || null,
@@ -346,7 +348,7 @@ export class ReadListService extends BaseService<
         logDeduplicator.info('Read list items copied successfully (batch)', {
           originalReadListId: readListId,
           newReadListId: newReadList.id,
-          itemsCount: originalReadList.items.length
+          itemsCount: copyableItems.length
         });
       }
 

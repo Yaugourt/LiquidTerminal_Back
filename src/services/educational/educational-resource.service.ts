@@ -26,7 +26,7 @@ import {
   educationalResourceQuerySchema,
   educationalResourceCategoryCreateSchema
 } from '../../schemas/educational.schema';
-import { educationalResourceRepository, educationalCategoryRepository } from '../../repositories';
+import { educationalResourceRepository, educationalCategoryRepository, readListItemRepository } from '../../repositories';
 import { BaseService, AnyPrismaClient } from '../../core/crudBase.service';
 import { cacheService } from '../../core/cache.service';
 import { prismaContent } from '../../core/prisma.content.service';
@@ -311,6 +311,56 @@ export class EducationalResourceService extends BaseService<
   }
 
   async delete(id: number): Promise<void> {
+    try {
+      await this.deleteInContent(id);
+    } catch (error) {
+      // deleteInContent is not atomic: the resource row commits in its own transaction,
+      // so a later step (link preview cleanup) can fail with the resource already gone.
+      // Its Core items must still go, like those a previous failed attempt left behind
+      // (that retry answers "not found").
+      if (await this.isGoneFromContent(id)) {
+        await this.purgeReadListItems(id);
+      }
+      throw error;
+    }
+    await this.purgeReadListItems(id);
+  }
+
+  /** True only when Content positively has no such resource; a failed lookup counts as "still there". */
+  private async isGoneFromContent(id: number): Promise<boolean> {
+    try {
+      return (await this.repository.findById(id)) == null;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Read list items live in the Core DB and reference the resource by id only (no
+   * cross-DB FK, hence no cascade). Runs after the Content transaction has committed,
+   * never inside it. A failure here must not fail the request (the resource is already
+   * gone and read paths tolerate `resource: null`); the purge script catches leftovers.
+   */
+  private async purgeReadListItems(resourceId: number): Promise<void> {
+    try {
+      const deleted = await readListItemRepository.deleteByResourceId(resourceId);
+      if (deleted > 0) {
+        // Read list caches embed these items (resource + itemsCount)
+        await Promise.all([
+          cacheService.invalidateByPattern(`${CACHE_PREFIX.READLIST}:*`),
+          cacheService.invalidateByPattern(`${CACHE_PREFIX.READLIST_ITEM}:*`)
+        ]);
+        logDeduplicator.info('Read list items removed with deleted resource', { resourceId, deleted });
+      }
+    } catch (error) {
+      logDeduplicator.error('Error removing read list items of deleted resource', {
+        error: error instanceof Error ? error.message : String(error),
+        resourceId
+      });
+    }
+  }
+
+  private async deleteInContent(id: number): Promise<void> {
     return await prismaContent.$transaction(async (tx) => {
       this.repository.setPrismaClient(tx as any);
 

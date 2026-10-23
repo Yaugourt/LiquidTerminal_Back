@@ -88,7 +88,7 @@ async function main(): Promise<void> {
 
   // 5. ReadListItem deep chain — already covered by HTTP test, just verify count
   const readListItemCount = await prisma.readListItem.count();
-  check('ReadListItem rows exist in Core (cross-DB FK to Content)',
+  check('ReadListItem rows exist in Core (resource referenced by id in Content)',
     readListItemCount > 0, { readListItemCount });
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===`);

@@ -139,17 +139,15 @@ export class PrismaReadListItemRepository extends BasePrismaRepository implement
   async create(data: ReadListItemCreateInput): Promise<ReadListItemResponse> {
     return this.executeWithErrorHandling(
       async () => {
+        if (data.readListId === undefined) {
+          throw new Error('readListId is required to create a read list item');
+        }
         const item = await this.prismaClient.readListItem.create({
+          // Scalar ids only: the resource lives in the Content DB, so the Core
+          // schema has no relation to `connect` (read paths fan out via prismaContent).
           data: {
-            readList: {
-              connect: { id: data.readListId }
-            },
-            // EducationalResource lives in Content DB but the Core schema still
-            // declares the relation; we keep `connect` here. Read paths fetch
-            // the resource explicitly from the Content client.
-            resource: {
-              connect: { id: data.resourceId }
-            },
+            readListId: data.readListId,
+            resourceId: data.resourceId,
             notes: data.notes,
             order: data.order
           }
@@ -282,6 +280,22 @@ export class PrismaReadListItemRepository extends BasePrismaRepository implement
       },
       'getting next order',
       { readListId }
+    );
+  }
+
+  async deleteByResourceId(resourceId: number): Promise<number> {
+    return this.executeWithErrorHandling(
+      async () => {
+        // Always the default client: this singleton's live client is swapped to a
+        // transaction while ReadListItemService runs one, and this cleanup runs on
+        // behalf of another request (a resource deletion), outside any transaction.
+        const { count } = await this.defaultPrismaClient.readListItem.deleteMany({
+          where: { resourceId }
+        });
+        return count;
+      },
+      'deleting read list items by resource',
+      { resourceId }
     );
   }
 

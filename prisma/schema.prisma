@@ -373,7 +373,6 @@ model EducationalResource {
   reviewer      User?           @relation("EducationalResourceReviewer", fields: [reviewedBy], references: [id])
   linkPreview   LinkPreview?    @relation(fields: [linkPreviewId], references: [id])
   categories    EducationalResourceCategory[]
-  readListItems ReadListItem[]
   reports       ResourceReport[]
   
   @@index([status])
@@ -410,6 +409,8 @@ model ReadList {
 model ReadListItem {
   id         Int      @id @default(autoincrement())
   readListId Int
+  // EducationalResource id, held in the Content DB: referenced by id only (no FK possible across databases).
+  // Deletion is cleaned up by the app (EducationalResourceService.delete); see scripts/purge-orphan-readlist-items.ts.
   resourceId Int
   addedAt    DateTime @default(now()) @db.Timestamp(6)
   isRead     Boolean  @default(false)
@@ -417,9 +418,9 @@ model ReadListItem {
   order      Int?
   
   readList   ReadList            @relation(fields: [readListId], references: [id], onDelete: Cascade)
-  resource   EducationalResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
   
   @@unique([readListId, resourceId])
+  @@index([resourceId])
 }
 
 model LinkPreview {

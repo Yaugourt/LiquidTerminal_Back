@@ -78,6 +78,12 @@ export interface ReadListItemRepository extends BaseRepository {
   getNextOrder(readListId: number): Promise<number>;
 
   /**
+   * Supprime les items de toutes les read lists qui référencent une ressource
+   * (la ressource vit en Content DB : pas de cascade FK possible). Retourne le nombre supprimé.
+   */
+  deleteByResourceId(resourceId: number): Promise<number>;
+
+  /**
    * Supprime tous les items d'une read list
    */
   deleteByReadList(readListId: number): Promise<void>;
