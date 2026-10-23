@@ -37,6 +37,7 @@
     "log-stats": "tsx scripts/cleanup-logs.ts stats",
     "test-logs": "tsx scripts/test-log-rotation.ts",
     "migrate:csv": "tsx scripts/export-and-migrate-csv.ts",
+    "readlist:purge-orphans": "tsx scripts/purge-orphan-readlist-items.ts",
     "hypedexer:inventory": "tsx scripts/hypedexer-openapi-inventory.ts",
     "hypedexer:required-query": "tsx scripts/hypedexer-openapi-required-query.ts"
   },

@@ -110,6 +110,13 @@ export const prismaHistorical = PrismaHistoricalService.getInstance();
 - Singleton pattern ensures one connection pool per DB
 - Graceful disconnect on SIGINT/SIGTERM via `app.ts`
 
+### Content Database (separate DB)
+
+`prismaContent` (`src/core/prisma.content.service.ts`, `CONTENT_DATABASE_URL`) holds the educational resources (with their categories, link previews and reports), the ecosystem projects and their categories, the public goods and the Hyperliquid doc pages. Users, read lists and read list items stay in the Core DB, and no foreign key can span two databases, so cross-DB links are plain ids resolved by the app:
+
+- `ReadListItem.resourceId` (Core) references an `EducationalResource` (Content) by id only. Read paths fetch the resources from Content separately (`resource: null` if it is gone), and `EducationalResourceService.delete` removes the matching Core items once the Content transaction has committed (a failure there is logged, not raised).
+- Leftover orphan items (failed cleanup, deletion made outside the app) are removed with `npm run readlist:purge-orphans`. It is a dry run by default; check the report, then re-run with `npm run readlist:purge-orphans -- --apply`. It aborts if the Content DB is empty or, from 20 items up, if more than 50% of the items look orphaned (wrong `CONTENT_DATABASE_URL`), unless `--force`. It reads the database URLs from the environment, so point it at production deliberately (e.g. `railway run`).
+
 ---
 
 ## 2. Repository Layer (src/repositories/)
