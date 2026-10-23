@@ -178,8 +178,9 @@ class IngestStoppedError extends Error {
  * hole once it recovers. Meanwhile the log streams (dex, launchpad) read the
  * windows the provider has not reached from the public RPC (eth_getLogs), and
  * txlive follows the chain tip block by block, keeping only calls to the
- * project contracts (elysium_tx_live). It starts at the tip, not at the
- * provider's head: the RPC rate leaves too little room to replay the gap.
+ * project contracts (elysium_tx_live), whenever the tx stream is behind the
+ * clock (stalled or unreachable provider alike). It starts at the tip, not at
+ * the tx cursor: the RPC rate leaves too little room to replay the gap.
  *
  * Each stream is a self-rescheduling loop (single flight by construction),
  * guarded by a Redis lock, and never throws: failures are recorded in
@@ -449,10 +450,11 @@ export class ElysiumIngestionService {
 
   private async txLiveTick(): Promise<number> {
     const deadline = Date.now() + TICK_BUDGET_MS;
-    const { head, lagging } = await this.ingestHorizon();
+    // Keyed on our own tx cursor, not the provider's head: when the provider is unreachable
+    // (no head at all) the tx stream is stuck just the same.
     const txCursor = (await this.repo.getState('tx'))?.cursor ?? null;
     if (txCursor) await this.repo.pruneLiveTxs(new Date(txCursor.getTime() - TXLIVE_KEEP_MS));
-    if (!lagging || head === null) {
+    if (!txCursor || Date.now() - txCursor.getTime() <= HEAD_LAG_MS) {
       this.liveBlock = null;
       return TXLIVE_IDLE_INTERVAL_MS;
     }
@@ -461,7 +463,7 @@ export class ElysiumIngestionService {
       const cursor = (await this.repo.getState('txlive'))?.cursor ?? null;
       // Resume a run of this outage; a cursor from an earlier outage starts over at the tip.
       this.liveBlock =
-        cursor && cursor.getTime() > head.getTime()
+        cursor && cursor.getTime() > txCursor.getTime()
           ? (await this.rpcLogs.blockAtOrBefore(cursor.getTime() / 1000)) + 1
           : await this.rpcLogs.headBlock();
       void rawLogger.info('Elysium ingest: live tx fallback started', { block: this.liveBlock });
