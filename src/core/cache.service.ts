@@ -3,6 +3,7 @@ import { logDeduplicator } from '../utils/logDeduplicator';
 import { CACHE_TTL } from '../constants/cache.constants';
 import { positiveIntEnv } from '../utils/env';
 import { isCallerRefusal } from '../errors/upstreamBudget.errors';
+import { upstreamRefusal } from '../utils/request-context';
 
 /** What a recomputation produced, and the JSON it stored when it could. */
 interface Recomputed<T> {
@@ -211,6 +212,12 @@ export class CacheService {
    *   while a copy exists the key is not fetched again for a few seconds
    *   (FAILURE_BACKOFF_MAX_S).
    * - Redis unusable: fetchFn, one call per key at a time in this process.
+   * - A caller already over its budget of billed upstream calls when its
+   *   request came in (see request-context) never starts a recompute or a
+   *   refresh: it gets a hit, joins one already running here, or is served the
+   *   key's last copy (`stale: true`), else its refusal. Nothing is written
+   *   for it, no ":fail" marker included. Callers within budget are never
+   *   refused, whatever the recompute makes of their counter.
    */
   async getOrSetWithMeta<T>(
     key: string,
@@ -264,11 +271,14 @@ export class CacheService {
         // Re-read: another instance may have stored a newer copy meanwhile.
         const latest = keepLastCopy ? await this.readLastCopy<T>(key) : null;
         if (!latest) throw error;
-        logDeduplicator.warn('Fetch failed, serving the last cached value', {
-          key,
-          ageS: Math.round((Date.now() - latest.at) / 1000),
-          errorMessage: error.message,
-        });
+        // A caller's refusal is not a failure of the fetch: nothing to warn about.
+        if (!isCallerRefusal(error.original)) {
+          logDeduplicator.warn('Fetch failed, serving the last cached value', {
+            key,
+            ageS: Math.round((Date.now() - latest.at) / 1000),
+            errorMessage: error.message,
+          });
+        }
         return { data: latest.value, stale: true };
       }
     } catch (error) {
@@ -287,6 +297,10 @@ export class CacheService {
   private async directFetch<T>(key: string, fetchFn: () => Promise<T>): Promise<T> {
     const inflight = this.directFetches.get(key) as Promise<Recomputed<T>> | undefined;
     if (inflight) return copyOf(await inflight);
+
+    // Nothing to serve instead here (no Redis, so no last copy): an over-budget caller is refused.
+    const refusal = upstreamRefusal();
+    if (refusal) throw refusal;
 
     const fetching = (async (): Promise<Recomputed<T>> => {
       const data = await fetchFn();
@@ -321,6 +335,12 @@ export class CacheService {
       return serialized !== undefined ? JSON.parse(serialized) : data;
     }
 
+    // Starting the recompute is what an over-budget caller may not do. Thrown
+    // as a FetchFailure so the caller above serves the last copy when there is
+    // one; it sits outside fetchOrMarkFailed, so no ":fail" marker is written.
+    const refusal = upstreamRefusal();
+    if (refusal) throw new FetchFailure(refusal);
+
     const recomputation = this.track(key, this.recompute(key, fetchFn, ttl, options));
     return (await recomputation).data;
   }
@@ -339,6 +359,9 @@ export class CacheService {
   ): Promise<{ done: Promise<Recomputed<T>> } | null> {
     const running = this.recomputing.get(key) as Promise<Recomputed<T>> | undefined;
     if (running) return { done: running };
+    // An over-budget caller is served the copy and leaves the refresh to the
+    // next visitor (who is within budget).
+    if (upstreamRefusal()) return null;
     if (await this.recentlyFailed(key)) return null;
     // Started by another caller during the check.
     const joined = this.recomputing.get(key) as Promise<Recomputed<T>> | undefined;
@@ -494,9 +517,16 @@ export class CacheService {
    * value is served at once; once it is older than `freshS`, one caller (Redis
    * lock) recomputes it in the background while everyone keeps the old value.
    * Only a cold key (never computed, or idle past `keepS`) waits for `fetchFn`.
+   * A caller over its budget of billed upstream calls (see getOrSetWithMeta)
+   * never starts the refresh or the cold compute: it gets the old value, else
+   * its refusal.
    */
   async getOrRefresh<T>(key: string, fetchFn: () => Promise<T>, freshS: number, keepS: number): Promise<T> {
-    if (!redisService.isHealthy()) return fetchFn();
+    if (!redisService.isHealthy()) {
+      const refusal = upstreamRefusal();
+      if (refusal) throw refusal;
+      return fetchFn();
+    }
     const swrKey = `${key}:swr`;
     const store = async (value: T): Promise<void> => {
       await redisService.set(swrKey, JSON.stringify({ at: Date.now(), value }), keepS);
@@ -505,7 +535,7 @@ export class CacheService {
       const raw = await redisService.get(swrKey);
       if (raw) {
         const entry = JSON.parse(raw) as { at: number; value: T };
-        if (Date.now() - entry.at > freshS * 1000) {
+        if (Date.now() - entry.at > freshS * 1000 && !upstreamRefusal()) {
           const lockKey = `lock:${swrKey}`;
           const acquired = await redisService.getClient().set(lockKey, '1', 'EX', 120, 'NX');
           if (acquired) {
@@ -530,10 +560,14 @@ export class CacheService {
         return value;
       }, freshS, { lastCopy: false });
     } catch (error) {
+      // The caller's own refusal (cold key): not a cache error, nothing to compute instead.
+      if (isCallerRefusal(error)) throw error;
       logDeduplicator.warn('Cache error, falling back to direct fetch', {
         key,
         errorMessage: error instanceof Error ? error.message : 'Unknown error',
       });
+      const refusal = upstreamRefusal();
+      if (refusal) throw refusal;
       return fetchFn();
     }
   }

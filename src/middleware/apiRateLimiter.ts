@@ -3,7 +3,7 @@ import { redisService } from '../core/redis.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { positiveIntEnv } from '../utils/env';
 import { rateLimitKeyForIp } from '../utils/client-ip';
-import { runWithUpstreamCaller } from '../utils/request-context';
+import { runWithUpstreamCaller, type UpstreamBudgetState } from '../utils/request-context';
 
 // Configuration des limites
 //
@@ -58,6 +58,11 @@ const MARKET_WINDOWS: readonly RateWindow[] = [
   { name: 'hour', seconds: RATE_LIMITS.HOUR_LIMIT.WINDOW },
 ];
 
+/** Redis key of the fixed window of `window` that `nowS` (epoch seconds) falls in. */
+function windowKey(prefix: string, window: RateWindow, nowS: number): string {
+  return `${prefix}:${window.name}:${Math.floor(nowS / window.seconds)}`;
+}
+
 /**
  * Counts this request in one fixed window per entry of `windows` and returns
  * the counts, in a single round trip (INCR + EXPIRE per window).
@@ -78,7 +83,7 @@ async function countRequest(prefix: string, windows: readonly RateWindow[]): Pro
   const now = Math.floor(Date.now() / 1000);
   const pipeline = redisService.getClient().pipeline();
   for (const window of windows) {
-    const key = `${prefix}:${window.name}:${Math.floor(now / window.seconds)}`;
+    const key = windowKey(prefix, window, now);
     pipeline.incr(key);
     pipeline.expire(key, window.seconds * 2);
   }
@@ -220,17 +225,17 @@ interface IpLimits {
  *
  * `upstreamCaller` marks the routes whose cache keys the caller picks: the
  * admitted request then runs with its client as the upstream caller, whose
- * budget of billed HypeDexer calls the client gate spends (see
- * spendUpstreamBudget). Both paths below admit, so the Redis-down fallback
- * keeps the budget too.
+ * budget of billed HypeDexer calls is read once on entry (peekUpstreamBudget)
+ * and counted by the client gate (countUpstreamCall). Both paths below admit,
+ * so the Redis-down fallback keeps the budget too.
  */
 function createIpLimiter(namespace: string, limits: IpLimits, what: string, options: { upstreamCaller?: boolean } = {}) {
   const windows: readonly RateWindow[] = [
     { name: 'burst', seconds: limits.BURST.WINDOW },
     { name: 'minute', seconds: limits.MINUTE.WINDOW },
   ];
-  const admit = (req: Request, res: Response, next: NextFunction): void =>
-    options.upstreamCaller ? runWithUpstreamCaller(req, res, next) : next();
+  const admit = (req: Request, res: Response, next: NextFunction): Promise<void> | void =>
+    options.upstreamCaller ? runWithUpstreamCaller(req, res, next, peekUpstreamBudget) : next();
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const ip = req.ip;
     if (!ip) {
@@ -247,7 +252,7 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string, opti
       if (minuteCount > limits.MINUTE.MAX_REQUESTS) {
         return sendLimitExceededResponse(res, `Too many ${what} requests per minute`, limits.MINUTE.WINDOW);
       }
-      admit(req, res, next);
+      await admit(req, res, next);
     } catch (error) {
       logDeduplicator.error('IP rate limiter Redis error, using in-memory fallback', {
         namespace,
@@ -258,7 +263,7 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string, opti
       // Fail-secure, same as the general limiter, at this limiter's own burst.
       // Distinct key namespace so the fallbacks don't share a counter.
       if (checkInMemoryFallback(`${namespace}:${key}`, limits.BURST.MAX_REQUESTS)) {
-        admit(req, res, next);
+        await admit(req, res, next);
       } else {
         sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
       }
@@ -330,14 +335,21 @@ export const accountRateLimiter = createIpLimiter(
 );
 
 // Per-client budget of billed HypeDexer calls (cache misses only: a hit costs
-// nothing upstream and never spends it). The passthrough limiter above counts
+// nothing upstream and is never counted). The passthrough limiter above counts
 // every request, hits included, so on its own one IP could still make 4,000
 // billed calls a minute with unique cache keys (credits = 2 + ceil(rows/10)
 // each). Sizing, measured: a wallet page makes ~6 per-address misses when it
 // opens and ~5 a minute while it stays open; a cold settled HIP-4 question
-// ~45 in its first second. 600 a minute is ~13 cold HIP-4 questions or ~100
-// cold wallets a minute behind one IP; 15,000 an hour is ~50 wallet pages
-// kept open behind one IP. Only floods and scripts get near them.
+// ~45 in its first second; the HIP-4 resolutions recompute (~250 reads, once an
+// hour for everyone) is charged to the visitor who triggers it. 600 a minute
+// is ~13 cold HIP-4 questions or ~100 cold wallets a minute behind one IP;
+// 15,000 an hour is ~50 wallet pages kept open behind one IP. Only floods and
+// scripts get near them.
+//
+// The budget is decided once per request, on entry (peekUpstreamBudget); the
+// calls are counted exactly (countUpstreamCall) and never refused while they
+// are counted: a request that started within budget is served whole, and the
+// client's next request finds the counter where it ended.
 const UPSTREAM_BUDGET = {
   MINUTE: { WINDOW: 60, MAX_CALLS: positiveIntEnv('HYPEDEXER_MISS_BUDGET_MINUTE', 600) },
   HOUR: { WINDOW: 3600, MAX_CALLS: positiveIntEnv('HYPEDEXER_MISS_BUDGET_HOUR', 15000) },
@@ -348,15 +360,26 @@ const UPSTREAM_BUDGET_WINDOWS: readonly RateWindow[] = [
   { name: 'hour', seconds: UPSTREAM_BUDGET.HOUR.WINDOW },
 ];
 
-export type UpstreamBudgetResult = { allowed: true } | { allowed: false; retryAfterS: number };
+const upstreamBudgetPrefix = (ipKey: string): string => `ratelimit:hdmiss:${ipKey}`;
+
+/** Where a client stands, from its minute and hour counts: at a limit counts as spent (the next call would pass it). */
+function budgetState(minuteCount: number, hourCount: number, minuteLeftS: number, hourLeftS: number): UpstreamBudgetState {
+  let retryAfterS = 0;
+  if (minuteCount >= UPSTREAM_BUDGET.MINUTE.MAX_CALLS) retryAfterS = Math.max(retryAfterS, minuteLeftS);
+  if (hourCount >= UPSTREAM_BUDGET.HOUR.MAX_CALLS) retryAfterS = Math.max(retryAfterS, hourLeftS);
+  return retryAfterS > 0 ? { exhausted: true, retryAfterS: Math.max(1, retryAfterS) } : { exhausted: false, retryAfterS: 0 };
+}
 
 // Same idea as inMemoryCounters, with the minute and hour windows of the budget.
-const inMemoryBudgets = new Map<string, { minute: { count: number; resetAt: number }; hour: { count: number; resetAt: number } }>();
+type InMemoryBudget = { minute: { count: number; resetAt: number }; hour: { count: number; resetAt: number } };
+const inMemoryBudgets = new Map<string, InMemoryBudget>();
 
-function spendInMemoryBudget(ipKey: string): UpstreamBudgetResult {
+/** The entry of `ipKey` with expired windows reset; undefined when it has none and `create` is false. */
+function inMemoryBudgetOf(ipKey: string, create: boolean): InMemoryBudget | undefined {
   const now = Date.now();
   let entry = inMemoryBudgets.get(ipKey);
   if (!entry) {
+    if (!create) return undefined;
     // Evict oldest if at capacity
     if (inMemoryBudgets.size >= FALLBACK_MAX_IPS) {
       const firstKey = inMemoryBudgets.keys().next().value;
@@ -370,17 +393,26 @@ function spendInMemoryBudget(ipKey: string): UpstreamBudgetResult {
   }
   if (now > entry.minute.resetAt) entry.minute = { count: 0, resetAt: now + UPSTREAM_BUDGET.MINUTE.WINDOW * 1000 };
   if (now > entry.hour.resetAt) entry.hour = { count: 0, resetAt: now + UPSTREAM_BUDGET.HOUR.WINDOW * 1000 };
+  return entry;
+}
+
+function countInMemoryBudget(ipKey: string): void {
+  const entry = inMemoryBudgetOf(ipKey, true);
+  if (!entry) return;
   entry.minute.count++;
   entry.hour.count++;
+}
 
-  let retryAfterS = 0;
-  if (entry.minute.count > UPSTREAM_BUDGET.MINUTE.MAX_CALLS) {
-    retryAfterS = Math.max(retryAfterS, Math.ceil((entry.minute.resetAt - now) / 1000));
-  }
-  if (entry.hour.count > UPSTREAM_BUDGET.HOUR.MAX_CALLS) {
-    retryAfterS = Math.max(retryAfterS, Math.ceil((entry.hour.resetAt - now) / 1000));
-  }
-  return retryAfterS > 0 ? { allowed: false, retryAfterS: Math.max(1, retryAfterS) } : { allowed: true };
+function peekInMemoryBudget(ipKey: string): UpstreamBudgetState {
+  const entry = inMemoryBudgetOf(ipKey, false);
+  if (!entry) return { exhausted: false, retryAfterS: 0 };
+  const now = Date.now();
+  return budgetState(
+    entry.minute.count,
+    entry.hour.count,
+    Math.ceil((entry.minute.resetAt - now) / 1000),
+    Math.ceil((entry.hour.resetAt - now) / 1000)
+  );
 }
 
 setInterval(() => {
@@ -391,28 +423,52 @@ setInterval(() => {
 }, 60000).unref();
 
 /**
- * Spends one billed HypeDexer call of this client's budget (per IP, /64 for
- * IPv6). Fixed minute and hour windows in Redis, the in-memory fallback with
- * the same limits when Redis cannot answer. A refused call is counted too, as
- * in the other limiters; `retryAfterS` is the rollover of the window that
- * refused it (the longer one when both did).
+ * Where this client (IP, /64 for IPv6) stands against its budget, read without
+ * counting anything: one MGET of the current minute and hour windows, the same
+ * keys countUpstreamCall increments. Read once per request, on entry. When
+ * Redis cannot answer, the in-memory counters (same limits) answer instead.
  */
-export async function spendUpstreamBudget(ipKey: string): Promise<UpstreamBudgetResult> {
+export async function peekUpstreamBudget(ipKey: string): Promise<UpstreamBudgetState> {
   try {
-    const [minuteCount, hourCount] = await countRequest(`ratelimit:hdmiss:${ipKey}`, UPSTREAM_BUDGET_WINDOWS);
-    let retryAfterS = 0;
-    if (minuteCount > UPSTREAM_BUDGET.MINUTE.MAX_CALLS) {
-      retryAfterS = Math.max(retryAfterS, secondsUntilRollover(UPSTREAM_BUDGET.MINUTE.WINDOW));
-    }
-    if (hourCount > UPSTREAM_BUDGET.HOUR.MAX_CALLS) {
-      retryAfterS = Math.max(retryAfterS, secondsUntilRollover(UPSTREAM_BUDGET.HOUR.WINDOW));
-    }
-    return retryAfterS > 0 ? { allowed: false, retryAfterS } : { allowed: true };
+    // Circuit open: don't queue on a wedged connection, use the fallback now.
+    if (!redisService.isHealthy()) throw new Error('Redis circuit open');
+    const nowS = Math.floor(Date.now() / 1000);
+    const prefix = upstreamBudgetPrefix(ipKey);
+    const [minute, hour] = (await redisService.getClient().mget(
+      ...UPSTREAM_BUDGET_WINDOWS.map((window) => windowKey(prefix, window, nowS))
+    )) as (string | null)[];
+    return budgetState(
+      Number(minute ?? 0),
+      Number(hour ?? 0),
+      secondsUntilRollover(UPSTREAM_BUDGET.MINUTE.WINDOW),
+      secondsUntilRollover(UPSTREAM_BUDGET.HOUR.WINDOW)
+    );
   } catch (error) {
     logDeduplicator.error('Upstream budget Redis error, using in-memory fallback', {
       error: error instanceof Error ? error.message : String(error),
       ip: ipKey,
     });
-    return spendInMemoryBudget(ipKey);
+    return peekInMemoryBudget(ipKey);
   }
+}
+
+/**
+ * Counts one billed HypeDexer call that really goes upstream against this
+ * client's minute and hour windows (INCR + EXPIRE in one round trip). Never
+ * refuses, never waits: the call goes ahead and the pipeline runs behind it,
+ * so a Redis error is handled here (the in-memory counters take the call) and
+ * nothing is thrown at the caller.
+ */
+export function countUpstreamCall(ipKey: string): void {
+  if (!redisService.isHealthy()) {
+    countInMemoryBudget(ipKey);
+    return;
+  }
+  countRequest(upstreamBudgetPrefix(ipKey), UPSTREAM_BUDGET_WINDOWS).catch((error: unknown) => {
+    logDeduplicator.error('Upstream budget Redis error, using in-memory fallback', {
+      error: error instanceof Error ? error.message : String(error),
+      ip: ipKey,
+    });
+    countInMemoryBudget(ipKey);
+  });
 }

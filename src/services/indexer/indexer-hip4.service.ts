@@ -2,6 +2,7 @@ import { HypeDexerHip4Client } from '../../clients/hypedexer/rest/hip4/hip4.clie
 import { buildHypedexerCacheKey } from '../../clients/hypedexer/rest/shared/hypedexer-cache.helper';
 import { cacheService, SHARED_LAST_COPY_KEEP_S } from '../../core/cache.service';
 import { redisService } from '../../core/redis.service';
+import { upstreamRefusal } from '../../utils/request-context';
 import {
   HYPEDEXER_HIP4_CACHE_KEY,
   HYPEDEXER_TTL,
@@ -429,6 +430,11 @@ export class IndexerHip4Service {
     // and compute one at a time when there is none.
     if (!redisService.isHealthy()) {
       if (this.lastResolutions) return this.lastResolutions;
+      // Computed with a caller's reads refused, the entry would be kept for everyone.
+      if (!this.resolutionsInflight) {
+        const refusal = upstreamRefusal();
+        if (refusal) throw refusal;
+      }
       this.resolutionsInflight ??= this.computeResolutions().finally(() => {
         this.resolutionsInflight = null;
       });

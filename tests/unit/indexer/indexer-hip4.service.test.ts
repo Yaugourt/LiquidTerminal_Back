@@ -39,6 +39,10 @@ jest.mock('../../../src/clients/hypedexer/rest/hip4/hip4.client', () => ({
 import { IndexerHip4Service } from '../../../src/services/indexer/indexer-hip4.service';
 import { HYPEDEXER_TTL } from '../../../src/constants/hypedexer.cache';
 import { OUTCOME_TEMPLATES } from '../utils/hip4-templates.fixture';
+import { runWithUpstreamCaller } from '../../../src/utils/request-context';
+import { UpstreamBudgetExceededError } from '../../../src/errors/upstreamBudget.errors';
+import { EventEmitter } from 'events';
+import type { NextFunction, Request, Response } from 'express';
 
 const HOUR = 60 * 60 * 1000;
 const fill = (coin: string, ageMs: number) => ({ coin, px: 0.5, sz: 2, time_ms: Date.now() - ageMs, fee_usdc: 0 });
@@ -616,6 +620,26 @@ describe('IndexerHip4Service caching', () => {
         expect(b).toBe(a);
         expect(c).toBe(a);
         expect(a.coins['#1100']).toMatchObject({ won: true });
+      });
+
+      it('does not let a caller over its budget compute it: reads refused one by one would leave a partial entry for everyone', async () => {
+        mockRedis.isHealthy = () => false;
+        const overBudget = new Promise<unknown>((resolve) => {
+          void runWithUpstreamCaller(
+            { ip: '6.6.6.6' } as Request,
+            Object.assign(new EventEmitter(), {}) as unknown as Response,
+            (() => resolve(svc.getResolutions().catch((error: unknown) => error))) as NextFunction,
+            async () => ({ exhausted: true, retryAfterS: 9 })
+          );
+        });
+        await expect(overBudget).resolves.toBeInstanceOf(UpstreamBudgetExceededError);
+        expect(questions).not.toHaveBeenCalled();
+        expect(mockClient.getFills).not.toHaveBeenCalled();
+
+        // The next visitor computes the whole entry.
+        const entry = await svc.getResolutions();
+        expect(entry.coins['#1100']).toMatchObject({ won: true });
+        expect(mockClient.getFills).toHaveBeenCalledTimes(9);
       });
 
       it('serves the entry it last had from Redis', async () => {

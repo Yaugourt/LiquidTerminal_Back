@@ -1,6 +1,6 @@
 /**
  * A client spent its per-IP budget of billed HypeDexer calls (see
- * spendUpstreamBudget). Our own guard, not an upstream failure: `callerRefusal`
+ * peekUpstreamBudget). Our own guard, not an upstream failure: `callerRefusal`
  * tells the cache to leave no failure marker behind it, so one client over its
  * budget does not make every other visitor of the key get the last copy.
  */
