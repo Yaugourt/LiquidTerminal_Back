@@ -7,7 +7,7 @@ import { UpstreamBudgetExceededError } from '../errors/upstreamBudget.errors';
 export interface UpstreamBudgetState {
   /** At or over a limit of the minute or hour window. */
   exhausted: boolean;
-  /** When exhausted: seconds until the window that refused rolls over (the longer one when both did). */
+  /** When exhausted: seconds until the window that refused rolls over (the longer one when both did), at most 60. */
   retryAfterS: number;
 }
 

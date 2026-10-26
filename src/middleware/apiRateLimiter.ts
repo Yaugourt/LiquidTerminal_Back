@@ -393,12 +393,24 @@ const UPSTREAM_BUDGET_WINDOWS: readonly RateWindow[] = [
 
 const upstreamBudgetPrefix = (ipKey: string): string => `ratelimit:hdmiss:${ipKey}`;
 
+/**
+ * The longest a refused client is told to wait. The hour window can be
+ * hundreds of seconds from rolling over, and the front backs its widgets off
+ * for the whole Retry-After: a visitor sharing an IP with a flood would lose
+ * live data for up to an hour. A refusal is cheap (an entry peek, no upstream
+ * call, no counting), so the client just asks again within the minute and is
+ * refused again until the window rolls over.
+ */
+const MAX_RETRY_AFTER_S = 60;
+
 /** Where a client stands, from its minute and hour counts: at a limit counts as spent (the next call would pass it). */
 function budgetState(minuteCount: number, hourCount: number, minuteLeftS: number, hourLeftS: number): UpstreamBudgetState {
   let retryAfterS = 0;
   if (minuteCount >= UPSTREAM_BUDGET.MINUTE.MAX_CALLS) retryAfterS = Math.max(retryAfterS, minuteLeftS);
   if (hourCount >= UPSTREAM_BUDGET.HOUR.MAX_CALLS) retryAfterS = Math.max(retryAfterS, hourLeftS);
-  return retryAfterS > 0 ? { exhausted: true, retryAfterS: Math.max(1, retryAfterS) } : { exhausted: false, retryAfterS: 0 };
+  return retryAfterS > 0
+    ? { exhausted: true, retryAfterS: Math.min(MAX_RETRY_AFTER_S, Math.max(1, retryAfterS)) }
+    : { exhausted: false, retryAfterS: 0 };
 }
 
 // Same idea as inMemoryCounters, with the minute and hour windows of the budget.

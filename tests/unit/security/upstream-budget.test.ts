@@ -440,8 +440,35 @@ describe('peekUpstreamBudget and countUpstreamCall', () => {
     for (let i = 0; i < 4; i++) countUpstreamCall('10.0.0.3');
     await settle();
     now += 60_000;
-    // 10:02:00 into the hour: 3480 s left.
-    expect(await peekUpstreamBudget('10.0.0.3')).toEqual({ exhausted: true, retryAfterS: 3480 });
+    // 10:02:00 into the hour: 3480 s left, but a refused client is told to come back within the minute.
+    expect(await peekUpstreamBudget('10.0.0.3')).toEqual({ exhausted: true, retryAfterS: 60 });
+  });
+
+  it('keeps asking the client back every minute until the hour rolls over, then lets it through', async () => {
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 4; i++) countUpstreamCall('10.0.0.9');
+      await settle();
+      now += 60_000;
+    }
+    // Refused for the rest of the hour, whatever the time left, never told to wait longer than 60 s.
+    for (let minute = 0; minute < 58; minute++) {
+      const state = await peekUpstreamBudget('10.0.0.9');
+      expect(state.exhausted).toBe(true);
+      expect(state.retryAfterS).toBeLessThanOrEqual(60);
+      now += 60_000;
+    }
+    expect(await peekUpstreamBudget('10.0.0.9')).toEqual({ exhausted: false, retryAfterS: 0 });
+  });
+
+  it('tells an hour-limited client the time left in the hour when under a minute remains', async () => {
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < 4; i++) countUpstreamCall('10.0.0.10');
+      await settle();
+      now += 60_000;
+    }
+    // 10:59:30: 30 s left in the hour.
+    now = Date.parse('2026-10-26T10:59:30.000Z');
+    expect(await peekUpstreamBudget('10.0.0.10')).toEqual({ exhausted: true, retryAfterS: 30 });
   });
 
   it('never refuses what it counts: counting past the limit just keeps counting', async () => {
@@ -482,7 +509,7 @@ describe('peekUpstreamBudget and countUpstreamCall', () => {
     }
     const state = await peekUpstreamBudget('10.0.0.8');
     expect(state.exhausted).toBe(true);
-    expect(state.retryAfterS).toBeGreaterThan(3000);
+    expect(state.retryAfterS).toBe(60);
   });
 });
 
