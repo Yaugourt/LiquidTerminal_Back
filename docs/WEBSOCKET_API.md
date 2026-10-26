@@ -16,6 +16,9 @@ wss://your-domain.com/ws  (production)
 - **Max total connections**: 10000 (env `WS_MAX_TOTAL_CONNECTIONS`)
 - **Max messages per second**: 10
 
+### Bot authentication
+The Telegram bot unlocks the private alert channels with `Authorization: Bot <TELEGRAM_BOT_API_KEY>` on the handshake. A `?key=<key>` query is still accepted for clients that cannot set upgrade headers, but a key in a URL ends up in proxy and access logs: each connection that uses it logs a warning, and `WS_ALLOW_BOT_KEY_IN_QUERY=false` turns it off once the bot sends the header.
+
 ## Protocol
 
 All messages are JSON encoded.

@@ -17,7 +17,7 @@ import {
   WSInternalSubscriptionType,
 } from '../types/websocket.types';
 import { CompletedTrade } from '../types/wallet-events.types';
-import { positiveIntEnv } from '../utils/env';
+import { enabledUnlessFalseEnv, positiveIntEnv } from '../utils/env';
 import { normalizeLiquidationFilters } from './liquidationFilters';
 
 /**
@@ -250,6 +250,12 @@ export class InternalWebSocketServer {
    * to the privileged alert channels. Accepts the same `Authorization: Bot
    * <key>` scheme the bot already uses for HTTP, plus a `?key=` query fallback
    * for WS clients that cannot set upgrade headers. Compared in constant time.
+   *
+   * A key in a URL ends up in proxy and access logs, so the fallback can be
+   * switched off with WS_ALLOW_BOT_KEY_IN_QUERY=false once the bot sends the
+   * header. It stays on by default because the bot's repo may still use it, and
+   * cutting it blindly would silently stop its alerts; each connection that
+   * still authenticates through the query is logged (without the key or URL).
    */
   private isBotUpgrade(req: IncomingMessage): boolean {
     const validKeys = [
@@ -260,15 +266,25 @@ export class InternalWebSocketServer {
 
     const authHeader = req.headers['authorization'];
     let provided: string | undefined;
+    let viaQuery = false;
     if (typeof authHeader === 'string' && authHeader.startsWith('Bot ')) {
       provided = authHeader.slice(4);
-    } else if (req.url) {
+    } else if (req.url && enabledUnlessFalseEnv('WS_ALLOW_BOT_KEY_IN_QUERY')) {
       // req.url is path + query only; a fixed base is fine for parsing.
       const key = new URL(req.url, 'http://localhost').searchParams.get('key');
-      if (key) provided = key;
+      if (key) {
+        provided = key;
+        viaQuery = true;
+      }
     }
     if (!provided) return false;
-    return matchesAnyKey(provided, validKeys);
+    if (!matchesAnyKey(provided, validKeys)) return false;
+    if (viaQuery) {
+      logDeduplicator.warn(
+        'InternalWebSocketServer: bot authenticated with ?key= in the URL; send "Authorization: Bot <key>" instead, then set WS_ALLOW_BOT_KEY_IN_QUERY=false',
+      );
+    }
+    return true;
   }
 
   /**

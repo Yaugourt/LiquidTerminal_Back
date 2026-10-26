@@ -115,6 +115,7 @@ Copy `.env.example` to `.env`. Key variables:
 | `CACHE_SHARED_LAST_COPY_S` | Keep of the last copy for shared fixed-name keys that opt in (dashboard tiles, builders stats, HIP-4 tokens): how long an upstream outage still shows their last values (optional, default 3600) |
 | `HYPERFOLIO_STREAMS_PER_IP`, `HYPERFOLIO_STREAMS_TOTAL` | Concurrent Hyperfolio positions streams (optional, defaults 30 per IP, 500 in all) |
 | `WS_MAX_CONNECTIONS_PER_IP`, `WS_MAX_TOTAL_CONNECTIONS` | `/ws` connections (optional, defaults 200 per IP, 10000 in all) |
+| `WS_ALLOW_BOT_KEY_IN_QUERY` | Whether the bot may authenticate `/ws` with `?key=` in the URL (optional, default on; set `false` once the bot sends `Authorization: Bot <key>`, since a key in a URL reaches proxy logs). Each query-authenticated connection logs a warning |
 | `L4BOOK_MAX_COINS` | Order books mirrored at once (optional, default 48) |
 | `BRIDGE_RESERVE_MAX_WEIGHT_PER_CYCLE` | Hyperliquid weight the bridge-reserve scan spends a minute (optional, default 60) |
 | `TELEGRAM_BOT_API_KEY`, `TELEGRAM_BOT_USERNAME` | Telegram bot |
