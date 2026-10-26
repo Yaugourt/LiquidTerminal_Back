@@ -18,6 +18,7 @@ import {
 import { AnalyticsLiquidationStatsResponse } from '../../types/analytics-liquidations.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { SingleFlight } from '../../utils/singleFlight';
+import { isCallerRefusal } from '../../errors/upstreamBudget.errors';
 import { mergeLiquidationResponse } from '../../utils/liquidations-merge';
 import { redisService } from '../../core/redis.service';
 import { SSEManagerService } from './sse-manager.service';
@@ -428,6 +429,10 @@ export class LiquidationsService implements LiquidationDataProvider {
 
       return response;
     } catch (error) {
+      // A client over its own budget is refused, not an upstream failure: the
+      // route answers it with 429 + Retry-After, which a wrapped 500 would hide
+      // (and a flooding client must not fill the error log either).
+      if (isCallerRefusal(error)) throw error;
       logDeduplicator.error('LiquidationsService.getLiquidations failed', {
         error: error instanceof Error ? error.message : String(error),
         params,
@@ -472,6 +477,10 @@ export class LiquidationsService implements LiquidationDataProvider {
 
       return response;
     } catch (error) {
+      // A client over its own budget is refused, not an upstream failure: the
+      // route answers it with 429 + Retry-After, which a wrapped 500 would hide
+      // (and a flooding client must not fill the error log either).
+      if (isCallerRefusal(error)) throw error;
       logDeduplicator.error('LiquidationsService.getRecentLiquidations failed', {
         error: error instanceof Error ? error.message : String(error),
         params,
@@ -520,6 +529,8 @@ export class LiquidationsService implements LiquidationDataProvider {
 
       return response;
     } catch (error) {
+      // The client's own refusal passes through as is (see getLiquidations).
+      if (isCallerRefusal(error)) throw error;
       logDeduplicator.error('Failed to fetch analytics stats', {
         days, coin,
         error: error instanceof Error ? error.message : String(error),
