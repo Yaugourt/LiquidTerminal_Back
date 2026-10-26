@@ -1,5 +1,6 @@
 import { redisService } from '../../../../core/redis.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
+import { upstreamRefusal } from '../../../../utils/request-context';
 
 /**
  * Cache-aside helper for HypeDexer REST pass-through routes.
@@ -9,6 +10,8 @@ import { logDeduplicator } from '../../../../utils/logDeduplicator';
  *   to Redis with `ttlSeconds` TTL.
  * - Fail-open: Redis failures never block the user — they degrade to a
  *   direct fetcher call.
+ * - A caller already over its budget of billed calls (decided on entry, see
+ *   request-context) is refused on a miss, before the fetcher starts.
  */
 export async function withRedisCache<T>(
   cacheKey: string,
@@ -34,6 +37,9 @@ export async function withRedisCache<T>(
       error: err instanceof Error ? err.message : String(err),
     });
   }
+
+  const refusal = upstreamRefusal();
+  if (refusal) throw refusal;
 
   const value = await fetcher();
 

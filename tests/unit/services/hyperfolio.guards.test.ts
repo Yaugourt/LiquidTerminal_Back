@@ -172,6 +172,14 @@ describe('HyperfolioService guards', () => {
     await expect(service.getComposition(ADDRESS, '1.1.1.1')).resolves.toEqual({ data: { data: { tokens: [] } }, stale: false });
   });
 
+  it('marks its own refusal for the cache, and no upstream failure', () => {
+    // The cache leaves no failure marker behind a refusal: other visitors of the key must not pay for it.
+    expect((new errs.HyperfolioThrottledError() as { callerRefusal?: boolean }).callerRefusal).toBe(true);
+    for (const failure of [new errs.HyperfolioUpstreamError(), new errs.HyperfolioRateLimitedError()]) {
+      expect((failure as { callerRefusal?: boolean }).callerRefusal).toBeUndefined();
+    }
+  });
+
   it('serves the last copy, flagged stale, when a refresh is refused or fails', async () => {
     const service = HyperfolioService.getInstance();
     clientMock.getComposition.mockResolvedValueOnce({ data: { tokens: ['old'] } });

@@ -13,6 +13,7 @@ import {
 } from '../../schemas/indexer/users-indexer.schema';
 import { IndexerUsersService } from '../../services/indexer/indexer-users.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerUsersService.getInstance();
@@ -35,7 +36,7 @@ router.get(
       logDeduplicator.error('GET /indexer/users/leaderboard', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_USERS_LEADERBOARD_ERROR',
@@ -64,7 +65,7 @@ router.get(
       logDeduplicator.error('GET /indexer/users/:user/coins', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_USERS_COINS_ERROR',
@@ -92,7 +93,7 @@ router.get(
       logDeduplicator.error('GET /indexer/users/:user/overview', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_USERS_OVERVIEW_ERROR',
@@ -120,7 +121,7 @@ router.get(
       logDeduplicator.error('GET /indexer/users/:user/performance', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_USERS_PERFORMANCE_ERROR',

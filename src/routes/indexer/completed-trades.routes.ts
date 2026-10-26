@@ -16,6 +16,7 @@ import type {
   IndexerCompletedTradesSummaryQuery,
 } from '../../clients/hypedexer/rest/completed-trades/completed-trades.client';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerCompletedTradesService.getInstance();
@@ -67,7 +68,7 @@ router.get(
       logDeduplicator.error('GET /indexer/completed-trades/summary', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_COMPLETED_TRADES_SUMMARY_ERROR',
@@ -90,7 +91,7 @@ router.get(
       logDeduplicator.error('GET /indexer/completed-trades/:trade_id/fills', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_COMPLETED_TRADE_FILLS_ERROR',
@@ -113,7 +114,7 @@ router.get(
       logDeduplicator.error('GET /indexer/completed-trades', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_COMPLETED_TRADES_LIST_ERROR',

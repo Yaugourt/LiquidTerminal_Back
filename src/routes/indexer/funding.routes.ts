@@ -12,6 +12,7 @@ import {
 } from '../../schemas/indexer/funding.schema';
 import { IndexerFundingService } from '../../services/indexer/indexer-funding.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerFundingService.getInstance();
@@ -35,7 +36,7 @@ router.get(
       logDeduplicator.error('GET /indexer/funding/fundingHistory', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FUNDING_HISTORY_ERROR',
@@ -56,7 +57,7 @@ router.get(
       logDeduplicator.error('GET /indexer/funding/predictedFundings', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FUNDING_PREDICTED_ERROR',
@@ -85,7 +86,7 @@ router.get(
       logDeduplicator.error('GET /indexer/funding/userFunding', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FUNDING_USER_ERROR',
@@ -114,7 +115,7 @@ router.get(
       logDeduplicator.error('GET /indexer/funding/userFunding/summary', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FUNDING_USER_SUMMARY_ERROR',

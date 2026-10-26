@@ -11,6 +11,7 @@ import {
 } from '../../schemas/indexer/evm-indexer.schema';
 import { IndexerEvmService } from '../../services/indexer/indexer-evm.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerEvmService.getInstance();
@@ -22,7 +23,7 @@ function wrap(handler: () => Promise<unknown>, label: string, errorCode: string)
       res.json({ success: true, data });
     } catch (error) {
       logDeduplicator.error(label, { error: error instanceof Error ? error.message : String(error) });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: errorCode,
@@ -52,7 +53,7 @@ router.get(
       logDeduplicator.error('GET /indexer/evm/stats/daily', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_EVM_STATS_DAILY_ERROR',
@@ -80,7 +81,7 @@ router.get(
       logDeduplicator.error('GET /indexer/evm/blocks', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_EVM_BLOCKS_ERROR',
@@ -113,7 +114,7 @@ router.get(
       logDeduplicator.error('GET /indexer/evm/transactions', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_EVM_TRANSACTIONS_ERROR',
@@ -141,7 +142,7 @@ router.get(
       logDeduplicator.error('GET /indexer/evm/bridge/events', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_EVM_BRIDGE_EVENTS_ERROR',
@@ -169,7 +170,7 @@ router.get(
       logDeduplicator.error('GET /indexer/evm/ledger/transfers', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_EVM_LEDGER_TRANSFERS_ERROR',

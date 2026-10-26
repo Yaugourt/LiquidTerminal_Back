@@ -16,6 +16,7 @@ import { sseStreamQuerySchema } from '../../schemas/sse.schema';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { serializeBigInts } from '../../utils/bigint.utils';
 import { rateLimitKeyForIp } from '../../utils/client-ip';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const liquidationsService = LiquidationsService.getInstance();
@@ -136,7 +137,7 @@ router.get('/',
         });
       }
       
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         message: error instanceof Error ? error.message : 'Internal server error',
         data: [],
@@ -186,7 +187,7 @@ router.get('/chart-data',
         });
       }
       
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         error: 'Internal server error'
       });
@@ -217,7 +218,7 @@ router.get('/data',
         });
       }
       
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         error: 'Internal server error'
       });
@@ -272,7 +273,7 @@ router.get('/analytics/stats',
         });
       }
       
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         error: 'Internal server error'
       });
@@ -316,7 +317,7 @@ router.get('/stats/all',
         });
       }
       
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         stats: {
           '2h': null,
@@ -371,7 +372,7 @@ router.get('/recent',
         });
       }
       
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         message: error instanceof Error ? error.message : 'Internal server error',
         data: [],
@@ -502,7 +503,7 @@ router.get('/historical/stats',
         });
       }
 
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         error: 'Internal server error'
       });
@@ -542,7 +543,7 @@ router.get('/historical/chart',
       res.json({ success: true, data: result });
     } catch (error) {
       logDeduplicator.error('Error fetching historical chart:', { error: error instanceof Error ? error.message : String(error) });
-      res.status(500).json({
+      sendUpstreamError(res, error, 500, {
         success: false,
         error: 'Internal server error'
       });

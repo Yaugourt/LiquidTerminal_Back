@@ -9,6 +9,7 @@ import {
 } from '../../schemas/indexer/spot-indexer.schema';
 import { IndexerSpotIndexerService } from '../../services/indexer/indexer-spot-indexer.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const svc = IndexerSpotIndexerService.getInstance();
@@ -41,7 +42,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/spot/auctions/hist', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_SPOT_AUCTIONS_HIST_ERROR',
@@ -63,7 +64,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/spot/auctions/live', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_SPOT_AUCTIONS_LIVE_ERROR',
@@ -86,7 +87,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/spot/pairs', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_SPOT_PAIRS_ERROR',
@@ -113,7 +114,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/spot/tokens', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_SPOT_TOKENS_ERROR',

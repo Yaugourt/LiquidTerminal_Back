@@ -16,6 +16,7 @@ import {
 import { IndexerBuildersIndexerService } from '../../services/indexer/indexer-builders-indexer.service';
 import type { IndexerBuildersTimeframe } from '../../clients/hypedexer/rest/builders/builders-indexer.client';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerBuildersIndexerService.getInstance();
@@ -37,7 +38,7 @@ router.get(
       logDeduplicator.error('GET /indexer/builders/list', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_BUILDERS_LIST_ERROR',
@@ -58,7 +59,7 @@ router.get(
       logDeduplicator.error('GET /indexer/builders/stats/all-timeframes', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_BUILDERS_STATS_ALL_TF_ERROR',
@@ -79,7 +80,7 @@ router.get(
       logDeduplicator.error('GET /indexer/builders/stats', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_BUILDERS_STATS_ERROR',
@@ -106,7 +107,7 @@ router.get(
       logDeduplicator.error('GET /indexer/builders/top', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_BUILDERS_TOP_ERROR',
@@ -132,7 +133,7 @@ router.get(
       logDeduplicator.error('GET /indexer/builders/:address/stats', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_BUILDER_DETAIL_STATS_ERROR',
@@ -160,7 +161,7 @@ router.get(
       logDeduplicator.error('GET /indexer/builders/:address/users', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_BUILDER_USERS_ERROR',

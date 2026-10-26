@@ -264,6 +264,47 @@ describe('CacheService.getOrSet', () => {
     await expect(cache.getOrSet('slow', async () => 'new', 120)).resolves.toBe('new');
   });
 
+  describe('a caller refused for its own budget', () => {
+    class Refused extends Error {
+      readonly callerRefusal = true;
+    }
+
+    it('leaves no failure marker, so the next visitor fetches the key', async () => {
+      const refused = jest.fn(async () => {
+        throw new Refused('over budget');
+      });
+      await expect(cache.getOrSet('budget', refused, 15)).rejects.toThrow('over budget');
+      expect(mockRedis.store.has('budget:fail')).toBe(false);
+
+      // Someone else asks for the same key right after: it is fetched, not held off.
+      await expect(cache.getOrSet('budget', async () => 'fresh', 15)).resolves.toBe('fresh');
+    });
+
+    it('does not hold other visitors off a key that has a last copy', async () => {
+      await cache.getOrSet('copy', async () => 'old', 120);
+      mockRedis.store.delete('copy'); // expired
+      const refused = jest.fn(async () => {
+        throw new Refused('over budget');
+      });
+      // The refused caller still gets the last copy...
+      await expect(cache.getOrSetWithMeta('copy', refused, 120)).resolves.toEqual({ data: 'old', stale: true });
+      expect(mockRedis.store.has('copy:fail')).toBe(false);
+      // ...and the next visitor's fetch runs instead of being served it for the backoff.
+      const ok = jest.fn(async () => 'new');
+      await expect(cache.getOrSet('copy', ok, 120)).resolves.toBe('new');
+      expect(ok).toHaveBeenCalledTimes(1);
+    });
+
+    it('still marks a plain upstream failure', async () => {
+      await expect(
+        cache.getOrSet('down', async () => {
+          throw new Error('upstream down');
+        }, 15)
+      ).rejects.toThrow('upstream down');
+      expect(mockRedis.store.has('down:fail')).toBe(true);
+    });
+  });
+
   it('still fetches a key without a copy after a failure', async () => {
     const failing = jest.fn(async () => {
       throw new Error('upstream down');

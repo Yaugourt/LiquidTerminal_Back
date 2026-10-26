@@ -16,6 +16,7 @@ import {
   LeaderboardWindow,
 } from '../../services/indexer/indexer-vaults-indexer.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const svc = IndexerVaultsIndexerService.getInstance();
@@ -50,7 +51,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/vaults/vaultDetails', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_DETAILS_ERROR',
@@ -79,7 +80,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/vaults/vaultSummaries', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_SUMMARIES_ERROR',
@@ -110,7 +111,7 @@ router.get(
       logDeduplicator.error('GET /indexer/vaults/userVaultEquities', {
         error: e instanceof Error ? e.message : String(e),
       });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_USER_EQUITIES_ERROR',
@@ -139,7 +140,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/vaults/dailySnapshots', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_DAILY_SNAPSHOTS_ERROR',
@@ -168,7 +169,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/vaults/equitySnapshots', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_EQUITY_SNAPSHOTS_ERROR',
@@ -198,7 +199,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/vaults/vaultLedger', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_LEDGER_ERROR',
@@ -225,7 +226,7 @@ router.get(
       logDeduplicator.error('GET /indexer/vaults/leaderboards/followers-gained', {
         error: e instanceof Error ? e.message : String(e),
       });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_LEADERBOARDS_FOLLOWERS_ERROR',
@@ -248,7 +249,7 @@ router.get(
       logDeduplicator.error('GET /indexer/vaults/leaderboards/outflows', {
         error: e instanceof Error ? e.message : String(e),
       });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_VAULTS_LEADERBOARDS_OUTFLOWS_ERROR',
