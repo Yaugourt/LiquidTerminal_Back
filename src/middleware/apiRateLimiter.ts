@@ -371,11 +371,15 @@ export const nameCacheDropRateLimiter = createIpLimiter(
 // billed calls a minute with unique cache keys (credits = 2 + ceil(rows/10)
 // each). Sizing, measured: a wallet page makes ~6 per-address misses when it
 // opens and ~5 a minute while it stays open; a cold settled HIP-4 question
-// ~45 in its first second; the HIP-4 resolutions recompute (~250 reads, once an
-// hour for everyone) is charged to the visitor who triggers it. 600 a minute
-// is ~13 cold HIP-4 questions or ~100 cold wallets a minute behind one IP;
-// 15,000 an hour is ~50 wallet pages kept open behind one IP. Only floods and
-// scripts get near them.
+// ~45 in its first second. 600 a minute is ~13 cold HIP-4 questions or ~100
+// cold wallets a minute behind one IP; 15,000 an hour is ~50 wallet pages kept
+// open behind one IP. Only floods and scripts get near them.
+//
+// The budget covers the routes whose cache keys the caller picks (the limiters
+// above that set the upstream caller). Shared aggregates are not charged to
+// whichever visitor happens to trigger them: the HIP-4 resolutions and live
+// volumes and the TWAP source sit behind marketRateLimiter only, run without a
+// caller and are never counted or refused.
 //
 // The budget is decided once per request, on entry (peekUpstreamBudget); the
 // calls are counted exactly (countUpstreamCall) and never refused while they

@@ -431,6 +431,9 @@ export class IndexerHip4Service {
     if (!redisService.isHealthy()) {
       if (this.lastResolutions) return this.lastResolutions;
       // Computed with a caller's reads refused, the entry would be kept for everyone.
+      // Defensive today: /indexer/hip4/resolutions is behind marketRateLimiter
+      // only, so no caller reaches this; kept so that a route behind a limiter
+      // that sets the upstream caller can never cache a partial entry.
       if (!this.resolutionsInflight) {
         const refusal = upstreamRefusal();
         if (refusal) throw refusal;
