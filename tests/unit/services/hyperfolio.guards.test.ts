@@ -166,7 +166,7 @@ describe('HyperfolioService guards', () => {
     clientMock.checkRateLimit.mockReturnValueOnce(false);
     clientMock.getComposition.mockResolvedValue({ data: { tokens: [] } });
     const service = HyperfolioService.getInstance();
-    await expect(service.getComposition(ADDRESS, '6.6.6.6')).rejects.toBeInstanceOf(errs.HyperfolioThrottledError);
+    await expect(service.getComposition(ADDRESS, '6.6.6.6')).rejects.toBeInstanceOf(errs.HyperfolioClientThrottledError);
     expect(clientMock.getComposition).not.toHaveBeenCalled();
     expect(service.isRateLimited()).toBe(false);
     await expect(service.getComposition(ADDRESS, '1.1.1.1')).resolves.toEqual({ data: { data: { tokens: [] } }, stale: false });
@@ -174,8 +174,13 @@ describe('HyperfolioService guards', () => {
 
   it('marks its own refusal for the cache, and no upstream failure', () => {
     // The cache leaves no failure marker behind a refusal: other visitors of the key must not pay for it.
-    expect((new errs.HyperfolioThrottledError() as { callerRefusal?: boolean }).callerRefusal).toBe(true);
-    for (const failure of [new errs.HyperfolioUpstreamError(), new errs.HyperfolioRateLimitedError()]) {
+    expect((new errs.HyperfolioClientThrottledError() as { callerRefusal?: boolean }).callerRefusal).toBe(true);
+    // The process-wide saturation is shared by every visitor: the cache keeps its failure memory for it.
+    for (const failure of [
+      new errs.HyperfolioThrottledError(),
+      new errs.HyperfolioUpstreamError(),
+      new errs.HyperfolioRateLimitedError(),
+    ]) {
       expect((failure as { callerRefusal?: boolean }).callerRefusal).toBeUndefined();
     }
   });

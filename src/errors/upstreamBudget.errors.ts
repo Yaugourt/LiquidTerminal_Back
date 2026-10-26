@@ -17,7 +17,8 @@ export class UpstreamBudgetExceededError extends Error {
 /**
  * True for an error that refuses one caller (its own budget is spent) rather
  * than reporting that the upstream is failing: UpstreamBudgetExceededError,
- * HyperfolioThrottledError. Duck-typed on purpose: the cache must not import
+ * HyperfolioClientThrottledError (not the process-wide HyperfolioThrottledError,
+ * which every visitor shares). Duck-typed on purpose: the cache must not import
  * the error classes of every domain.
  */
 export function isCallerRefusal(error: unknown): boolean {

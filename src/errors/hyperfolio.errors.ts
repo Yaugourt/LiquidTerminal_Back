@@ -33,19 +33,28 @@ export class HyperfolioRateLimitedError extends HyperfolioError {
 
 /**
  * Our own guard refused the call before it reached Hyperfolio: the process-wide
- * upstream budget is saturated, or this caller spent its per-IP budget of
- * cache-missing lookups. Same 429 + code as an upstream throttle so the
- * frontend treats both alike, but a distinct class so it does NOT open the
- * shared cooldown (one noisy client must not lock everyone else out).
- * `callerRefusal` tells the cache the same thing: this is not a failure of
- * the key, so it must not leave a failure marker the other visitors would hit.
+ * upstream budget is saturated (HyperfolioClient's UpstreamThrottle), or this
+ * caller spent its per-IP budget (see HyperfolioClientThrottledError). Same 429
+ * + code as an upstream throttle so the frontend treats both alike, but a
+ * distinct class so it does NOT open the shared cooldown (one noisy client must
+ * not lock everyone else out). It carries no `callerRefusal` marker: the
+ * saturation is shared by every visitor, so the cache keeps its failure
+ * memory for it (see HyperfolioClientThrottledError for the per-client case).
  */
 export class HyperfolioThrottledError extends HyperfolioError {
-  readonly callerRefusal = true;
-
   constructor(message = 'Too many Hyperfolio lookups, retry shortly') {
     super(message, 429, 'HYPERFOLIO_RATE_LIMITED');
   }
+}
+
+/**
+ * This caller alone spent its per-IP budget of cache-missing lookups. A
+ * `callerRefusal`: the key is fine, so the cache must not leave a failure
+ * marker behind it that the other visitors of the key would hit. The
+ * process-wide saturation stays a plain HyperfolioThrottledError.
+ */
+export class HyperfolioClientThrottledError extends HyperfolioThrottledError {
+  readonly callerRefusal = true;
 }
 
 /**

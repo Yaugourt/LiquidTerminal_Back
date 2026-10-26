@@ -6,7 +6,7 @@ import { HYPERFOLIO_CACHE_KEYS, HYPERFOLIO_TTL } from '../../constants/hyperfoli
 import {
   HyperfolioBadInputError,
   HyperfolioRateLimitedError,
-  HyperfolioThrottledError,
+  HyperfolioClientThrottledError,
 } from '../../errors/hyperfolio.errors';
 import {
   HyperfolioCompositionResponse,
@@ -94,7 +94,8 @@ export class HyperfolioService {
       }
       try {
         if (!this.client.checkRateLimit(ip)) {
-          throw new HyperfolioThrottledError();
+          // This caller's own budget: not a failure of the key (callerRefusal).
+          throw new HyperfolioClientThrottledError();
         }
         return await fetchFn();
       } catch (error) {
