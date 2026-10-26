@@ -13,6 +13,7 @@ import {
 import { ElysiumAnalyticsService } from '../../services/elysium/elysium-analytics.service';
 import { ElysiumEcosystemService } from '../../services/elysium/elysium-ecosystem.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = ElysiumAnalyticsService.getInstance();
@@ -57,9 +58,11 @@ function register<S extends QuerySchema>(
           code,
           errorType: error instanceof Error ? error.name : typeof error,
         });
-        res
-          .status(db ? 503 : 502)
-          .json({ success: false, error: db ? 'Analytics unavailable' : 'Analytics error', code });
+        sendUpstreamError(res, error, db ? 503 : 502, {
+          success: false,
+          error: db ? 'Analytics unavailable' : 'Analytics error',
+          code,
+        });
       }
     }) as RequestHandler
   );

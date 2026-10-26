@@ -15,6 +15,7 @@ import {
 } from '../../schemas/indexer/twaps.schema';
 import { IndexerTwapsService } from '../../services/indexer/indexer-twaps.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const svc = IndexerTwapsService.getInstance();
@@ -44,11 +45,13 @@ router.get(
       res.json({ success: true, data: await svc.getTwapSource() });
     } catch (e) {
       logDeduplicator.error('GET /indexer/twaps/source', { error: e instanceof Error ? e.message : String(e) });
-      res.set('Retry-After', '15').status(503).json({
-        success: false,
-        error: 'TWAPs temporarily unavailable',
-        code: 'INDEXER_TWAPS_SOURCE_UNAVAILABLE',
-      });
+      sendUpstreamError(
+        res,
+        e,
+        503,
+        { success: false, error: 'TWAPs temporarily unavailable', code: 'INDEXER_TWAPS_SOURCE_UNAVAILABLE' },
+        { 'Retry-After': '15' }
+      );
     }
   }) as RequestHandler
 );
@@ -66,11 +69,13 @@ router.get(
       res.json({ success: true, data: await svc.getTwapSourceDeep() });
     } catch (e) {
       logDeduplicator.error('GET /indexer/twaps/source/deep', { error: e instanceof Error ? e.message : String(e) });
-      res.set('Retry-After', '15').status(503).json({
-        success: false,
-        error: 'TWAPs temporarily unavailable',
-        code: 'INDEXER_TWAPS_SOURCE_DEEP_UNAVAILABLE',
-      });
+      sendUpstreamError(
+        res,
+        e,
+        503,
+        { success: false, error: 'TWAPs temporarily unavailable', code: 'INDEXER_TWAPS_SOURCE_DEEP_UNAVAILABLE' },
+        { 'Retry-After': '15' }
+      );
     }
   }) as RequestHandler
 );
@@ -89,7 +94,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/twaps/stats', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_TWAPS_STATS_ERROR',
@@ -123,7 +128,7 @@ router.get(
       logDeduplicator.error('GET /indexer/twaps/user/:user_address', {
         error: e instanceof Error ? e.message : String(e),
       });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_TWAPS_USER_ERROR',
@@ -155,7 +160,7 @@ router.get(
       });
     } catch (e) {
       logDeduplicator.error('GET /indexer/twaps', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_TWAPS_LIST_ERROR',
@@ -185,7 +190,7 @@ router.get(
       logDeduplicator.error('GET /indexer/twaps/:twap_id/fills', {
         error: e instanceof Error ? e.message : String(e),
       });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_TWAPS_FILLS_ERROR',
@@ -204,7 +209,7 @@ router.get(
       res.json({ success: true, data: await svc.getTwap(String(req.params.twap_id)) });
     } catch (e) {
       logDeduplicator.error('GET /indexer/twaps/:twap_id', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({
+      sendUpstreamError(res, e, 502, {
         success: false,
         error: e instanceof Error ? e.message : 'Upstream error',
         code: 'INDEXER_TWAPS_BY_ID_ERROR',

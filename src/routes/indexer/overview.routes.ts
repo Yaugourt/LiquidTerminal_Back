@@ -11,6 +11,7 @@ import {
 } from '../../schemas/indexer/overview-indexer.schema';
 import { IndexerOverviewService } from '../../services/indexer/indexer-overview.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerOverviewService.getInstance();
@@ -22,7 +23,7 @@ function wrap(handler: () => Promise<unknown>, label: string): RequestHandler {
       res.json({ success: true, data });
     } catch (error) {
       logDeduplicator.error(label, { error: error instanceof Error ? error.message : String(error) });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_OVERVIEW_ERROR',
@@ -53,7 +54,7 @@ router.get(
       logDeduplicator.error('GET /indexer/overview/coin-distribution', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_OVERVIEW_ERROR',

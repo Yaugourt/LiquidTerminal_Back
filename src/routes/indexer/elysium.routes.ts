@@ -19,6 +19,7 @@ import {
 } from '../../schemas/indexer/elysium-indexer.schema';
 import { IndexerElysiumService } from '../../services/indexer/indexer-elysium.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerElysiumService.getInstance();
@@ -57,7 +58,7 @@ function register<S extends QuerySchema>(
           code,
           errorType: error instanceof Error ? error.name : typeof error,
         });
-        res.status(502).json({ success: false, error: 'Upstream error', code });
+        sendUpstreamError(res, error, 502, { success: false, error: 'Upstream error', code });
       }
     }) as RequestHandler
   );

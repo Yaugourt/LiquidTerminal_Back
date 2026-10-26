@@ -20,6 +20,7 @@ import {
   IndexerFillsUserByAddressQuery,
 } from '../../clients/hypedexer/rest/fills/fills.client';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerFillsService.getInstance();
@@ -94,7 +95,7 @@ router.get(
       res.json({ success: true, data });
     } catch (error) {
       logDeduplicator.error('GET /indexer/fills/recent', { error: error instanceof Error ? error.message : String(error) });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FILLS_RECENT_ERROR',
@@ -113,7 +114,7 @@ router.get(
       res.json({ success: true, data });
     } catch (error) {
       logDeduplicator.error('GET /indexer/fills/count', { error: error instanceof Error ? error.message : String(error) });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FILLS_COUNT_ERROR',
@@ -137,7 +138,7 @@ router.get(
       logDeduplicator.error('GET /indexer/fills/spot/user/:user_address', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FILLS_SPOT_USER_ERROR',
@@ -158,7 +159,7 @@ router.get(
       res.json({ success: true, data });
     } catch (error) {
       logDeduplicator.error('GET /indexer/fills/spot', { error: error instanceof Error ? error.message : String(error) });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FILLS_SPOT_ERROR',
@@ -182,7 +183,7 @@ router.get(
       logDeduplicator.error('GET /indexer/fills/user/:user_address', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FILLS_USER_ERROR',
@@ -203,7 +204,7 @@ router.get(
       res.json({ success: true, data });
     } catch (error) {
       logDeduplicator.error('GET /indexer/fills', { error: error instanceof Error ? error.message : String(error) });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_FILLS_ERROR',

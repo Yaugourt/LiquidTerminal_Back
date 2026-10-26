@@ -4,6 +4,7 @@ import { validateGetRequest } from '../../middleware/validation';
 import { candlesQuerySchema } from '../../schemas/indexer/candles.schema';
 import { HypeDexerCandlesClient, type CandleInterval } from '../../clients/hypedexer/rest/candles/candles.client';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const client = HypeDexerCandlesClient.getInstance();
@@ -34,7 +35,7 @@ router.get(
       res.json({ success: true, data });
     } catch (e) {
       logDeduplicator.error('GET /indexer/candles', { error: e instanceof Error ? e.message : String(e) });
-      res.status(502).json({ success: false, error: 'Candles unavailable', code: 'INDEXER_CANDLES_ERROR' });
+      sendUpstreamError(res, e, 502, { success: false, error: 'Candles unavailable', code: 'INDEXER_CANDLES_ERROR' });
     }
   }) as RequestHandler
 );

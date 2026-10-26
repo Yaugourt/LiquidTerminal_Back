@@ -25,6 +25,7 @@ import {
 } from '../../schemas/indexer/hip3.schema';
 import { IndexerHip3Service } from '../../services/indexer/indexer-hip3.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const svc = IndexerHip3Service.getInstance();
@@ -41,7 +42,7 @@ function num(q: unknown): number | undefined {
 
 function send502(res: Response, code: string, error: unknown): void {
   logDeduplicator.error(`HIP3 ${code}`, { error: error instanceof Error ? error.message : String(error) });
-  res.status(502).json({
+  sendUpstreamError(res, error, 502, {
     success: false,
     error: 'Upstream error',
     code,

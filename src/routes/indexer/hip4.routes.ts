@@ -10,6 +10,7 @@ import {
 } from '../../schemas/indexer/hip4.schema';
 import { IndexerHip4Service } from '../../services/indexer/indexer-hip4.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const svc = IndexerHip4Service.getInstance();
@@ -26,7 +27,7 @@ function num(q: unknown): number | undefined {
 
 function send502(res: Response, code: string, error: unknown): void {
   logDeduplicator.error(`HIP4 ${code}`, { error: error instanceof Error ? error.message : String(error) });
-  res.status(502).json({
+  sendUpstreamError(res, error, 502, {
     success: false,
     error: 'Upstream error',
     code,
@@ -36,11 +37,13 @@ function send502(res: Response, code: string, error: unknown): void {
 /** Nothing computed and nothing kept: a temporary condition, the client retries. */
 function send503(res: Response, code: string, error: unknown, what: string): void {
   logDeduplicator.error(`HIP4 ${code}`, { error: error instanceof Error ? error.message : String(error) });
-  res.set('Retry-After', '15').status(503).json({
-    success: false,
-    error: `HIP-4 ${what} temporarily unavailable`,
-    code,
-  });
+  sendUpstreamError(
+    res,
+    error,
+    503,
+    { success: false, error: `HIP-4 ${what} temporarily unavailable`, code },
+    { 'Retry-After': '15' }
+  );
 }
 
 router.get(

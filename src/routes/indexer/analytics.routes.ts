@@ -7,6 +7,7 @@ import {
 } from '../../schemas/indexer/analytics.schema';
 import { IndexerAnalyticsService } from '../../services/indexer/indexer-analytics.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerAnalyticsService.getInstance();
@@ -28,7 +29,7 @@ router.get(
       logDeduplicator.error('GET /indexer/analytics/fills/stats', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_ANALYTICS_FILLS_STATS_ERROR',
@@ -54,7 +55,7 @@ router.get(
       logDeduplicator.error('GET /indexer/analytics/priority-fees/stats', {
         error: error instanceof Error ? error.message : String(error),
       });
-      res.status(502).json({
+      sendUpstreamError(res, error, 502, {
         success: false,
         error: 'Upstream error',
         code: 'INDEXER_ANALYTICS_PRIORITY_FEES_STATS_ERROR',
