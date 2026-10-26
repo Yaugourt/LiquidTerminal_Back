@@ -66,7 +66,12 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-import { currentUpstreamCaller, runWithUpstreamCaller, type UpstreamBudgetState } from '../../../src/utils/request-context';
+import {
+  ABORT_GRACE_MS,
+  currentUpstreamCaller,
+  runWithUpstreamCaller,
+  type UpstreamBudgetState,
+} from '../../../src/utils/request-context';
 import {
   marketRateLimiter,
   passthroughRateLimiter,
@@ -164,7 +169,8 @@ describe('upstream caller context', () => {
     expect(currentUpstreamCaller()).toBeUndefined();
   });
 
-  it.each(['finish', 'close'])('closes when the response emits %s, for work that outlives it', async (event) => {
+  it('closes when the response finishes, for work that outlives it', async () => {
+    const event = 'finish';
     const { res } = exchange('1.2.3.4');
     let lateTimer!: Promise<unknown>;
     await asCaller(
@@ -204,6 +210,128 @@ describe('upstream caller context', () => {
       });
     });
     expect(seen).toMatchObject({ exhausted: false });
+  });
+});
+
+describe('a request whose client drops the connection', () => {
+  const realFetch = global.fetch;
+  let client: TestClient;
+
+  beforeEach(() => {
+    resetRedis();
+    // setImmediate stays real: settle() waits on it for the counting pipelines.
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    global.fetch = jest.fn(
+      async () => new Response(JSON.stringify({ data: [1] }), { status: 200, headers: { 'content-type': 'application/json' } })
+    ) as unknown as typeof fetch;
+    client = new TestClient();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    global.fetch = realFetch;
+  });
+
+  /** Runs `inside` as the caller of a request that the client drops right after entry (a 'close' with no 'finish'). */
+  const abortedCaller = <T>(ip: string, inside: () => Promise<T>, state: UpstreamBudgetState): Promise<T> => {
+    const { res } = exchange(ip);
+    return asCaller(
+      ip,
+      async () => {
+        res.emit('close');
+        return inside();
+      },
+      { res, state }
+    );
+  };
+
+  it('is still refused at a gate reached within the grace', async () => {
+    const refusal = await abortedCaller(
+      '8.8.8.8',
+      async () => {
+        jest.advanceTimersByTime(ABORT_GRACE_MS - 1);
+        return client.one('/cold').catch((error: unknown) => error);
+      },
+      EXHAUSTED
+    );
+    expect(refusal).toBeInstanceOf(UpstreamBudgetExceededError);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('is still counted at a gate reached within the grace, when it entered within budget', async () => {
+    await abortedCaller(
+      '8.8.8.9',
+      async () => {
+        jest.advanceTimersByTime(ABORT_GRACE_MS - 1);
+        await client.one('/cold');
+      },
+      WITHIN
+    );
+    await settle();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(spentBy('8.8.8.9')).toBe(1);
+  });
+
+  it('is no caller once the grace is over: a timer it started is released', async () => {
+    const seen = await abortedCaller(
+      '8.8.8.8',
+      async () => {
+        expect(currentUpstreamCaller()).toBeDefined();
+        jest.advanceTimersByTime(ABORT_GRACE_MS);
+        const caller = currentUpstreamCaller();
+        // Nothing is refused or counted any more.
+        await client.one('/late');
+        return caller;
+      },
+      EXHAUSTED
+    );
+    await settle();
+    expect(seen).toBeUndefined();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(spent()).toBe(0);
+  });
+
+  it('closes at once on a normal finish, and the finish after a close cancels the grace', async () => {
+    const { res } = exchange('8.8.8.7');
+    const seen = await asCaller(
+      '8.8.8.7',
+      async () => {
+        res.emit('finish');
+        return currentUpstreamCaller();
+      },
+      { res }
+    );
+    expect(seen).toBeUndefined();
+
+    // A usual response emits 'close' after 'finish': that must not reopen anything or leave a timer.
+    res.emit('close');
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('starts the grace when the socket was already destroyed before the listeners were attached', async () => {
+    const { res } = exchange('8.8.8.6');
+    const req = { ip: '8.8.8.6', path: '/x', query: {}, socket: { destroyed: true } } as unknown as Request;
+    const states = await new Promise<[unknown, unknown]>((resolve) => {
+      void runWithUpstreamCaller(
+        req,
+        res,
+        (() => {
+          const within = { ...currentUpstreamCaller() };
+          jest.advanceTimersByTime(ABORT_GRACE_MS);
+          resolve([within, currentUpstreamCaller()]);
+        }) as NextFunction,
+        async () => EXHAUSTED
+      );
+    });
+    expect(states[0]).toMatchObject({ exhausted: true, open: true });
+    expect(states[1]).toBeUndefined();
+  });
+
+  it('closes at once when the response had already finished before the listeners were attached', async () => {
+    const { res } = exchange('8.8.8.5');
+    Object.assign(res, { writableFinished: true });
+    const seen = await asCaller('8.8.8.5', async () => currentUpstreamCaller(), { res });
+    expect(seen).toBeUndefined();
   });
 });
 
