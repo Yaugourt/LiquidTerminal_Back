@@ -318,3 +318,34 @@ export const accountRateLimiter = createIpLimiter(
   { BURST: { WINDOW: 1, MAX_REQUESTS: 60 }, MINUTE: { WINDOW: 60, MAX_REQUESTS: 1200 } },
   'account'
 );
+
+/**
+ * Signed mint passes for Hyperliquid Names. Each request makes api.hlnames.xyz
+ * sign with OUR partner key, for anyone, so a script could burn the partner
+ * quota. A real mint asks for 1 pass (native) or 2 (USDC, one before and one
+ * after the approval transaction), a wallet confirmation apart, so a person
+ * makes a few a minute at most: 2 a second lets two people click together,
+ * 20 a minute is ~10 USDC mints a minute behind one IP with room for retries.
+ */
+export const nameMintPassRateLimiter = createIpLimiter(
+  'nmint',
+  {
+    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('NAME_MINT_PASS_RATE_LIMIT_BURST', 2) },
+    MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('NAME_MINT_PASS_RATE_LIMIT_MINUTE', 20) },
+  },
+  'name mint pass'
+);
+
+/**
+ * Drops our cached name and profile of any address, so the next lookups go to
+ * the provider again. The front sends exactly one after each successful mint,
+ * so it follows the mint rate: 2 a second, 10 a minute per IP.
+ */
+export const nameCacheDropRateLimiter = createIpLimiter(
+  'nforget',
+  {
+    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('NAME_CACHE_DROP_RATE_LIMIT_BURST', 2) },
+    MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('NAME_CACHE_DROP_RATE_LIMIT_MINUTE', 10) },
+  },
+  'name cache drop'
+);
