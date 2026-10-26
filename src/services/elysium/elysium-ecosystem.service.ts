@@ -8,7 +8,7 @@ import { CURVE_SALE_SUPPLY, HYPE_QUOTES, LAUNCH_TOTAL_SUPPLY, Launchpad, quoteDe
 const CACHE_TTL_S = 60;
 /** How long a computed value is kept to be served while it refreshes. */
 const KEEP_S = 6 * 3600;
-const PROJECTS_KEY = 'elysium:ecosystem:projects:v4';
+const PROJECTS_KEY = 'elysium:ecosystem:projects:v5';
 const ALL_TIME_KEY = 'elysium:ecosystem:alltime:v1';
 /** All-time counts scan every tx ever sent to a project: refreshed every 10 min, not every minute. */
 const ALL_TIME_TTL_S = 600;
@@ -57,6 +57,18 @@ export interface ElysiumProjectView extends Omit<ElysiumProject, 'contracts'> {
   /** Listed contracts with verified source on the explorer; null until the first check ran. */
   verifiedContracts: number | null;
 }
+
+/**
+ * Activity the provider has not indexed yet. `from` is its tx cursor; `to` is where the RPC live
+ * fallback (elysium_tx_live) picks up, null while it has not. Calls in between are missing.
+ */
+export interface ElysiumActivityGap {
+  from: string;
+  to: string | null;
+}
+
+/** Behind the clock by more than this, the provider's tx cursor counts as a gap. */
+const GAP_MIN_MS = 10 * 60 * 1000;
 
 interface AllTimeRow {
   slug: string;
@@ -139,7 +151,7 @@ export class ElysiumEcosystemService {
     return ElysiumEcosystemService.instance;
   }
 
-  public getProjects(): Promise<{ projects: ElysiumProjectView[]; computedAt: string }> {
+  public getProjects(): Promise<{ projects: ElysiumProjectView[]; activityGap: ElysiumActivityGap | null; computedAt: string }> {
     return cacheService.getOrRefresh(PROJECTS_KEY, () => this.computeProjects(), CACHE_TTL_S, KEEP_S);
   }
 
@@ -156,14 +168,21 @@ export class ElysiumEcosystemService {
 
   private async computeAllTime(): Promise<AllTimeRow[]> {
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
+    const cursor = (await this.readTxCursor())?.toISOString() ?? null;
     return prismaHistorical.$queryRaw<AllTimeRow[]>`
       WITH reg AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
+      ),
+      calls AS (
+        SELECT from_addr, to_addr, block_time FROM elysium_tx WHERE NOT is_spam
+        UNION ALL
+        SELECT from_addr, to_addr, block_time FROM elysium_tx_live
+        WHERE block_time > COALESCE(${cursor}::timestamptz, 'infinity'::timestamptz)
       )
       SELECT reg.slug, count(*)::int AS txs, count(DISTINCT t.from_addr)::int AS wallets,
              extract(epoch FROM min(t.block_time))::float8 AS first_at
       FROM reg
-      JOIN elysium_tx t ON t.to_addr = reg.addr AND NOT t.is_spam
+      JOIN calls t ON t.to_addr = reg.addr
       GROUP BY reg.slug`;
   }
 
@@ -233,12 +252,26 @@ export class ElysiumEcosystemService {
     }
   }
 
-  private async computeProjects(): Promise<{ projects: ElysiumProjectView[]; computedAt: string }> {
+  /** The provider's tx cursor: elysium_tx is complete up to it, elysium_tx_live takes over after. */
+  private async readTxCursor(): Promise<Date | null> {
+    const rows = await prismaHistorical.$queryRaw<Array<{ cursor: Date | null }>>`
+      SELECT cursor FROM elysium_ingest_state WHERE stream = 'tx'`;
+    return rows[0]?.cursor ?? null;
+  }
+
+  private async computeProjects(): Promise<{
+    projects: ElysiumProjectView[];
+    activityGap: ElysiumActivityGap | null;
+    computedAt: string;
+  }> {
     const now = new Date();
     const ago = (days: number) => new Date(now.getTime() - days * DAY_MS).toISOString();
     const nowIso = now.toISOString();
     const [since1, since2, since7, since14] = [ago(1), ago(2), ago(7), ago(SERIES_DAYS)];
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
+    // Provider rows up to its tx cursor, RPC-read rows (no spam flag in that view) after it.
+    const txCursor = await this.readTxCursor();
+    const cursorIso = txCursor?.toISOString() ?? null;
 
     const [activity, daily, pads, padVolumes, hypeUsd, allTime, verified] = await Promise.all([
       prismaHistorical.$queryRaw<ActivityRow[]>`
@@ -253,7 +286,14 @@ export class ElysiumEcosystemService {
                count(DISTINCT t.from_addr) FILTER (WHERE t.block_time >= ${since2}::timestamptz
                                                      AND t.block_time < ${since1}::timestamptz)::int AS wallets_prev24
         FROM reg
-        JOIN elysium_tx t ON t.to_addr = reg.addr AND t.block_time >= ${since14}::timestamptz AND NOT t.is_spam
+        JOIN (
+          SELECT from_addr, to_addr, block_time FROM elysium_tx
+          WHERE block_time >= ${since14}::timestamptz AND NOT is_spam
+          UNION ALL
+          SELECT from_addr, to_addr, block_time FROM elysium_tx_live
+          WHERE block_time >= ${since14}::timestamptz
+            AND block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
+        ) t ON t.to_addr = reg.addr
         GROUP BY reg.slug`,
       // Bucket 0 is the last 24h; buckets are rolling so the latest one is never a partial day.
       prismaHistorical.$queryRaw<Array<{ slug: string; bucket: number; users: number }>>`
@@ -264,8 +304,14 @@ export class ElysiumEcosystemService {
                floor(extract(epoch FROM (${nowIso}::timestamptz - t.block_time)) / 86400)::int AS bucket,
                count(DISTINCT t.from_addr)::int AS users
         FROM reg
-        JOIN elysium_tx t ON t.to_addr = reg.addr AND t.block_time >= ${since14}::timestamptz
-                         AND t.block_time <= ${nowIso}::timestamptz AND NOT t.is_spam
+        JOIN (
+          SELECT from_addr, to_addr, block_time FROM elysium_tx
+          WHERE block_time >= ${since14}::timestamptz AND block_time <= ${nowIso}::timestamptz AND NOT is_spam
+          UNION ALL
+          SELECT from_addr, to_addr, block_time FROM elysium_tx_live
+          WHERE block_time >= ${since14}::timestamptz AND block_time <= ${nowIso}::timestamptz
+            AND block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
+        ) t ON t.to_addr = reg.addr
         GROUP BY 1, 2`,
       prismaHistorical.$queryRaw<Array<{ launchpad: string; launches: number }>>`
         SELECT l.launchpad, count(*) FILTER (WHERE l.created_at >= ${since7}::timestamptz)::int AS launches
@@ -282,6 +328,7 @@ export class ElysiumEcosystemService {
       this.getAllTime(),
       this.readVerified(),
     ]);
+    const activityGap = await this.readActivityGap(txCursor, now);
 
     const allBySlug = new Map(allTime.map((r) => [r.slug, r]));
     const bySlug = new Map(activity.map((r) => [r.slug, r]));
@@ -325,7 +372,16 @@ export class ElysiumEcosystemService {
         verifiedContracts: verified ? contracts.filter((c) => verified.has(c.address)).length : null,
       };
     });
-    return { projects, computedAt: now.toISOString() };
+    return { projects, activityGap, computedAt: now.toISOString() };
+  }
+
+  /** The window with no activity data: from the provider's tx cursor to where the live fallback began. */
+  private async readActivityGap(txCursor: Date | null, now: Date): Promise<ElysiumActivityGap | null> {
+    if (!txCursor || now.getTime() - txCursor.getTime() < GAP_MIN_MS) return null;
+    const rows = await prismaHistorical.$queryRaw<Array<{ start: Date | null }>>`
+      SELECT min(block_time) AS start FROM elysium_tx_live WHERE block_time > ${txCursor.toISOString()}::timestamptz`;
+    const start = rows[0]?.start ?? null;
+    return { from: txCursor.toISOString(), to: start ? start.toISOString() : null };
   }
 
   private async computeTokens(): Promise<{ tokens: ElysiumLaunchTokenView[]; hypeUsd: number | null; computedAt: string }> {

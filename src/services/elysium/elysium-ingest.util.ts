@@ -244,3 +244,34 @@ export function dedupeBy<T>(rows: T[], key: (row: T) => string): T[] {
   for (const r of rows) map.set(key(r), r);
   return [...map.values()];
 }
+
+/** A transaction read from the public RPC while the provider lags: who called which contract, when. */
+export interface LiveTxRow {
+  tx_hash: string;
+  block_number: string;
+  block_time: string;
+  from_addr: string;
+  to_addr: string;
+}
+
+/**
+ * Map an RPC block transaction; only calls to `watched` contracts are kept, everything else
+ * (system txs, deployments, other contracts) returns null.
+ */
+export function normalizeLiveTx(
+  tx: { hash?: unknown; from?: unknown; to?: unknown },
+  block: { number: number; timestamp: number },
+  watched: ReadonlySet<string>
+): LiveTxRow | null {
+  const to = addr(tx.to);
+  const from = addr(tx.from);
+  const hash = addr(tx.hash);
+  if (!to || !from || !hash || !watched.has(to) || !(block.timestamp > 0)) return null;
+  return {
+    tx_hash: hash,
+    block_number: String(block.number),
+    block_time: new Date(block.timestamp * 1000).toISOString(),
+    from_addr: from,
+    to_addr: to,
+  };
+}

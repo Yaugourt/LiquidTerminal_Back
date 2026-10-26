@@ -7,18 +7,21 @@ import { withDistributedLock } from '../../utils/distributedLock';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { rawLogger } from '../../utils/logger';
 import { ElysiumIngestRepository, ElysiumStream } from '../../repositories/prisma/prisma.elysium.repository';
-import { ElysiumRpcLogs } from './elysium-rpc-logs';
+import { ELYSIUM_PROJECTS } from '../../constants/elysium-projects';
+import { BLOCK_BATCH, ElysiumRpcLogs } from './elysium-rpc-logs';
 import {
   dedupeBy,
   ELYSIUM_GENESIS,
   HOUR_MS,
   MINUTE_MS,
   normalizeBridgeTransfer,
+  normalizeLiveTx,
   normalizeToken,
   normalizeTx,
   planWindow,
   toUpstreamTime,
   BridgeRow,
+  LiveTxRow,
   TokenRow,
   TxRow,
   scaleRawAmount,
@@ -77,6 +80,18 @@ const TX_LIVE_INTERVAL_MS = 30_000;
 const TX_STEP_MS = HOUR_MS;
 const TX_OVERLAP_MS = 120_000;
 const TX_SETTLE_MS = 15_000;
+
+/** Live tx fallback: pause between block batches, so the public RPC is never pushed past its rate. */
+const TXLIVE_BATCH_GAP_MS = 1_000;
+const TXLIVE_LIVE_INTERVAL_MS = 2_000;
+/** While the provider is current there is nothing to read from the RPC. */
+const TXLIVE_IDLE_INTERVAL_MS = 60_000;
+/** RPC-read rows are dropped once the provider's tx stream has covered them for this long. */
+const TXLIVE_KEEP_MS = 24 * HOUR_MS;
+/** The project contracts whose calls the live fallback keeps. */
+const WATCHED_CONTRACTS: ReadonlySet<string> = new Set(
+  ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => c.address.toLowerCase()))
+);
 
 const BRIDGE_LIVE_INTERVAL_MS = 60_000;
 const BRIDGE_LIVE_WINDOW_MS = 15 * MINUTE_MS;
@@ -161,7 +176,11 @@ class IngestStoppedError extends Error {
  * Provider lag: no stream moves its cursor past the last block the provider
  * has indexed (its /stats last_block_time), so an indexer outage leaves no
  * hole once it recovers. Meanwhile the log streams (dex, launchpad) read the
- * windows the provider has not reached from the public RPC (eth_getLogs).
+ * windows the provider has not reached from the public RPC (eth_getLogs), and
+ * txlive follows the chain tip block by block, keeping only calls to the
+ * project contracts (elysium_tx_live), whenever the tx stream is behind the
+ * clock (stalled or unreachable provider alike). It starts at the tip, not at
+ * the tx cursor: the RPC rate leaves too little room to replay the gap.
  *
  * Each stream is a self-rescheduling loop (single flight by construction),
  * guarded by a Redis lock, and never throws: failures are recorded in
@@ -184,6 +203,8 @@ export class ElysiumIngestionService {
   private backfillWindows = 0;
   /** Current tx window length: halves on a page-cap overflow, grows back after. */
   private txStepMs = TX_STEP_MS;
+  /** Next block the live tx fallback reads, null until resolved from its cursor. */
+  private liveBlock: number | null = null;
 
   public static getInstance(): ElysiumIngestionService {
     if (!ElysiumIngestionService.instance) {
@@ -204,6 +225,7 @@ export class ElysiumIngestionService {
     if (!this.stopped) return;
     this.stopped = false;
     this.schedule('tx', 0, () => this.txTick());
+    this.schedule('txlive', 30_000, () => this.txLiveTick());
     this.schedule('bridge', 5_000, () => this.bridgeTick());
     this.schedule('tokens', 10_000, () => this.tokensTick());
     this.schedule('dex', 15_000, () => this.dexTick());
@@ -263,6 +285,7 @@ export class ElysiumIngestionService {
 
   private baseInterval(stream: ElysiumStream): number {
     if (stream === 'tx') return TX_LIVE_INTERVAL_MS;
+    if (stream === 'txlive') return TXLIVE_IDLE_INTERVAL_MS / 6;
     if (stream === 'bridge') return BRIDGE_LIVE_INTERVAL_MS;
     if (stream === 'dex') return DEX_LIVE_INTERVAL_MS;
     if (stream === 'methods') return METHODS_INTERVAL_MS;
@@ -418,6 +441,57 @@ export class ElysiumIngestionService {
       if (w.caughtUp) return TX_LIVE_INTERVAL_MS;
     }
     // Budget spent but still behind: continue right away.
+    return 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // txlive stream (RPC fallback while the provider lags)
+  // ---------------------------------------------------------------------------
+
+  private async txLiveTick(): Promise<number> {
+    const deadline = Date.now() + TICK_BUDGET_MS;
+    // Keyed on our own tx cursor, not the provider's head: when the provider is unreachable
+    // (no head at all) the tx stream is stuck just the same.
+    const txCursor = (await this.repo.getState('tx'))?.cursor ?? null;
+    if (txCursor) await this.repo.pruneLiveTxs(new Date(txCursor.getTime() - TXLIVE_KEEP_MS));
+    if (!txCursor || Date.now() - txCursor.getTime() <= HEAD_LAG_MS) {
+      this.liveBlock = null;
+      return TXLIVE_IDLE_INTERVAL_MS;
+    }
+
+    if (this.liveBlock === null) {
+      const cursor = (await this.repo.getState('txlive'))?.cursor ?? null;
+      // Resume a run of this outage; a cursor from an earlier outage starts over at the tip.
+      this.liveBlock =
+        cursor && cursor.getTime() > txCursor.getTime()
+          ? (await this.rpcLogs.blockAtOrBefore(cursor.getTime() / 1000)) + 1
+          : await this.rpcLogs.headBlock();
+      void rawLogger.info('Elysium ingest: live tx fallback started', { block: this.liveBlock });
+    }
+
+    while (Date.now() < deadline) {
+      this.ensureRunning();
+      const tip = await this.rpcLogs.headBlock();
+      const count = Math.min(BLOCK_BATCH, tip - this.liveBlock + 1);
+      if (count <= 0) return TXLIVE_LIVE_INTERVAL_MS;
+      const blocks = await this.rpcLogs.getBlocks(this.liveBlock, count);
+      if (blocks.length > 0) {
+        const rows = dedupeBy(
+          blocks.flatMap((b) =>
+            b.transactions
+              .map((tx) => normalizeLiveTx(tx, b, WATCHED_CONTRACTS))
+              .filter((r): r is LiveTxRow => r !== null)
+          ),
+          (r) => r.tx_hash
+        );
+        const inserted = await this.repo.insertLiveTxs(rows);
+        const last = blocks[blocks.length - 1];
+        this.liveBlock = last.number + 1;
+        await this.repo.advance('txlive', { cursor: new Date(last.timestamp * 1000), addRows: inserted });
+      }
+      await new Promise((r) => setTimeout(r, TXLIVE_BATCH_GAP_MS));
+    }
+    // Budget spent but still behind the tip: continue right away.
     return 0;
   }
 
