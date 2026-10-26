@@ -1,5 +1,9 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import {
+  marketRateLimiter,
+  passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
+} from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   hip4FillsQuerySchema,
@@ -47,6 +51,7 @@ router.get(
   '/fills',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(hip4FillsQuerySchema),
   (async (req: Request, res: Response) => {
     try {

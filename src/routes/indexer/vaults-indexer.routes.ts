@@ -1,5 +1,5 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import { marketRateLimiter, passthroughRateLimiter, indexerAddressRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   vaultsDetailsQuerySchema,
@@ -34,6 +34,7 @@ router.get(
   '/vaultDetails',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(vaultsDetailsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -91,6 +92,7 @@ router.get(
   '/userVaultEquities',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(vaultsUserEquitiesQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -121,6 +123,7 @@ router.get(
   '/dailySnapshots',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(vaultsDailySnapshotsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -149,6 +152,7 @@ router.get(
   '/equitySnapshots',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(vaultsEquitySnapshotsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -177,6 +181,7 @@ router.get(
   '/vaultLedger',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(vaultsLedgerQuerySchema),
   (async (req: Request, res: Response) => {
     try {

@@ -1,5 +1,10 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import {
+  marketRateLimiter,
+  passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
+  indexerAddressRateLimiter,
+} from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   hip3AssetsQuerySchema,
@@ -224,6 +229,7 @@ router.get(
   '/fills',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressQueryRateLimiter,
   validateGetRequest(hip3FillsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -374,6 +380,7 @@ router.get(
   '/users/:address/coins',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(hip3UserCoinsSchema),
   (async (req: Request, res: Response) => {
     try {
@@ -389,6 +396,7 @@ router.get(
   '/users/:address/fills',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(hip3UserFillsSchema),
   (async (req: Request, res: Response) => {
     try {
@@ -415,6 +423,7 @@ router.get(
   '/users/:address/overview',
   marketRateLimiter,
   passthroughRateLimiter,
+  indexerAddressRateLimiter,
   validateGetRequest(hip3UserOverviewSchema),
   (async (req: Request, res: Response) => {
     try {

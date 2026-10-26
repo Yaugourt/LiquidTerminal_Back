@@ -12,6 +12,7 @@ const passthroughLimiter = jest.fn((_req: Request, _res: Response, next: NextFun
 jest.mock('../../../src/middleware/apiRateLimiter', () => ({
   marketRateLimiter: (req: Request, res: Response, next: NextFunction) => marketLimiter(req, res, next),
   passthroughRateLimiter: (req: Request, res: Response, next: NextFunction) => passthroughLimiter(req, res, next),
+  indexerAddressQueryRateLimiter: (_req: Request, _res: Response, next: NextFunction) => next(),
 }));
 
 jest.mock('../../../src/utils/logDeduplicator', () => ({
