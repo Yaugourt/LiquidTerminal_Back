@@ -3,6 +3,7 @@ import {
   ActiveUsersApiResponse,
   ActiveUsersQueryParams,
 } from '../../../../types/activeusers.types';
+import { cacheService } from '../../../../core/cache.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../../../core/redis.service';
@@ -11,6 +12,7 @@ import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { coerceHypedexerListApiResponse } from '../../../../utils/hypedexer-api-response.util';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
+import { ACTIVE_USERS_HOURS } from '../../../../types/activeusers.types';
 
 const CACHE_KEY_PREFIX = 'activeusers';
 const UPDATE_CHANNEL = 'activeusers:updated';
@@ -24,6 +26,9 @@ const UPDATE_INTERVAL = 60_000;
 // each), amplifying upstream 429s. Freshness stays governed by the poll, not the TTL.
 const CACHE_TTL = 90;
 const HOURS_TO_CACHE = [1, 4, 12, 24];
+// The other windows the route accepts (7 days): no poller, one shared
+// on-demand read per CACHE_TTL whatever the number of visitors.
+const ON_DEMAND_HOURS: readonly number[] = ACTIVE_USERS_HOURS.filter((hours) => !HOURS_TO_CACHE.includes(hours));
 
 /**
  * Client for HypeDexer Active Users API
@@ -155,7 +160,9 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
   /**
    * Get active users for the specified time window
    * Reads from Redis cache first for cached hours (1,4,12,24) and limit<=100.
-   * On miss: triggers update, re-reads cache. For non-cached params: passthrough to API.
+   * On miss: triggers update, re-reads cache. The 7-day window is a shared
+   * on-demand read (cacheService.getOrSet). The route only lets these hours
+   * through; any other params are a passthrough to the API.
    */
   public async getActiveUsers(params: ActiveUsersQueryParams = {}): Promise<ActiveUsersApiResponse> {
     const hours = params.hours ?? 24;
@@ -187,6 +194,18 @@ export class HLIndexerActiveUsersClient extends HypeDexerBaseClient {
         }
         return parsed;
       }
+    }
+
+    // A window the poller does not keep (7 days): one shared read at a time
+    // and one per TTL for every visitor (and the last copy when it fails),
+    // sliced to the limit like the polled keys. 100 rows are always read.
+    if (ON_DEMAND_HOURS.includes(hours) && limit <= 100) {
+      const shared = await cacheService.getOrSet<ActiveUsersApiResponse>(
+        cacheKey,
+        () => this.circuitBreaker.execute(() => this.fetchRaw({ hours, limit: 100 })),
+        CACHE_TTL
+      );
+      return limit < 100 ? { ...shared, data: shared.data.slice(0, limit) } : shared;
     }
 
     return this.circuitBreaker.execute(() => this.fetchRaw({ hours, limit }));

@@ -11,10 +11,18 @@ export interface ActiveUser {
 }
 
 /**
+ * The lookback windows GET /active-users serves (the ones the front offers):
+ * every other value is a billed HypeDexer call of its own, so the route
+ * refuses it. 1, 4, 12 and 24 are kept warm by the poller, 168 is read on
+ * demand and shared.
+ */
+export const ACTIVE_USERS_HOURS = [1, 4, 12, 24, 168] as const;
+
+/**
  * Query parameters for active users API
  */
 export interface ActiveUsersQueryParams {
-  hours?: number;  // Lookback window in hours (1-168, default: 24)
+  hours?: number;  // Lookback window in hours (one of ACTIVE_USERS_HOURS, default: 24)
   limit?: number;  // Max users (1-100, default: 100)
 }
 

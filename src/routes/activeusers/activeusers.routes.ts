@@ -1,6 +1,6 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { ActiveUsersService } from '../../services/activeusers/activeusers.service';
-import { ActiveUsersQueryParams, ActiveUsersError } from '../../types/activeusers.types';
+import { ACTIVE_USERS_HOURS, ActiveUsersQueryParams, ActiveUsersError } from '../../types/activeusers.types';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { activeUsersQuerySchema } from '../../schemas/activeusers.schema';
@@ -19,7 +19,7 @@ function parseQueryParams(query: Request['query']): ActiveUsersQueryParams {
     const hours = typeof query.hours === 'number'
       ? query.hours
       : parseInt(query.hours as string, 10);
-    if (!isNaN(hours) && hours >= 1 && hours <= 168) {
+    if ((ACTIVE_USERS_HOURS as readonly number[]).includes(hours)) {
       params.hours = hours;
     }
   }
@@ -41,7 +41,7 @@ function parseQueryParams(query: Request['query']): ActiveUsersQueryParams {
  * Get most active users for the specified time window
  *
  * Query params:
- * - hours: 1-168 (default: 24) - Lookback window in hours
+ * - hours: 1, 4, 12, 24 or 168 (default: 24) - Lookback window in hours (400 otherwise)
  * - limit: 1-100 (default: 100) - Max users to return
  *
  * Response:
