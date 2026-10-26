@@ -3,6 +3,7 @@ import { redisService } from '../core/redis.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { positiveIntEnv } from '../utils/env';
 import { rateLimitKeyForIp } from '../utils/client-ip';
+import { runWithUpstreamCaller } from '../utils/request-context';
 
 // Configuration des limites
 //
@@ -216,12 +217,20 @@ interface IpLimits {
  * Per-IP limiter with its own Redis namespace (so it stacks on top of the
  * general limiter instead of sharing its counters), in-memory fallback when
  * Redis cannot answer.
+ *
+ * `upstreamCaller` marks the routes whose cache keys the caller picks: the
+ * admitted request then runs with its client as the upstream caller, whose
+ * budget of billed HypeDexer calls the client gate spends (see
+ * spendUpstreamBudget). Both paths below admit, so the Redis-down fallback
+ * keeps the budget too.
  */
-function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
+function createIpLimiter(namespace: string, limits: IpLimits, what: string, options: { upstreamCaller?: boolean } = {}) {
   const windows: readonly RateWindow[] = [
     { name: 'burst', seconds: limits.BURST.WINDOW },
     { name: 'minute', seconds: limits.MINUTE.WINDOW },
   ];
+  const admit = (req: Request, res: Response, next: NextFunction): void =>
+    options.upstreamCaller ? runWithUpstreamCaller(req, res, next) : next();
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const ip = req.ip;
     if (!ip) {
@@ -238,7 +247,7 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
       if (minuteCount > limits.MINUTE.MAX_REQUESTS) {
         return sendLimitExceededResponse(res, `Too many ${what} requests per minute`, limits.MINUTE.WINDOW);
       }
-      next();
+      admit(req, res, next);
     } catch (error) {
       logDeduplicator.error('IP rate limiter Redis error, using in-memory fallback', {
         namespace,
@@ -249,7 +258,7 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
       // Fail-secure, same as the general limiter, at this limiter's own burst.
       // Distinct key namespace so the fallbacks don't share a counter.
       if (checkInMemoryFallback(`${namespace}:${key}`, limits.BURST.MAX_REQUESTS)) {
-        next();
+        admit(req, res, next);
       } else {
         sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
       }
@@ -257,7 +266,7 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string) {
   };
 }
 
-export const passthroughRateLimiter = createIpLimiter('pt', PASSTHROUGH_LIMITS, 'indexer');
+export const passthroughRateLimiter = createIpLimiter('pt', PASSTHROUGH_LIMITS, 'indexer', { upstreamCaller: true });
 
 /**
  * Per-address lookups (Elysium address / contract profiles; the paid indexer's
@@ -272,7 +281,8 @@ export const addressLookupRateLimiter = createIpLimiter(
     BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('ADDRESS_LOOKUP_RATE_LIMIT_BURST', 20) },
     MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('ADDRESS_LOOKUP_RATE_LIMIT_MINUTE', 300) },
   },
-  'address lookup'
+  'address lookup',
+  { upstreamCaller: true }
 );
 
 /**
@@ -318,3 +328,91 @@ export const accountRateLimiter = createIpLimiter(
   { BURST: { WINDOW: 1, MAX_REQUESTS: 60 }, MINUTE: { WINDOW: 60, MAX_REQUESTS: 1200 } },
   'account'
 );
+
+// Per-client budget of billed HypeDexer calls (cache misses only: a hit costs
+// nothing upstream and never spends it). The passthrough limiter above counts
+// every request, hits included, so on its own one IP could still make 4,000
+// billed calls a minute with unique cache keys (credits = 2 + ceil(rows/10)
+// each). Sizing, measured: a wallet page makes ~6 per-address misses when it
+// opens and ~5 a minute while it stays open; a cold settled HIP-4 question
+// ~45 in its first second. 600 a minute is ~13 cold HIP-4 questions or ~100
+// cold wallets a minute behind one IP; 15,000 an hour is ~50 wallet pages
+// kept open behind one IP. Only floods and scripts get near them.
+const UPSTREAM_BUDGET = {
+  MINUTE: { WINDOW: 60, MAX_CALLS: positiveIntEnv('HYPEDEXER_MISS_BUDGET_MINUTE', 600) },
+  HOUR: { WINDOW: 3600, MAX_CALLS: positiveIntEnv('HYPEDEXER_MISS_BUDGET_HOUR', 15000) },
+};
+
+const UPSTREAM_BUDGET_WINDOWS: readonly RateWindow[] = [
+  { name: 'minute', seconds: UPSTREAM_BUDGET.MINUTE.WINDOW },
+  { name: 'hour', seconds: UPSTREAM_BUDGET.HOUR.WINDOW },
+];
+
+export type UpstreamBudgetResult = { allowed: true } | { allowed: false; retryAfterS: number };
+
+// Same idea as inMemoryCounters, with the minute and hour windows of the budget.
+const inMemoryBudgets = new Map<string, { minute: { count: number; resetAt: number }; hour: { count: number; resetAt: number } }>();
+
+function spendInMemoryBudget(ipKey: string): UpstreamBudgetResult {
+  const now = Date.now();
+  let entry = inMemoryBudgets.get(ipKey);
+  if (!entry) {
+    // Evict oldest if at capacity
+    if (inMemoryBudgets.size >= FALLBACK_MAX_IPS) {
+      const firstKey = inMemoryBudgets.keys().next().value;
+      if (firstKey) inMemoryBudgets.delete(firstKey);
+    }
+    entry = {
+      minute: { count: 0, resetAt: now + UPSTREAM_BUDGET.MINUTE.WINDOW * 1000 },
+      hour: { count: 0, resetAt: now + UPSTREAM_BUDGET.HOUR.WINDOW * 1000 },
+    };
+    inMemoryBudgets.set(ipKey, entry);
+  }
+  if (now > entry.minute.resetAt) entry.minute = { count: 0, resetAt: now + UPSTREAM_BUDGET.MINUTE.WINDOW * 1000 };
+  if (now > entry.hour.resetAt) entry.hour = { count: 0, resetAt: now + UPSTREAM_BUDGET.HOUR.WINDOW * 1000 };
+  entry.minute.count++;
+  entry.hour.count++;
+
+  let retryAfterS = 0;
+  if (entry.minute.count > UPSTREAM_BUDGET.MINUTE.MAX_CALLS) {
+    retryAfterS = Math.max(retryAfterS, Math.ceil((entry.minute.resetAt - now) / 1000));
+  }
+  if (entry.hour.count > UPSTREAM_BUDGET.HOUR.MAX_CALLS) {
+    retryAfterS = Math.max(retryAfterS, Math.ceil((entry.hour.resetAt - now) / 1000));
+  }
+  return retryAfterS > 0 ? { allowed: false, retryAfterS: Math.max(1, retryAfterS) } : { allowed: true };
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [ipKey, entry] of inMemoryBudgets) {
+    if (now > entry.hour.resetAt) inMemoryBudgets.delete(ipKey);
+  }
+}, 60000).unref();
+
+/**
+ * Spends one billed HypeDexer call of this client's budget (per IP, /64 for
+ * IPv6). Fixed minute and hour windows in Redis, the in-memory fallback with
+ * the same limits when Redis cannot answer. A refused call is counted too, as
+ * in the other limiters; `retryAfterS` is the rollover of the window that
+ * refused it (the longer one when both did).
+ */
+export async function spendUpstreamBudget(ipKey: string): Promise<UpstreamBudgetResult> {
+  try {
+    const [minuteCount, hourCount] = await countRequest(`ratelimit:hdmiss:${ipKey}`, UPSTREAM_BUDGET_WINDOWS);
+    let retryAfterS = 0;
+    if (minuteCount > UPSTREAM_BUDGET.MINUTE.MAX_CALLS) {
+      retryAfterS = Math.max(retryAfterS, secondsUntilRollover(UPSTREAM_BUDGET.MINUTE.WINDOW));
+    }
+    if (hourCount > UPSTREAM_BUDGET.HOUR.MAX_CALLS) {
+      retryAfterS = Math.max(retryAfterS, secondsUntilRollover(UPSTREAM_BUDGET.HOUR.WINDOW));
+    }
+    return retryAfterS > 0 ? { allowed: false, retryAfterS } : { allowed: true };
+  } catch (error) {
+    logDeduplicator.error('Upstream budget Redis error, using in-memory fallback', {
+      error: error instanceof Error ? error.message : String(error),
+      ip: ipKey,
+    });
+    return spendInMemoryBudget(ipKey);
+  }
+}

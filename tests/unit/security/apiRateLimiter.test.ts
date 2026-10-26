@@ -76,6 +76,10 @@ async function hit(limiter: Limiter, ip: string, query: Record<string, unknown> 
     json() {
       return this;
     },
+    // Admitted passthrough requests listen for the end of the response.
+    once() {
+      return this;
+    },
   } as unknown as Response;
   await limiter({ ip, path: '/x', query } as Request, res, () => undefined);
   return status;

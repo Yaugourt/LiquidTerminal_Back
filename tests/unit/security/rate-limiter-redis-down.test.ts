@@ -16,7 +16,7 @@ import { addressLookupRateLimiter, marketRateLimiter } from '../../../src/middle
 function run(limiter: (req: Request, res: Response, next: NextFunction) => Promise<void>, ip: string, n: number) {
   let passed = 0;
   let limited = 0;
-  const res = { setHeader: () => undefined, status: () => ({ json: () => { limited++; } }) } as unknown as Response;
+  const res = { setHeader: () => undefined, once: () => undefined, status: () => ({ json: () => { limited++; } }) } as unknown as Response;
   return (async () => {
     for (let i = 0; i < n; i++) await limiter({ ip, path: '/x' } as Request, res, () => { passed++; });
     return { passed, limited };

@@ -2,6 +2,7 @@ import { redisService } from './redis.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { CACHE_TTL } from '../constants/cache.constants';
 import { positiveIntEnv } from '../utils/env';
+import { isCallerRefusal } from '../errors/upstreamBudget.errors';
 
 /** What a recomputation produced, and the JSON it stored when it could. */
 interface Recomputed<T> {
@@ -132,15 +133,6 @@ class FetchFailure extends Error {
     super(original instanceof Error ? original.message : String(original));
     this.name = 'FetchFailure';
   }
-}
-
-/**
- * An error that refuses one caller (its own budget is spent) rather than
- * reporting that the upstream is failing. Errors carry `callerRefusal = true`
- * (UpstreamBudgetExceededError, HyperfolioThrottledError).
- */
-function isCallerRefusal(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { callerRefusal?: unknown }).callerRefusal === true;
 }
 
 async function runFetch<T>(fetchFn: () => Promise<T>): Promise<T> {
