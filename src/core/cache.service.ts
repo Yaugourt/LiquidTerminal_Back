@@ -134,6 +134,15 @@ class FetchFailure extends Error {
   }
 }
 
+/**
+ * An error that refuses one caller (its own budget is spent) rather than
+ * reporting that the upstream is failing. Errors carry `callerRefusal = true`
+ * (UpstreamBudgetExceededError, HyperfolioThrottledError).
+ */
+function isCallerRefusal(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { callerRefusal?: unknown }).callerRefusal === true;
+}
+
 async function runFetch<T>(fetchFn: () => Promise<T>): Promise<T> {
   try {
     return await fetchFn();
@@ -365,12 +374,19 @@ export class CacheService {
     await redisService.set(failMarkerKey(key), '1', seconds);
   }
 
-  /** fetchFn, remembering a failure (FetchFailure) for the backoff. */
+  /**
+   * fetchFn, remembering a failure (FetchFailure) for the backoff. Not a
+   * caller's own refusal: the upstream is fine, and a marker would have every
+   * other visitor of the key served the last copy (or the error) for the
+   * backoff because one client spent its budget.
+   */
   private async fetchOrMarkFailed<T>(key: string, fetchFn: () => Promise<T>, ttl: CacheTtl<T>): Promise<T> {
     try {
       return await runFetch(fetchFn);
     } catch (error) {
-      await this.markFailed(key, ttl);
+      if (!(error instanceof FetchFailure && isCallerRefusal(error.original))) {
+        await this.markFailed(key, ttl);
+      }
       throw error;
     }
   }

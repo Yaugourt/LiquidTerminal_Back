@@ -37,8 +37,12 @@ export class HyperfolioRateLimitedError extends HyperfolioError {
  * cache-missing lookups. Same 429 + code as an upstream throttle so the
  * frontend treats both alike, but a distinct class so it does NOT open the
  * shared cooldown (one noisy client must not lock everyone else out).
+ * `callerRefusal` tells the cache the same thing: this is not a failure of
+ * the key, so it must not leave a failure marker the other visitors would hit.
  */
 export class HyperfolioThrottledError extends HyperfolioError {
+  readonly callerRefusal = true;
+
   constructor(message = 'Too many Hyperfolio lookups, retry shortly') {
     super(message, 429, 'HYPERFOLIO_RATE_LIMITED');
   }
