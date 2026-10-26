@@ -55,6 +55,11 @@ COPY --from=builder --chown=node:node /app/dist ./dist
 COPY --from=builder --chown=node:node /app/package.json ./
 COPY --from=builder --chown=node:node /app/scripts ./scripts/
 
+# Without this the process runs as "development": pino-pretty on stdout, Express
+# error pages with stack traces, no mandatory R2 credentials. Set here and not
+# in the builder stage, which needs devDependencies for tsc.
+ENV NODE_ENV=production
+
 USER node
 
 EXPOSE 3002
