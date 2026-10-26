@@ -1,3 +1,5 @@
+import { isCallerRefusal } from '../errors/upstreamBudget.errors';
+
 interface CircuitBreakerState {
   failures: number;
   lastFailureTime: number;
@@ -51,6 +53,10 @@ export class CircuitBreakerService {
       this.handleSuccess();
       return result;
     } catch (error) {
+      // A refusal of one caller (its own budget or throttle is spent) says
+      // nothing about the upstream: counting it would let one flooding client
+      // open the breaker, and with it the whole domain, for everyone.
+      if (isCallerRefusal(error)) throw error;
       this.handleFailure();
       throw error;
     }
