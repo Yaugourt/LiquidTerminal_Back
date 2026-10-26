@@ -10,9 +10,12 @@ import request from 'supertest';
 
 const marketLimiter = jest.fn((_req: Request, _res: Response, next: NextFunction) => next());
 const passthroughLimiter = jest.fn((_req: Request, _res: Response, next: NextFunction) => next());
+const addressQueryLimiter = jest.fn((_req: Request, _res: Response, next: NextFunction) => next());
 jest.mock('../../../src/middleware/apiRateLimiter', () => ({
   marketRateLimiter: (req: Request, res: Response, next: NextFunction) => marketLimiter(req, res, next),
   passthroughRateLimiter: (req: Request, res: Response, next: NextFunction) => passthroughLimiter(req, res, next),
+  indexerAddressQueryRateLimiter: (req: Request, res: Response, next: NextFunction) =>
+    addressQueryLimiter(req, res, next),
 }));
 
 jest.mock('../../../src/utils/logDeduplicator', () => ({
@@ -73,6 +76,7 @@ describe('/liquidations routes that reach HypeDexer', () => {
     service.getAnalyticsStats.mockResolvedValue({ success: true });
     marketLimiter.mockClear();
     passthroughLimiter.mockClear();
+    addressQueryLimiter.mockClear();
   });
 
   it.each(['/liquidations', '/liquidations/recent', '/liquidations/analytics/stats'])(
@@ -82,6 +86,18 @@ describe('/liquidations routes that reach HypeDexer', () => {
       expect(passthroughLimiter).toHaveBeenCalledTimes(1);
     }
   );
+
+  // The limiter itself counts only requests that name a wallet (user=), see
+  // indexerAddressQueryRateLimiter; here: the two routes that take one have it.
+  it.each(['/liquidations', '/liquidations/recent'])('%s is behind the per-address limiter', async (path) => {
+    await request(buildApp()).get(path).query({ user: '0x' + 'a'.repeat(40) });
+    expect(addressQueryLimiter).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the analytics route off the per-address limiter', async () => {
+    await request(buildApp()).get('/liquidations/analytics/stats');
+    expect(addressQueryLimiter).not.toHaveBeenCalled();
+  });
 
   it('leaves the DB-backed routes on the market limiter only', async () => {
     service.getAllData.mockResolvedValue({ success: true });

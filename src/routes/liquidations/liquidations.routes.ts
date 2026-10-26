@@ -9,7 +9,7 @@ import { HistoricalStatsService, HistoricalStatsPeriod } from '../../services/li
 import { HistoricalChartService } from '../../services/liquidations/liquidations.historical-chart.service';
 import { HistoricalChartPeriod } from '../../types/historical.types';
 import { LiquidationQueryParams, LiquidationsError, ChartPeriod, TopLiquidationsPeriod } from '../../types/liquidations.types';
-import { marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
+import { marketRateLimiter, passthroughRateLimiter, indexerAddressQueryRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation/validation.middleware';
 import { liquidationsQuerySchema, recentLiquidationsQuerySchema, analyticsStatsQuerySchema } from '../../schemas/liquidations.schema';
 import { sseStreamQuerySchema } from '../../schemas/sse.schema';
@@ -109,6 +109,8 @@ router.get('/',
   marketRateLimiter,
   // Reaches HypeDexer (billed per call).
   passthroughRateLimiter,
+  // With user=, a wallet's own liquidations: any address is a fresh billed key.
+  indexerAddressQueryRateLimiter,
   validateRequest(liquidationsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
@@ -342,6 +344,8 @@ router.get('/recent',
   marketRateLimiter,
   // Reaches HypeDexer (billed per call).
   passthroughRateLimiter,
+  // With user=, a wallet's own liquidations: any address is a fresh billed key.
+  indexerAddressQueryRateLimiter,
   validateRequest(recentLiquidationsQuerySchema),
   (async (req: Request, res: Response) => {
     try {
