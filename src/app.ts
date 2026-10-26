@@ -286,6 +286,8 @@ server.on('error', (error) => {
 
 server.listen(PORT, () => {
   void logDeduplicator.info(`Server is running on port ${PORT}`);
+  // Lets a deploy be checked from the logs: the pinned Node version and the mode the image really runs in.
+  void logDeduplicator.info(`Runtime: node ${process.version}, NODE_ENV=${process.env.NODE_ENV ?? 'unset'}`);
   void logDeduplicator.info(`WebSocket available at ws://localhost:${PORT}/ws`);
   void bootstrapApplication();
 });

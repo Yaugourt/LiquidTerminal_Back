@@ -4,6 +4,7 @@ import { WalletListService } from "../../services/walletlist/walletlist.service"
 import { WalletListItemService } from "../../services/walletlist/walletlist-item.service";
 import { marketRateLimiter } from "../../middleware/apiRateLimiter";
 import { validatePrivyToken } from "../../middleware/authMiddleware";
+import { requireAdmin } from "../../middleware/roleMiddleware";
 import { 
   WalletAlreadyExistsError, 
   UserNotFoundError,
@@ -306,8 +307,9 @@ router.get("/my-wallets", validatePrivyToken, (async (req: Request, res: Respons
   }
 }) as RequestHandler);
 
-// Lister tous les wallets (avec filtres)
-router.get("/", validateWalletQuery, (async (req: Request, res: Response) => {
+// Lister tous les wallets (avec filtres): admins only. It pages through every
+// address any user tracks, the list GET /wallet/:id no longer gives out.
+router.get("/", validatePrivyToken, requireAdmin, validateWalletQuery, (async (req: Request, res: Response) => {
   try {
     const wallets = await walletService.getAll(req.query);
     res.json({
@@ -334,15 +336,26 @@ router.get("/", validateWalletQuery, (async (req: Request, res: Response) => {
   }
 }) as RequestHandler);
 
-// Récupérer un wallet par ID
-router.get("/:id", (async (req: Request, res: Response) => {
+// Récupérer un wallet par ID: only for a user who tracks it. The ids are
+// sequential, so a public read would list every address users track.
+router.get("/:id", validatePrivyToken, (async (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
       return res.status(400).json({ success: false, error: 'Invalid ID format', code: 'INVALID_ID_FORMAT' });
     }
 
-    const wallet = await walletService.getById(id);
+    const privyUserId = req.user?.sub;
+    if (!privyUserId) {
+      return res.status(401).json({ success: false, error: 'User not authenticated', code: 'UNAUTHENTICATED' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { privyUserId } });
+    if (!user) {
+      return res.status(401).json({ success: false, error: 'User not found', code: 'USER_NOT_FOUND' });
+    }
+
+    const wallet = await walletService.getTrackedWallet(user.id, id);
     res.json({
       success: true,
       data: wallet

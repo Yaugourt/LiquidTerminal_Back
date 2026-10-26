@@ -23,6 +23,7 @@ import {
 } from '../../schemas/wallet.schema';
 import { CACHE_PREFIX } from '../../constants/cache.constants';
 import { transactionService } from '../../core/transaction.service';
+import { prisma } from '../../core/prisma.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 
 export class WalletService extends BaseService<WalletResponse, WalletCreateInput, WalletUpdateInput, WalletQueryParams> {
@@ -57,6 +58,24 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
   protected async checkCanDelete(id: number): Promise<void> {
     // Vérifier si le wallet a des transactions
     // Cette méthode sera implémentée plus tard
+  }
+
+  /**
+   * A wallet row, only for a user who tracks it. Reads the user-wallet link from
+   * the database each time: getById() caches the Wallet under a key shared by
+   * every user, so it cannot tell whose wallet it is. An unknown id and a wallet
+   * someone else tracks answer the same error, so the id's existence is not revealed.
+   * @throws WalletNotFoundError
+   */
+  public async getTrackedWallet(userId: number, walletId: number) {
+    const userWallet = await prisma.userWallet.findUnique({
+      where: { userId_walletId: { userId, walletId } },
+      include: { Wallet: true }
+    });
+    if (!userWallet) {
+      throw new WalletNotFoundError();
+    }
+    return userWallet.Wallet;
   }
 
   /**
