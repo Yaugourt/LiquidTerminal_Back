@@ -4,6 +4,7 @@ import { WalletListService } from "../../services/walletlist/walletlist.service"
 import { WalletListItemService } from "../../services/walletlist/walletlist-item.service";
 import { marketRateLimiter } from "../../middleware/apiRateLimiter";
 import { validatePrivyToken } from "../../middleware/authMiddleware";
+import { requireAdmin } from "../../middleware/roleMiddleware";
 import { 
   WalletAlreadyExistsError, 
   UserNotFoundError,
@@ -306,8 +307,9 @@ router.get("/my-wallets", validatePrivyToken, (async (req: Request, res: Respons
   }
 }) as RequestHandler);
 
-// Lister tous les wallets (avec filtres)
-router.get("/", validateWalletQuery, (async (req: Request, res: Response) => {
+// Lister tous les wallets (avec filtres): admins only. It pages through every
+// address any user tracks, the list GET /wallet/:id no longer gives out.
+router.get("/", validatePrivyToken, requireAdmin, validateWalletQuery, (async (req: Request, res: Response) => {
   try {
     const wallets = await walletService.getAll(req.query);
     res.json({
