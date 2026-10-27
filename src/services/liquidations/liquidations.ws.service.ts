@@ -279,7 +279,14 @@ export class LiquidationsWebSocketService {
 
     this.aggregationTimer = setTimeout(() => {
       this.aggregationTimer = null;
-      this.flushAggregation();
+      // A bare timer: anything thrown here is an uncaughtException and restarts the back.
+      try {
+        this.flushAggregation();
+      } catch (error) {
+        logDeduplicator.error('LiquidationsWebSocketService: Aggregation flush error', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }, LiquidationsWebSocketService.AGGREGATION_WINDOW_MS);
   }
 
@@ -293,13 +300,21 @@ export class LiquidationsWebSocketService {
 
     const result: AggregatedLiquidation[] = [];
 
-    for (const [, liquidations] of this.pendingAggregation) {
-      // Always aggregate (even single liquidations get metadata)
-      const aggregated = this.createAggregatedLiquidation(liquidations);
-      result.push(aggregated);
+    for (const [key, liquidations] of this.pendingAggregation) {
+      // Always aggregate (even single liquidations get metadata). A malformed row
+      // (e.g. no `liquidators` list) skips its own group, not the others.
+      try {
+        result.push(this.createAggregatedLiquidation(liquidations));
+      } catch (error) {
+        logDeduplicator.error('LiquidationsWebSocketService: Malformed liquidation skipped', {
+          key,
+          tids: liquidations.map((l) => l.tid),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 
-    // Clear buffer
+    // Clear buffer (also when a group was skipped, or it would throw again on every flush)
     this.pendingAggregation.clear();
 
     if (result.length === 0) {
