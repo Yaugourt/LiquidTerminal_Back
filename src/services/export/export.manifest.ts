@@ -478,6 +478,9 @@ export const EXPORT_DATASETS: ExportDataset[] = [
   },
   {
     id: 'unstaking-queue',
+    // UnstakingService clamps a page at 200 rows (its MAX_LIMIT). Asked for the
+    // default 500, it answered 200, and the loop read that as the last page.
+    pageSize: 200,
     label: 'Unstaking queue',
     group: 'Capital',
     source: 'local',
