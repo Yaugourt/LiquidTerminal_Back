@@ -4,6 +4,13 @@ import { logDeduplicator } from '../utils/logDeduplicator';
 import { scopedClient } from '../utils/tx-scope';
 import { UserRepository } from './interfaces/user.repository.interface';
 
+/** A unique-constraint failure on User.name (Prisma gives the column list, or the index name). */
+function isNameConflict(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false;
+  const target = error.meta?.target;
+  return Array.isArray(target) ? target.includes('name') : typeof target === 'string' && target.includes('name');
+}
+
 export class UserRepositoryImpl implements UserRepository {
   /**
    * The transaction this repository is bound to in the current async context
@@ -69,17 +76,52 @@ export class UserRepositoryImpl implements UserRepository {
     role?: UserRole;
     verified?: boolean;
   }): Promise<User> {
+    try {
+      return await this.upsertUser(privyUserId, data, data.name);
+    } catch (error) {
+      if (!isNameConflict(error)) throw error;
+    }
+
+    // The handle is another account's name (User.name is unique): the login must
+    // still succeed. A known user keeps the name it has; a new one gets a free variant.
+    const existing = await this.findByPrivyUserId(privyUserId);
+    if (existing) {
+      return this.prismaClient.user.update({
+        where: { privyUserId },
+        data: { email: data.email, role: data.role, verified: data.verified }
+      });
+    }
+
+    const tail = privyUserId.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    let lastError: unknown;
+    for (const length of [6, 10, 14]) {
+      const suffix = `-${tail.slice(-length)}`;
+      try {
+        return await this.upsertUser(privyUserId, data, data.name.slice(0, 255 - suffix.length) + suffix);
+      } catch (error) {
+        if (!isNameConflict(error)) throw error;
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  private upsertUser(privyUserId: string, data: {
+    email?: string;
+    role?: UserRole;
+    verified?: boolean;
+  }, name: string): Promise<User> {
     return this.prismaClient.user.upsert({
       where: { privyUserId },
       update: {
-        name: data.name,
+        name,
         email: data.email,
         role: data.role,
         verified: data.verified
       },
       create: {
         privyUserId,
-        name: data.name,
+        name,
         email: data.email,
         role: data.role,
         verified: data.verified
