@@ -420,13 +420,21 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           });
           const existingListItemIds = new Set(existingListItems.map((li: any) => li.userWalletId));
 
+          // Les nouveaux items continuent après l'ordre max actuel de la liste
+          const lastItem = await tx.walletListItem.findFirst({
+            where: { walletListId },
+            orderBy: { order: 'desc' },
+            select: { order: true }
+          });
+          const firstOrder = lastItem?.order != null ? lastItem.order + 1 : 0;
+
           // Préparer les données WalletListItem (seulement les nouveaux)
           const walletListItemData = allUserWallets
             .filter((uw: any) => !existingListItemIds.has(uw.id))
             .map((uw: any, index: number) => ({
               walletListId,
               userWalletId: uw.id,
-              order: index
+              order: firstOrder + index
             }));
 
           if (walletListItemData.length > 0) {
