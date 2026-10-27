@@ -17,7 +17,8 @@ import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
 import {
   readListCreateSchema,
   readListUpdateSchema,
-  readListQuerySchema
+  readListQuerySchema,
+  READ_LIST_NAME_MAX
 } from '../../schemas/readlist.schema';
 import { readListRepository } from '../../repositories';
 import { BaseService } from '../../core/crudBase.service';
@@ -25,6 +26,9 @@ import { prisma } from '../../core/prisma.service';
 import { cacheService } from '../../core/cache.service';
 import { CACHE_TTL } from '../../constants/cache.constants';
 import { xpService } from '../xp/xp.service';
+
+// Copying the same list again names it "(Copy 2)", "(Copy 3)"...: how many names are tried before giving up
+const MAX_COPY_NAME_TRIES = 50;
 
 // Type pour les paramètres de requête
 type ReadListQueryParams = {
@@ -288,6 +292,26 @@ export class ReadListService extends BaseService<
   }
 
   /**
+   * First of "<name> (Copy)", "<name> (Copy 2)", "<name> (Copy 3)"... that the user does not
+   * already have (names are unique per user), so copying a list twice does not answer 409.
+   * The base name is trimmed to keep the result within the name length limit. When
+   * MAX_COPY_NAME_TRIES names are taken, returns the first one: create then answers
+   * alreadyExists as it always did.
+   */
+  private async firstFreeCopyName(name: string, userId: number): Promise<string> {
+    let first = '';
+    for (let n = 1; n <= MAX_COPY_NAME_TRIES; n++) {
+      const suffix = n === 1 ? ' (Copy)' : ` (Copy ${n})`;
+      const candidate = `${name.slice(0, READ_LIST_NAME_MAX - suffix.length)}${suffix}`;
+      if (n === 1) first = candidate;
+      if (!await this.repository.existsByNameAndUser(candidate, userId)) {
+        return candidate;
+      }
+    }
+    return first;
+  }
+
+  /**
    * Copie une read list publique dans les read lists de l'utilisateur
    * @param readListId ID de la read list à copier
    * @param userId ID de l'utilisateur qui copie
@@ -314,7 +338,7 @@ export class ReadListService extends BaseService<
       }
 
       // 4. Créer une nouvelle read list avec un nom unique
-      const newName = `${originalReadList.name} (Copy)`;
+      const newName = await this.firstFreeCopyName(originalReadList.name, userId);
       const newDescription = originalReadList.description ?
         `${originalReadList.description}\n\nCopied from: ${originalReadList.creator.name}` :
         `Copied from: ${originalReadList.creator.name}`;
