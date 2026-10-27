@@ -7,33 +7,7 @@ import { logDeduplicator } from '../utils/logDeduplicator';
  * Permet d'exécuter des opérations dans un contexte transactionnel
  */
 export class TransactionService {
-  private prismaClient: PrismaClient = prisma;
-  private isTransactionInProgress: boolean = false;
-
-  /**
-   * Configure le client Prisma à utiliser pour les transactions
-   * @param prismaClient Client Prisma à utiliser
-   */
-  setPrismaClient(prismaClient: PrismaClient): void {
-    this.prismaClient = prismaClient;
-    logDeduplicator.info('Transaction service: Prisma client updated');
-  }
-
-  /**
-   * Réinitialise le client Prisma à sa valeur par défaut
-   */
-  resetPrismaClient(): void {
-    this.prismaClient = prisma;
-    logDeduplicator.info('Transaction service: Prisma client reset to default');
-  }
-
-  /**
-   * Vérifie si une transaction est en cours
-   * @returns true si une transaction est en cours, false sinon
-   */
-  isTransactionActive(): boolean {
-    return this.isTransactionInProgress;
-  }
+  private readonly prismaClient: PrismaClient = prisma;
 
   /**
    * Exécute une opération dans un contexte transactionnel
@@ -43,12 +17,7 @@ export class TransactionService {
   async execute<T>(
     operation: (tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>) => Promise<T>
   ): Promise<T> {
-    if (this.isTransactionInProgress) {
-      logDeduplicator.warn('Transaction already in progress, this might lead to unexpected behavior');
-    }
-
     try {
-      this.isTransactionInProgress = true;
       logDeduplicator.info('Starting transaction', { timestamp: new Date().toISOString() });
       
       const result = await this.prismaClient.$transaction(operation, {
@@ -68,8 +37,6 @@ export class TransactionService {
         timestamp: new Date().toISOString()
       });
       throw error;
-    } finally {
-      this.isTransactionInProgress = false;
     }
   }
 }
