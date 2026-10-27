@@ -70,16 +70,25 @@ export class XpRepository {
     }
 
     /**
-     * Met à jour l'XP et le niveau d'un utilisateur
+     * Ajoute de l'XP au total d'un utilisateur de façon atomique (increment SQL) et
+     * renvoie le total stocké après l'écriture. Ne jamais écrire un total absolu lu
+     * plus tôt : deux grants concurrents s'écraseraient.
      */
-    async updateUserXp(
-        userId: number,
-        totalXp: number,
-        level: number
-    ): Promise<User> {
+    async incrementUserXp(userId: number, xpAmount: number): Promise<Pick<User, 'totalXp' | 'level'>> {
         return this.prismaClient.user.update({
             where: { id: userId },
-            data: { totalXp, level },
+            data: { totalXp: { increment: xpAmount } },
+            select: { totalXp: true, level: true },
+        });
+    }
+
+    /**
+     * Fixe le niveau d'un utilisateur (idempotent : calculé depuis le total stocké)
+     */
+    async setUserLevel(userId: number, level: number): Promise<void> {
+        await this.prismaClient.user.update({
+            where: { id: userId },
+            data: { level },
         });
     }
 
@@ -259,6 +268,20 @@ export class XpRepository {
     }
 
     /**
+     * Rend un slot du cap journalier pris par `tryIncrementDailyActionCount` quand
+     * l'XP n'a finalement pas été attribuée (doublon, erreur) : seul l'XP réellement
+     * accordé doit consommer le cap.
+     */
+    async releaseDailyActionCount(userId: number, actionType: XpActionType, date: Date): Promise<void> {
+        const dateOnly = new Date(date.toISOString().split('T')[0]);
+
+        await this.prismaClient.dailyActionCount.updateMany({
+            where: { userId, actionType, date: dateOnly, count: { gt: 0 } },
+            data: { count: { decrement: 1 } },
+        });
+    }
+
+    /**
      * Récupère tous les compteurs du jour pour un utilisateur
      */
     async getAllDailyActionCounts(userId: number, date: Date): Promise<DailyActionCount[]> {
@@ -389,23 +412,28 @@ export class XpRepository {
             'ADD_15_WALLETS',
         ];
 
-        const challenges = await Promise.all(
-            challengeTypes.map((challengeType) =>
-                this.prismaClient.weeklyChallenge.create({
-                    data: {
-                        userId,
-                        challengeType,
-                        weekStart,
-                        target: WEEKLY_CHALLENGES_CONFIG[challengeType].target,
-                        xpReward: WEEKLY_CHALLENGES_CONFIG[challengeType].xp,
-                        progress: 0,
-                        completed: false,
-                    },
-                })
-            )
-        );
+        // createMany + skipDuplicates : deux premiers appels de la semaine en
+        // parallèle (GET /xp/weekly-challenges + un grant) ne se heurtent plus sur
+        // @@unique([userId, challengeType, weekStart]).
+        await this.prismaClient.weeklyChallenge.createMany({
+            data: challengeTypes.map((challengeType) => ({
+                userId,
+                challengeType,
+                weekStart,
+                target: WEEKLY_CHALLENGES_CONFIG[challengeType].target,
+                xpReward: WEEKLY_CHALLENGES_CONFIG[challengeType].xp,
+                progress: 0,
+                completed: false,
+            })),
+            skipDuplicates: true,
+        });
 
-        return challenges;
+        return this.prismaClient.weeklyChallenge.findMany({
+            where: {
+                userId,
+                weekStart,
+            },
+        });
     }
 
     /**
@@ -433,17 +461,26 @@ export class XpRepository {
             return challenge;
         }
 
-        const newProgress = Math.min(challenge.progress + increment, challenge.target);
-        const isCompleted = newProgress >= challenge.target;
-
-        return this.prismaClient.weeklyChallenge.update({
+        // Incrément SQL : deux appels concurrents ne s'écrasent pas.
+        const bumped = await this.prismaClient.weeklyChallenge.update({
             where: { id: challenge.id },
-            data: {
-                progress: newProgress,
-                completed: isCompleted,
-                completedAt: isCompleted ? new Date() : null,
-            },
+            data: { progress: { increment } },
         });
+        if (bumped.progress < bumped.target) {
+            return bumped;
+        }
+
+        // Cible atteinte : on ne bascule `completed` qu'une fois (updateMany
+        // conditionnel) et on ramène la progression à la cible.
+        await this.prismaClient.weeklyChallenge.updateMany({
+            where: { id: challenge.id, completed: false },
+            data: { completed: true, completedAt: new Date() },
+        });
+        await this.prismaClient.weeklyChallenge.updateMany({
+            where: { id: challenge.id, progress: { gt: bumped.target } },
+            data: { progress: bumped.target },
+        });
+        return this.prismaClient.weeklyChallenge.findUnique({ where: { id: challenge.id } });
     }
 
     /**

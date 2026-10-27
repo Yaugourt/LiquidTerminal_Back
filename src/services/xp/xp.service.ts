@@ -22,6 +22,12 @@ import {
   XpTransactionHistoryResponse,
 } from '../../types/xp.types';
 
+/** A page/limit that is a positive integer, else the default: a negative `take` would read from the end of the ranking and a negative `skip` throws. */
+function positiveInt(value: number | undefined, fallback: number): number {
+  const n = Math.floor(Number(value));
+  return Number.isSafeInteger(n) && n >= 1 ? n : fallback;
+}
+
 export class XpService {
   private static instance: XpService;
 
@@ -52,24 +58,16 @@ export class XpService {
         }
       }
 
-      // Cap journalier atomique : la méthode incrémente le compteur dans une
-      // transaction Prisma et lève `XpDailyCapExceededError` (qui force le
-      // rollback) si la nouvelle valeur dépasse le cap. Élimine la fenêtre de
-      // race entre check et increment qui permettait le double-grant.
-      const dailyCap = DAILY_CAPS[actionType];
-      if (dailyCap !== undefined) {
-        try {
-          await xpRepository.tryIncrementDailyActionCount(userId, actionType, new Date(), dailyCap);
-        } catch (err) {
-          if (err instanceof XpDailyCapExceededError) {
-            logDeduplicator.info('Daily cap reached for action', { userId, actionType, cap: dailyCap });
-            return 0;
-          }
-          throw err;
-        }
+      // Une action déjà enregistrée (même referenceId) ne doit pas consommer de
+      // slot du cap : la lecture évite l'écriture, la compensation plus bas
+      // couvre le cas concurrent.
+      if (referenceId && (await xpRepository.transactionExists(userId, actionType, referenceId))) {
+        logDeduplicator.info('XP action already granted (reference exists)', { userId, actionType, referenceId });
+        return 0;
       }
 
-      // Vérifier le cap hebdomadaire
+      // Vérifier le cap hebdomadaire (lecture seule : avant le slot journalier,
+      // pour qu'un refus ne le consomme pas)
       const weeklyCap = WEEKLY_CAPS[actionType];
       if (weeklyCap !== undefined) {
         // Logique simplifiée pour l'instant: on compte les transactions des 7 derniers jours
@@ -82,6 +80,26 @@ export class XpService {
         if (weeklyCount >= weeklyCap) {
           logDeduplicator.info('Weekly cap reached for action', { userId, actionType, cap: weeklyCap, weeklyCount });
           return 0;
+        }
+      }
+
+      // Cap journalier atomique : la méthode incrémente le compteur dans une
+      // transaction Prisma et lève `XpDailyCapExceededError` (qui force le
+      // rollback) si la nouvelle valeur dépasse le cap. Élimine la fenêtre de
+      // race entre check et increment qui permettait le double-grant.
+      const dailyCap = DAILY_CAPS[actionType];
+      let dailySlotDate: Date | undefined;
+      if (dailyCap !== undefined) {
+        const slotDate = new Date();
+        try {
+          await xpRepository.tryIncrementDailyActionCount(userId, actionType, slotDate, dailyCap);
+          dailySlotDate = slotDate;
+        } catch (err) {
+          if (err instanceof XpDailyCapExceededError) {
+            logDeduplicator.info('Daily cap reached for action', { userId, actionType, cap: dailyCap });
+            return 0;
+          }
+          throw err;
         }
       }
 
@@ -101,6 +119,16 @@ export class XpService {
           description,
         });
       } catch (err) {
+        // Rien n'a été accordé : le slot journalier pris plus haut est rendu.
+        if (dailySlotDate) {
+          await xpRepository.releaseDailyActionCount(userId, actionType, dailySlotDate).catch((releaseErr) => {
+            logDeduplicator.warn('Failed to release daily cap slot', {
+              userId,
+              actionType,
+              error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+            });
+          });
+        }
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
           logDeduplicator.info('XP action already granted (P2002 dedup)', {
             userId,
@@ -112,25 +140,33 @@ export class XpService {
         throw err;
       }
 
-      // Mettre à jour le total XP et le niveau de l'utilisateur
-      const user = await userRepository.findById(userId);
-      if (!user) {
-        throw new XpUserNotFoundError(`User ${userId} not found while granting XP`);
+      // Ajouter l'XP au total (increment atomique) puis recalculer le niveau depuis
+      // le total réellement stocké : un total lu plus tôt ferait perdre l'XP d'un
+      // grant concurrent.
+      let stored: { totalXp: number; level: number };
+      try {
+        stored = await xpRepository.incrementUserXp(userId, xpAmount);
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+          throw new XpUserNotFoundError(`User ${userId} not found while granting XP`);
+        }
+        throw err;
       }
 
-      const newTotalXp = user.totalXp + xpAmount;
+      const newTotalXp = stored.totalXp;
       const newLevel = calculateLevel(newTotalXp);
-
-      await xpRepository.updateUserXp(userId, newTotalXp, newLevel);
+      if (newLevel !== stored.level) {
+        await xpRepository.setUserLevel(userId, newLevel);
+      }
 
       // Mettre à jour les weekly challenges
       await this.updateWeeklyChallengeProgress(userId, actionType);
 
       // Log level up
-      if (newLevel > user.level) {
+      if (newLevel > stored.level) {
         logDeduplicator.info('User leveled up!', {
           userId,
-          oldLevel: user.level,
+          oldLevel: stored.level,
           newLevel,
           totalXp: newTotalXp
         });
@@ -333,8 +369,8 @@ export class XpService {
     userId: number,
     options: { page?: number; limit?: number; actionType?: XpActionType }
   ): Promise<XpTransactionHistoryResponse> {
-    const page = options.page || 1;
-    const limit = Math.min(options.limit || 20, 100);
+    const page = positiveInt(options.page, 1);
+    const limit = Math.min(positiveInt(options.limit, 20), 100);
     const skip = (page - 1) * limit;
 
     try {
@@ -373,8 +409,8 @@ export class XpService {
     limit?: number;
     userId?: number; // Pour récupérer le rang de l'utilisateur actuel
   }): Promise<XpLeaderboardResponse> {
-    const page = options.page || 1;
-    const limit = Math.min(options.limit || 20, 100);
+    const page = positiveInt(options.page, 1);
+    const limit = Math.min(positiveInt(options.limit, 20), 100);
     const skip = (page - 1) * limit;
 
     try {
