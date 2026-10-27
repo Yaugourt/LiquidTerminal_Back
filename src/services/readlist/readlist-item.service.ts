@@ -102,31 +102,32 @@ export class ReadListItemService extends BaseService<
       throw new ReadListItemValidationError('readListId is required');
     }
 
-    // Cross-DB pre-validation: EducationalResource lives in Content DB and cannot
-    // participate in the Core $transaction below. Read it first; a tiny race
-    // window exists where the resource could be deleted between this check and
-    // the insert, but the worst case is an orphan ReadListItem (which the
-    // application tolerates since reads do an attachCreator-style fan-out).
+    // Cross-DB pre-validation: EducationalResource lives in Content DB, so it is
+    // read first. A tiny race window exists where the resource could be deleted
+    // between this check and the insert, but the worst case is an orphan
+    // ReadListItem (which the application tolerates since reads do an
+    // attachCreator-style fan-out).
     const resource = await educationalResourceRepository.findById(data.resourceId);
     if (!resource) {
       throw new ReadListResourceNotFoundError();
     }
 
-    const item = await transactionService.execute((tx) => runWithTx(tx, [this.repository, readListRepository], async () => {
-      const readList = await readListRepository.findById(data.readListId!);
-      if (!readList) {
-        throw new ReadListNotFoundError();
-      }
+    // Plain reads, no outer transaction: they write nothing, and this.create opens
+    // and commits its own. An outer one would hold a second pool connection while
+    // the inner one runs, and could fail its commit after the insert already happened.
+    const readList = await readListRepository.findById(data.readListId);
+    if (!readList) {
+      throw new ReadListNotFoundError();
+    }
 
-      // Adding an item mutates the list — owner only, not "anyone who can see it".
-      if (!await readListRepository.isOwner(data.readListId!, userId)) {
-        throw new ReadListPermissionError();
-      }
+    // Adding an item mutates the list — owner only, not "anyone who can see it".
+    if (!await readListRepository.isOwner(data.readListId, userId)) {
+      throw new ReadListPermissionError();
+    }
 
-      return this.create(data);
-    }));
-    // After the commit: a flush inside the transaction lets a concurrent read refill the cache with the old state
-    await this.invalidateListSummaryCaches(data.readListId!, userId);
+    const item = await this.create(data);
+    // After create's own commit, so a concurrent read cannot refill the cache with the old state
+    await this.invalidateListSummaryCaches(data.readListId, userId);
     return item;
   }
 
@@ -277,22 +278,23 @@ export class ReadListItemService extends BaseService<
    */
   async deleteWithPermission(itemId: number, userId: number): Promise<void> {
     try {
-      const readListId = await transactionService.execute((tx) => runWithTx(tx, [this.repository, readListRepository], async () => {
-        // Vérifier que l'item existe
-        const item = await this.repository.findById(itemId);
-        if (!item) {
-          throw new ReadListItemNotFoundError();
-        }
+      // Plain reads, no outer transaction: they write nothing, and this.delete opens
+      // and commits its own. An outer one would hold a second pool connection while
+      // the inner one runs, and could fail its commit after the delete already happened.
+      // Vérifier que l'item existe
+      const item = await this.repository.findById(itemId);
+      if (!item) {
+        throw new ReadListItemNotFoundError();
+      }
 
-        // Mutation on the item's list — owner only.
-        if (!await readListRepository.isOwner(item.readListId, userId)) {
-          throw new ReadListPermissionError();
-        }
+      // Mutation on the item's list — owner only.
+      if (!await readListRepository.isOwner(item.readListId, userId)) {
+        throw new ReadListPermissionError();
+      }
 
-        // Supprimer l'item
-        await this.delete(itemId);
-        return item.readListId;
-      }));
+      // Supprimer l'item
+      await this.delete(itemId);
+      const readListId = item.readListId;
 
       await this.invalidateListSummaryCaches(readListId, userId);
 

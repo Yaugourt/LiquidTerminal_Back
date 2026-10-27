@@ -350,48 +350,52 @@ export class EducationalResourceService extends BaseService<
     }
   }
 
+  /**
+   * Not atomic, on purpose: the reads are plain and super.delete opens and commits
+   * its own transaction (an outer one would hold a second pool connection while the
+   * inner one runs, and could fail its commit after the row is already gone). The
+   * link preview cleanup afterwards runs on its own, outside any transaction.
+   */
   private async deleteInContent(id: number): Promise<void> {
-    return await prismaContent.$transaction((tx) => runWithTx(tx, [this.repository], async () => {
-      try {
-        // 1. Récupérer la ressource pour avoir le linkPreviewId
-        const resource = await this.repository.findById(id);
-        if (!resource) {
-          throw new EducationalResourceNotFoundError();
-        }
-
-        // 2. Supprimer la ressource éducative
-        await super.delete(id);
-
-        // 3. Vérifier si la LinkPreview est utilisée par d'autres ressources
-        if (resource.linkPreviewId) {
-          const linkPreviewService = LinkPreviewService.getInstance();
-          const isUsedByOthers = await linkPreviewService.isUsedByOtherResources(resource.linkPreviewId, id);
-
-          // Supprimer la LinkPreview seulement si elle n'est plus utilisée
-          if (!isUsedByOthers) {
-            await linkPreviewService.deleteById(resource.linkPreviewId);
-            logDeduplicator.info('Link preview deleted (no longer used)', {
-              linkPreviewId: resource.linkPreviewId
-            });
-          } else {
-            logDeduplicator.info('Link preview kept (still used by other resources)', {
-              linkPreviewId: resource.linkPreviewId
-            });
-          }
-        }
-
-        logDeduplicator.info('Educational resource deleted', {
-          resourceId: id,
-          linkPreviewId: resource.linkPreviewId
-        });
-      } catch (error) {
-        logDeduplicator.error('Error deleting educational resource', {
-          error: error instanceof Error ? error.message : String(error),
-          resourceId: id
-        });
-        throw error;
+    try {
+      // 1. Récupérer la ressource pour avoir le linkPreviewId
+      const resource = await this.repository.findById(id);
+      if (!resource) {
+        throw new EducationalResourceNotFoundError();
       }
-    }));
+
+      // 2. Supprimer la ressource éducative
+      await super.delete(id);
+
+      // 3. Vérifier si la LinkPreview est utilisée par d'autres ressources
+      if (resource.linkPreviewId) {
+        const linkPreviewService = LinkPreviewService.getInstance();
+        const isUsedByOthers = await linkPreviewService.isUsedByOtherResources(resource.linkPreviewId, id);
+
+        // Supprimer la LinkPreview seulement si elle n'est plus utilisée
+        if (!isUsedByOthers) {
+          await linkPreviewService.deleteById(resource.linkPreviewId);
+          logDeduplicator.info('Link preview deleted (no longer used)', {
+            linkPreviewId: resource.linkPreviewId
+          });
+        } else {
+          logDeduplicator.info('Link preview kept (still used by other resources)', {
+            linkPreviewId: resource.linkPreviewId
+          });
+        }
+      }
+
+      logDeduplicator.info('Educational resource deleted', {
+        resourceId: id,
+        linkPreviewId: resource.linkPreviewId
+      });
+    } catch (error) {
+      logDeduplicator.error('Error deleting educational resource', {
+        error: error instanceof Error ? error.message : String(error),
+        resourceId: id
+      });
+      throw error;
+    }
   }
 
   /**
