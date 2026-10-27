@@ -81,22 +81,18 @@ export class ReferralService {
       
       // Transaction pour garantir la cohérence et éviter les race conditions
       await prisma.$transaction(async (tx: any) => {
-        // Vérifier que l'utilisateur n'a pas déjà un parrain DANS la transaction
-        const user = await tx.user.findUnique({
-          where: { id: userId },
-          select: { referredBy: true }
+        // Associer le nouveau user au parrain (utiliser le nom exact du parrain),
+        // seulement s'il n'en a pas déjà un : l'updateMany conditionnel est atomique,
+        // donc deux premiers logins concurrents ne comptent qu'un parrainage.
+        const assigned = await tx.user.updateMany({
+          where: { id: userId, referredBy: null },
+          data: { referredBy: referrer.name }
         });
-        
-        if (user?.referredBy) {
-          logDeduplicator.warn('User already has referrer', { userId, existingReferrer: user.referredBy });
+
+        if (assigned.count === 0) {
+          logDeduplicator.warn('User already has referrer', { userId });
           throw new Error('User already has a referrer');
         }
-        
-        // Associer le nouveau user au parrain (utiliser le nom exact du parrain)
-        await tx.user.update({
-          where: { id: userId },
-          data: { referredBy: referrer.name } // Utiliser le nom exact trouvé
-        });
         
         // Incrémenter le compteur du parrain
         await tx.user.update({

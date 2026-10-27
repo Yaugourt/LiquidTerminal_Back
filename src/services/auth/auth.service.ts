@@ -179,6 +179,9 @@ export class AuthService {
           await xpService.grantXp({
             userId: user.id,
             actionType: 'REGISTRATION',
+            // Fixed reference: a NULL referenceId never collides in the unique index,
+            // so a repeated login in the window would grant the bonus again.
+            referenceId: 'registration',
             description: 'Welcome bonus for registration',
           });
           logDeduplicator.info('Registration XP granted', { userId: user.id });
