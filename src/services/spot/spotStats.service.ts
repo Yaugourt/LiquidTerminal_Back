@@ -1,6 +1,7 @@
 import { SpotGlobalStats, StablecoinsStats, MarketData } from '../../types/market.types';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { totalMarketCapPerToken } from '../../utils/spot-market-cap.util';
 
 /**
  * No `/spotUSDC` snapshot is cached: a cold Redis before the poller's first
@@ -70,7 +71,7 @@ export class SpotGlobalStatsService {
 
       const totalVolume24h = marketsData.reduce((total: number, market: MarketData) => total + market.volume, 0);
       const totalPairs = marketsData.length;
-      const totalMarketCap = marketsData.reduce((total: number, market: MarketData) => total + market.marketCap, 0);
+      const totalMarketCap = totalMarketCapPerToken(marketsData);
 
       const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
         ? spotUSDCData[spotUSDCData.length - 1]

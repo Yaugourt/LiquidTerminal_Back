@@ -2,6 +2,7 @@ import { redisService } from '../../../core/redis.service';
 import { SpotGlobalStats, MarketData } from '../../../types/market.types';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../../utils/guardedInterval';
+import { totalMarketCapPerToken } from '../../../utils/spot-market-cap.util';
 
 export class HyperliquidSpotStatsClient {
   private static instance: HyperliquidSpotStatsClient | null = null;
@@ -64,7 +65,7 @@ export class HyperliquidSpotStatsClient {
       const totalPairs = marketsData.length;
       
       // Calculer la capitalisation totale du marché
-      const totalMarketCap = marketsData.reduce((total: number, market: MarketData) => total + market.marketCap, 0);
+      const totalMarketCap = totalMarketCapPerToken(marketsData);
       
       const latestSpotUSDCData = spotUSDCData && spotUSDCData.length > 0
         ? spotUSDCData[spotUSDCData.length - 1]
