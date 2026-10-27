@@ -83,7 +83,21 @@ export class TelegramDocUpdateDispatcherService {
     logDeduplicator.info('TelegramDocUpdateDispatcherService: Stopped');
   }
 
+  /**
+   * Started with `void` from timers: a rejection here would reach the process-level
+   * unhandledRejection handler and restart the whole back, so nothing may escape.
+   */
   private async runPoll(): Promise<void> {
+    try {
+      await this.pollOnce();
+    } catch (error) {
+      logDeduplicator.error('TelegramDocUpdateDispatcherService: Poll cycle failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
     if (this.isStopped) return;
     logDeduplicator.info('TelegramDocUpdateDispatcherService: Poll cycle starting');
 
@@ -113,27 +127,31 @@ export class TelegramDocUpdateDispatcherService {
       await sleep(RATE_LIMIT_DELAY_MS);
       if (this.isStopped) return;
 
-      const relPath = urlToRelPath(url);
+      // One bad page (malformed URL, fetch or DB error) is skipped, not the whole poll.
+      // Its hash is not stored, so a changed page is detected again on the next poll.
+      let relPath: string;
       let newContent: string;
+      let newHash: string;
 
       try {
+        relPath = urlToRelPath(url);
         newContent = await fetchPageMarkdown(url);
+        newHash = computeHash(newContent);
+
+        await prismaContent.hyperliquidDocPage.upsert({
+          where: { pageUrl: url },
+          create: { pageUrl: url, relPath, contentHash: newHash, content: newContent },
+          update: { relPath, contentHash: newHash, content: newContent },
+        });
       } catch (error) {
-        logDeduplicator.warn('TelegramDocUpdateDispatcherService: Failed to fetch page, skipping', {
+        logDeduplicator.warn('TelegramDocUpdateDispatcherService: Failed to process page, skipping', {
           url,
           error: error instanceof Error ? error.message : String(error),
         });
         continue;
       }
 
-      const newHash = computeHash(newContent);
       const existing = pageMap.get(url);
-
-      await prismaContent.hyperliquidDocPage.upsert({
-        where: { pageUrl: url },
-        create: { pageUrl: url, relPath, contentHash: newHash, content: newContent },
-        update: { relPath, contentHash: newHash, content: newContent },
-      });
 
       if (existing !== undefined && existing.hash !== newHash) {
         updatedPages.push({ relPath, pageUrl: url, oldContent: existing.content, newContent });
@@ -150,10 +168,17 @@ export class TelegramDocUpdateDispatcherService {
 
     await this.broadcastToAllUsers(updatedPages);
 
-    await prismaContent.hyperliquidDocPage.updateMany({
-      where: { pageUrl: { in: updatedPages.map(p => p.pageUrl) } },
-      data: { lastBroadcastAt: new Date() },
-    });
+    try {
+      await prismaContent.hyperliquidDocPage.updateMany({
+        where: { pageUrl: { in: updatedPages.map(p => p.pageUrl) } },
+        data: { lastBroadcastAt: new Date() },
+      });
+    } catch (error) {
+      // The alerts are already out and the new hashes are stored: only the timestamp is missing.
+      logDeduplicator.error('TelegramDocUpdateDispatcherService: Failed to record lastBroadcastAt', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private async broadcastToAllUsers(pages: UpdatedPage[]): Promise<void> {
