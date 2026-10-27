@@ -52,6 +52,7 @@ describe('perks', () => {
     for (const p of PERKS) {
       expect(p.cta.href.startsWith('/') || p.cta.href.startsWith('https://')).toBe(true);
       expect(p.partnerUrl.startsWith('https://')).toBe(true);
+      if (p.logo) expect(p.logo.startsWith('/') && !p.logo.startsWith('//')).toBe(true);
     }
   });
 });

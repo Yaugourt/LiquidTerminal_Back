@@ -13,6 +13,8 @@ export interface Perk {
   partner: string;
   /** Partner site, shown to everyone. */
   partnerUrl: string;
+  /** Partner logo: a path in the front's /public, never an external URL. */
+  logo?: string;
   title: string;
   /** One or two sentences, the real terms. No em dashes. */
   description: string;
@@ -31,6 +33,7 @@ export const PERKS: Perk[] = [
     id: 'hl-names-referral',
     partner: 'Hyperliquid Names',
     partnerUrl: 'https://hlnames.xyz',
+    logo: '/partners/hlnames.svg',
     title: '20% off your .hl name',
     description:
       'Mint a .hl name from Liquid Terminal and pay 20% less than the list price. The discount is applied on chain by our referral; nothing to enter.',
