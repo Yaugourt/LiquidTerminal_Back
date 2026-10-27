@@ -31,9 +31,9 @@ export const PERKS: Perk[] = [
     id: 'hl-names-referral',
     partner: 'Hyperliquid Names',
     partnerUrl: 'https://hlnames.xyz',
-    title: '10% off your .hl name',
+    title: '20% off your .hl name',
     description:
-      'Mint a .hl name from Liquid Terminal and pay 10% less than the list price. The discount is applied on chain by our referral; nothing to enter.',
+      'Mint a .hl name from Liquid Terminal and pay 20% less than the list price. The discount is applied on chain by our referral; nothing to enter.',
     access: 'public',
     cta: { label: 'Get a .hl name', href: '/names' },
   },
