@@ -65,6 +65,7 @@ import xpRoutes from './routes/xp/xp.routes';
 import telegramRoutes from './routes/telegram';
 
 import namesRoutes from './routes/names/names.routes';
+import perksRoutes from './routes/perks/perks.routes';
 import alertRulesRoutes from './routes/alerts/alert-rules.routes';
 import healthRoutes from './routes/health.routes';
 import liquidationsRoutes from './routes/liquidations/liquidations.routes';
@@ -164,6 +165,7 @@ app.use('/readlists', readListRoutes);
 app.use('/walletlists', walletListRoutes);
 app.use('/alerts', alertRulesRoutes);
 app.use('/names', namesRoutes);
+app.use('/perks', perksRoutes);
 app.use('/link-preview', linkPreviewRoutes);
 app.use('/publicgoods', publicGoodRoutes);
 app.use('/staking/validators', validatorRoutes);
