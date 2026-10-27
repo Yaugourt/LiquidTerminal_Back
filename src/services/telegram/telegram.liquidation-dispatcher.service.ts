@@ -24,13 +24,24 @@ interface LiquidationSubscriptionRow {
 }
 
 /**
+ * Dedup id of one liquidation: the aggregator's grouping key (user, coin, direction)
+ * under its transaction hash. Re-ingesting the same liquidation gives the same id,
+ * while other users liquidated in the same transaction get their own.
+ */
+export function liquidationEventId(liq: AggregatedLiquidation): string {
+  return `${liq.hash}:${liq.liquidated_user.toLowerCase()}:${liq.coin}:${liq.liq_dir}`;
+}
+
+/**
  * Compile liquidation subscriptions into engine rules. Same semantics as
  * before the engine:
  * - 'all' matches every liquidation;
  * - otherwise coins (if set), minimum USD (if set), and wallets: the user's
  *   Liquid Terminal wallets when useLinkedWallets (no wallets = no alert),
  *   else filterWallets (if set);
- * - one alert per (Telegram user, liquidation hash), across their subscriptions.
+ * - one alert per (Telegram user, liquidation), across their subscriptions: a liquidation is
+ *   the (hash, user, coin, direction) the aggregator groups on, not the hash alone, which
+ *   several users share when a cascade settles in one transaction.
  * Linked wallets are resolved here, in one query, instead of per event.
  */
 /** A compiled liquidation subscription; the name goes in the alert message. */
@@ -86,7 +97,7 @@ export class TelegramLiquidationDispatcherService {
   private readonly engine = new AlertEngine<AggregatedLiquidation, LiquidationRule>({
     name: 'liquidation',
     loadRules: () => this.loadRules(),
-    keys: (liq) => ({ id: liq.hash, wallets: [liq.liquidated_user.toLowerCase()], coin: liq.coin }),
+    keys: (liq) => ({ id: liquidationEventId(liq), wallets: [liq.liquidated_user.toLowerCase()], coin: liq.coin }),
     deliver: (rule, liq) => {
       InternalWebSocketServer.getInstance().broadcastLiquidationAlert(rule.telegramId, formatLiquidationAlert(liq, rule.name));
     },

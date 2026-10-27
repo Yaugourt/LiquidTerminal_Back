@@ -18,7 +18,7 @@ import {
   BoundedSerialQueue,
 } from '../../../src/services/alerts/alert-engine';
 import { TelegramFillAlertDispatcherService } from '../../../src/services/telegram/telegram.fill-alert-dispatcher.service';
-import { compileLiquidationRules } from '../../../src/services/telegram/telegram.liquidation-dispatcher.service';
+import { compileLiquidationRules, liquidationEventId } from '../../../src/services/telegram/telegram.liquidation-dispatcher.service';
 import type { ActiveFillSubscription } from '../../../src/services/telegram/telegram.fill-subscription.service';
 import type { AggregatedFill } from '../../../src/types/fill-alerts.types';
 import type { AggregatedLiquidation } from '../../../src/types/liquidations.types';
@@ -261,5 +261,28 @@ describe('liquidation rules keep their old semantics', () => {
       new Map([[3, ['0xab']]])
     );
     expect(r.wallets).toEqual(['0xab']);
+  });
+
+  it('gives each liquidation of a shared transaction its own dedup id, and a re-ingested one the same', async () => {
+    claimKeys.mockImplementation(async (keys: string[]) => keys.map(() => true));
+    const mk = (user: string) =>
+      ({ hash: '0xh', coin: 'xyz:HOOD', liq_dir: 'Long', liquidated_user: user, notional_total: 1 }) as unknown as AggregatedLiquidation;
+    const delivered: string[] = [];
+    const [all] = compileLiquidationRules(
+      [{ id: 's1', telegramUserId: 'u1', subscriptionType: 'all', filterCoins: [], filterMinUsd: 0, filterWallets: [], useLinkedWallets: false,
+         telegramUser: { telegramId: BigInt(7), linkedUserId: null }, name: 'n' } as never],
+      new Map()
+    );
+    const engine = new AlertEngine<AggregatedLiquidation>({
+      name: 'liqtest',
+      loadRules: async () => [all],
+      keys: (l) => ({ id: liquidationEventId(l), wallets: [l.liquidated_user.toLowerCase()], coin: l.coin }),
+      deliver: (_r, l) => delivered.push(l.liquidated_user),
+      summarize: () => '',
+      notify: () => undefined,
+    });
+    await engine.process([mk('0xA'), mk('0xB'), mk('0xC')]);
+    await engine.process([mk('0xa')]);
+    expect(delivered).toEqual(['0xA', '0xB', '0xC']);
   });
 });
