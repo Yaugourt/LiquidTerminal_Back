@@ -35,11 +35,21 @@ export class LiquidationsIngestionService {
   // Batch configuration
   private static readonly BATCH_FLUSH_INTERVAL_MS = 2000;
   private static readonly MAX_BATCH_SIZE = 100;
+  // A failed batch is kept and retried (inserts skip duplicates, so a retry is safe).
+  // Bounded both ways: after MAX_FLUSH_ATTEMPTS consecutive failures the batch is dropped
+  // (a row the DB always rejects must not wedge ingestion), and the buffer never holds more
+  // than MAX_PENDING_ROWS, so a dead DB cannot grow memory. Older gaps are left to the backfill.
+  private static readonly MAX_FLUSH_ATTEMPTS = 10;
+  private static readonly MAX_PENDING_ROWS = 1000;
+  private static readonly RETRY_BACKOFF_MS = 2000;
+  private static readonly RETRY_BACKOFF_MAX_MS = 10_000;
 
   // State
   private pendingBatch: Liquidation[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private flushPromise: Promise<void> = Promise.resolve();
+  private consecutiveFlushFailures = 0;
+  private retryNotBefore = 0;
   private unsubscribe: (() => void) | null = null;
   private isRunning = false;
 
@@ -149,8 +159,8 @@ export class LiquidationsIngestionService {
    */
   private isValidLiquidation(liq: Liquidation): boolean {
     return (
-      typeof liq.tid === 'number' && liq.tid > 0 &&
-      typeof liq.time_ms === 'number' && liq.time_ms > 0 &&
+      Number.isInteger(liq.tid) && liq.tid > 0 && // BigInt(tid) throws on a fraction
+      Number.isInteger(liq.time_ms) && liq.time_ms > 0 &&
       typeof liq.coin === 'string' && liq.coin.length > 0 &&
       typeof liq.hash === 'string' && liq.hash.length > 0 &&
       typeof liq.liquidated_user === 'string' && liq.liquidated_user.length > 0 &&
@@ -201,6 +211,7 @@ export class LiquidationsIngestionService {
     });
 
     this.pendingBatch.push(...valid);
+    this.capPending();
 
     // Flush immediately if batch is full
     if (this.pendingBatch.length >= LiquidationsIngestionService.MAX_BATCH_SIZE) {
@@ -226,6 +237,11 @@ export class LiquidationsIngestionService {
       return;
     }
 
+    // Back off after a failure; a shutdown flush always tries.
+    if (this.isRunning && Date.now() < this.retryNotBefore) {
+      return;
+    }
+
     // Take the current batch and reset
     const batch = this.pendingBatch.splice(0);
 
@@ -241,6 +257,8 @@ export class LiquidationsIngestionService {
       this.totalDuplicatesSkipped += duplicatesSkipped;
       this.batchesFlushed++;
       this.lastFlushAt = new Date();
+      this.consecutiveFlushFailures = 0;
+      this.retryNotBefore = 0;
 
       // Track watermark
       const maxTid = batch.reduce((max, l) => l.tid > max ? l.tid : max, batch[0].tid);
@@ -265,7 +283,44 @@ export class LiquidationsIngestionService {
         batchSize: batch.length,
         totalErrors: this.totalErrors,
       });
+      this.requeueFailedBatch(batch);
     }
+  }
+
+  /**
+   * Put a failed batch back at the head of the buffer for the next flush, within the
+   * attempt and size bounds. Rows that don't fit are dropped (the oldest first).
+   */
+  private requeueFailedBatch(batch: Liquidation[]): void {
+    this.consecutiveFlushFailures++;
+    if (this.consecutiveFlushFailures >= LiquidationsIngestionService.MAX_FLUSH_ATTEMPTS) {
+      logDeduplicator.error('LiquidationsIngestionService: Batch dropped after repeated failures', {
+        batchSize: batch.length,
+        attempts: this.consecutiveFlushFailures,
+      });
+      this.consecutiveFlushFailures = 0;
+      this.retryNotBefore = 0;
+      return;
+    }
+
+    this.retryNotBefore =
+      Date.now() +
+      Math.min(
+        this.consecutiveFlushFailures * LiquidationsIngestionService.RETRY_BACKOFF_MS,
+        LiquidationsIngestionService.RETRY_BACKOFF_MAX_MS
+      );
+    this.pendingBatch.unshift(...batch);
+    this.capPending();
+  }
+
+  /** Keep the buffer within MAX_PENDING_ROWS, dropping the oldest rows. */
+  private capPending(): void {
+    const overflow = this.pendingBatch.length - LiquidationsIngestionService.MAX_PENDING_ROWS;
+    if (overflow <= 0) return;
+    this.pendingBatch.splice(0, overflow);
+    logDeduplicator.error('LiquidationsIngestionService: Buffer full while the DB is failing, oldest rows dropped', {
+      dropped: overflow,
+    });
   }
 
   /**
