@@ -33,6 +33,14 @@ export const HL_NAME_RE = /^[^\s/?#.]+(\.[^\s/?#.]+)*\.hl$/i;
 const keyPrimary = (a: string) => `hlnames:primary:${a}`;
 const keyForward = (n: string) => `hlnames:fwd:${n}`;
 const keyProfile = (a: string) => `hlnames:profile:${a}`;
+const keyOwned = (a: string) => `hlnames:owned:${a}`;
+const KEY_CARD = 'hlnames:card-template';
+
+/** A registered name whose NFT card serves as the template for previews. */
+const CARD_TEMPLATE_NAME = 'liquidterminal.hl';
+const CARD_TTL_S = 24 * 3600;
+/** At most this many names per owner get an expiry lookup. */
+const OWNED_MAX = 20;
 
 /** USDC on HyperEVM, the one ERC20 we offer for minting (their Minter prices it 1:1 in USD). */
 export const HLNAMES_USDC = '0xb88339CB7199b77E23DB6E890353E22632Ba630f';
@@ -62,6 +70,31 @@ async function call<T>(path: string, init?: RequestInit): Promise<{ status: numb
   } finally {
     clearTimeout(t);
   }
+}
+
+/** A name an address holds, with its expiry (Unix seconds, null when unknown). */
+export interface OwnedName {
+  name: string;
+  expiry: number | null;
+}
+
+/**
+ * The NFT card is an SVG from their API, shown in an <img> on the front. It
+ * is still checked here: no script, no event handler, no external reference,
+ * and exactly one name text element (id "dt") for the preview to fill.
+ */
+/**
+ * Their card carries a script that sizes the name (font-size = min(795 / length, 50) px);
+ * it never runs in an <img>, and the front applies the same rule. Dropped before the check.
+ */
+export function stripCardScripts(svg: string): string {
+  return svg.replace(/<script\b[\s\S]*?<\/script>/gi, '');
+}
+
+export function isSafeCardSvg(svg: string): boolean {
+  if (svg.length > 50_000 || !svg.includes('<svg')) return false;
+  if (/<script|<foreignObject|\son[a-z]+\s*=|javascript:|(?:xlink:)?href\s*=\s*["'](?!#)/i.test(svg)) return false;
+  return (svg.match(/<text[^>]*id="dt"[^>]*>[^<]*<\/text>/g) ?? []).length === 1;
 }
 
 export interface HlProfile {
@@ -237,10 +270,50 @@ export class HlNamesClient {
     };
   }
 
-  /** Drops the cached name and profile of an address (after a mint, so the new name shows up). */
+  /** Drops the cached name, profile and owned names of an address (after a mint, so the new name shows up). */
   async forget(address: string): Promise<void> {
     const a = address.toLowerCase();
     if (!ADDRESS_RE.test(a)) return;
-    await Promise.all([redisService.delete(keyPrimary(a)), redisService.delete(keyProfile(a))]);
+    await Promise.all([redisService.delete(keyPrimary(a)), redisService.delete(keyProfile(a)), redisService.delete(keyOwned(a))]);
+  }
+
+  /**
+   * SVG of a registered name's NFT card, the template the mint page fills with
+   * the name being typed. Their API only draws registered names. Cached 24 h.
+   */
+  async cardTemplate(): Promise<string> {
+    const hit = await redisService.get(KEY_CARD);
+    if (hit) return hit;
+    const nh = await call<{ nameHash: string }>(`/utils/namehash/${encodeURIComponent(CARD_TEMPLATE_NAME)}`);
+    if (nh.status !== 200 || !nh.body?.nameHash) throw new Error(`hlnames namehash status ${nh.status}`);
+    const tokenId = BigInt(nh.body.nameHash).toString();
+    const { status, body } = await call<{ image?: string }>(`/records/image/${tokenId}`);
+    const prefix = 'data:image/svg+xml;base64,';
+    if (status !== 200 || !body?.image?.startsWith(prefix)) throw new Error(`hlnames card status ${status}`);
+    const svg = stripCardScripts(Buffer.from(body.image.slice(prefix.length), 'base64').toString('utf8'));
+    if (!isSafeCardSvg(svg)) throw new Error('hlnames card rejected');
+    await redisService.set(KEY_CARD, svg, CARD_TTL_S);
+    return svg;
+  }
+
+  /** Names an address holds, soonest expiry first. Cached 5 min (any visitor can ask about any address). */
+  async ownedNames(address: string): Promise<OwnedName[]> {
+    const a = address.toLowerCase();
+    if (!ADDRESS_RE.test(a)) return [];
+    const hit = await redisService.get(keyOwned(a));
+    if (hit) return JSON.parse(hit) as OwnedName[];
+    const { status, body } = await call<{ name: string; namehash: string }[]>(`/utils/names_owner/${a}`);
+    if (status !== 200 || !Array.isArray(body)) throw new Error(`hlnames names_owner status ${status}`);
+    const rows = body.filter((r) => typeof r?.name === 'string' && HL_NAME_RE.test(r.name) && /^0x[0-9a-f]{64}$/i.test(r.namehash)).slice(0, OWNED_MAX);
+    const owned = await Promise.all(
+      rows.map(async (r): Promise<OwnedName> => {
+        const e = await call<{ expiry?: string }>(`/metadata/expiry/${r.namehash}`).catch(() => null);
+        const expiry = Number(e?.body?.expiry);
+        return { name: r.name, expiry: Number.isSafeInteger(expiry) && expiry > 0 ? expiry : null };
+      })
+    );
+    owned.sort((x, y) => (x.expiry ?? Infinity) - (y.expiry ?? Infinity));
+    await redisService.set(keyOwned(a), JSON.stringify(owned), NEGATIVE_TTL_S);
+    return owned;
   }
 }

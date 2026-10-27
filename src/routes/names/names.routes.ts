@@ -1,6 +1,6 @@
 import express, { Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
-import { marketRateLimiter, namesWriteRateLimiter } from '../../middleware/apiRateLimiter';
+import { addressLookupRateLimiter, marketRateLimiter, namesWriteRateLimiter } from '../../middleware/apiRateLimiter';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { HlNamesClient, HL_NAME_RE } from '../../clients/hlnames/hlnames.client';
 
@@ -55,6 +55,28 @@ router.get('/profile/:address', (async (req: Request, res: Response) => {
     res.json({ success: true, data: await names.profile(address) });
   } catch (error) {
     unavailable(res, 'names/profile failed', error);
+  }
+}) as RequestHandler);
+
+/** GET /names/owned/:address → [{ name, expiry }] names the address holds */
+router.get('/owned/:address', addressLookupRateLimiter, (async (req: Request, res: Response) => {
+  const address = String(req.params.address);
+  if (!ADDRESS.test(address)) return res.status(400).json({ success: false, error: 'Not an address', code: 'VALIDATION_ERROR' });
+  try {
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ success: true, data: await names.ownedNames(address) });
+  } catch (error) {
+    unavailable(res, 'names/owned failed', error);
+  }
+}) as RequestHandler);
+
+/** GET /names/card-template → { svg } the NFT card the mint page fills with a name */
+router.get('/card-template', (async (_req: Request, res: Response) => {
+  try {
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({ success: true, data: { svg: await names.cardTemplate() } });
+  } catch (error) {
+    unavailable(res, 'names/card-template failed', error);
   }
 }) as RequestHandler);
 
