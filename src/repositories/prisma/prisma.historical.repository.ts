@@ -170,7 +170,6 @@ export class PrismaHistoricalLiquidationRepository
    * database), typed `any`: the Historical client is a different generated client
    * from the Core one the base getter is typed for.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   protected get prismaClient(): any {
     return super.prismaClient;
   }

@@ -30,7 +30,6 @@ export interface BaseQueryParams {
  * Vide à dessein : les transactions ne passent plus par le repository, le service
  * lui lie le client transactionnel par appel (`runWithTx`).
  */
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface BaseServiceRepository {}
 
 /**
