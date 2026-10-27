@@ -74,20 +74,9 @@ router.get('/',
  */
 router.get('/stats', (async (req: Request, res: Response) => {
   try {
-    const allData = await leaderboardService.getLeaderboard({ 
-      timeline: 'allTime', 
-      sortBy: 'pnl', 
-      order: 'desc',
-      page: 1,
-      limit: 1000 // Récupérer plus de données pour les stats
-    });
-
+    // Over every participant, not the first page of them.
     const stats = {
-      totalParticipants: allData.pagination.total,
-      topPerformer: allData.data[0] || null,
-      averageAccountValue: allData.data.reduce((sum, entry) => sum + entry.accountValue, 0) / allData.data.length,
-      totalVolume: allData.data.reduce((sum, entry) => sum + parseFloat(entry.allTime.vlm), 0),
-      totalPnl: allData.data.reduce((sum, entry) => sum + parseFloat(entry.allTime.pnl), 0),
+      ...(await leaderboardService.getStats()),
       lastUpdate: leaderboardService.getLastUpdate()
     };
 

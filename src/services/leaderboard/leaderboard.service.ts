@@ -25,6 +25,16 @@ interface LeaderboardView {
   rows: ProcessedLeaderboardEntry[];
   sorted: Map<string, ProcessedLeaderboardEntry[]>;
   byAddress: Map<string, ProcessedLeaderboardEntry> | null;
+  stats: LeaderboardStats | null;
+}
+
+/** Aggregates over every row of the snapshot (all-time window). */
+export interface LeaderboardStats {
+  totalParticipants: number;
+  topPerformer: ProcessedLeaderboardEntry | null;
+  averageAccountValue: number;
+  totalVolume: number;
+  totalPnl: number;
 }
 
 export class LeaderboardService {
@@ -79,6 +89,47 @@ export class LeaderboardService {
     }
   }
 
+  /**
+   * Totals over the whole board, not a page of it: computed once per snapshot
+   * like the sorted views. Empty board: zeros and no top performer.
+   */
+  public async getStats(): Promise<LeaderboardStats> {
+    try {
+      const rawData = await this.client.getLeaderboardData();
+      if (!rawData || !rawData.leaderboardRows) {
+        throw new LeaderboardNotFoundError();
+      }
+
+      const view = this.getView(rawData);
+      if (!view.stats) {
+        const finite = (n: number): number => (Number.isFinite(n) ? n : 0);
+        let accountValue = 0;
+        let volume = 0;
+        let pnl = 0;
+        for (const entry of view.rows) {
+          accountValue += finite(entry.accountValue);
+          volume += finite(parseFloat(entry.allTime.vlm));
+          pnl += finite(parseFloat(entry.allTime.pnl));
+        }
+        const count = view.rows.length;
+        view.stats = {
+          totalParticipants: count,
+          topPerformer: this.getSorted(view, { timeline: 'allTime', sortBy: 'pnl', order: 'desc' })[0] ?? null,
+          averageAccountValue: count > 0 ? accountValue / count : 0,
+          totalVolume: volume,
+          totalPnl: pnl,
+        };
+      }
+      return view.stats;
+    } catch (error) {
+      if (error instanceof LeaderboardError) {
+        throw error;
+      }
+      logDeduplicator.error('Error computing leaderboard stats:', { error: error instanceof Error ? error.message : String(error) });
+      throw new LeaderboardError('Failed to retrieve leaderboard data');
+    }
+  }
+
   private getView(rawData: LeaderboardResponse): LeaderboardView {
     let view = this.views.get(rawData);
     if (!view) {
@@ -86,6 +137,7 @@ export class LeaderboardService {
         rows: this.processLeaderboardData(rawData.leaderboardRows),
         sorted: new Map(),
         byAddress: null,
+        stats: null,
       };
       this.views.set(rawData, view);
     }
