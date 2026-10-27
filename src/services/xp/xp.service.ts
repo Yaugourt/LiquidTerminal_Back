@@ -156,7 +156,7 @@ export class XpService {
       const newTotalXp = stored.totalXp;
       const newLevel = calculateLevel(newTotalXp);
       if (newLevel !== stored.level) {
-        await xpRepository.setUserLevel(userId, newLevel);
+        await xpRepository.setUserLevel(userId, newLevel, newTotalXp);
       }
 
       // Mettre à jour les weekly challenges

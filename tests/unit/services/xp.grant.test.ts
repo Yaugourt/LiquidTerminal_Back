@@ -57,7 +57,7 @@ describe('grantXp total', () => {
     expect(granted).toBeGreaterThan(0);
     expect(mockRepo.incrementUserXp).toHaveBeenCalledWith(1, granted);
     // level 2 starts at 100 XP: the stored level (1) is brought in line with the stored total
-    expect(mockRepo.setUserLevel).toHaveBeenCalledWith(1, 2);
+    expect(mockRepo.setUserLevel).toHaveBeenCalledWith(1, 2, 205);
   });
 
   it('does not touch the level when it already matches the stored total', async () => {

@@ -4,11 +4,18 @@ import { logDeduplicator } from '../utils/logDeduplicator';
 import { scopedClient } from '../utils/tx-scope';
 import { UserRepository } from './interfaces/user.repository.interface';
 
-/** A unique-constraint failure on User.name (Prisma gives the column list, or the index name). */
+/**
+ * A unique-constraint failure on User.name. With the pg driver adapter (our setup) Prisma puts the
+ * columns in meta.driverAdapterError.cause.constraint.fields; without an adapter it gives
+ * meta.target (the column list, or the index name).
+ */
 function isNameConflict(error: unknown): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') return false;
-  const target = error.meta?.target;
-  return Array.isArray(target) ? target.includes('name') : typeof target === 'string' && target.includes('name');
+  const meta = error.meta as
+    | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } }
+    | undefined;
+  const fields = meta?.driverAdapterError?.cause?.constraint?.fields ?? meta?.target;
+  return Array.isArray(fields) ? fields.includes('name') : typeof fields === 'string' && fields.includes('name');
 }
 
 export class UserRepositoryImpl implements UserRepository {

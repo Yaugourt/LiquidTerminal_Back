@@ -14,8 +14,20 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 import { UserRepositoryImpl } from '../../../src/repositories/user.repository';
 
 const repo = new UserRepositoryImpl();
-const nameConflict = () =>
-  new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test', meta: { target: ['name'] } });
+// The shape Prisma 7 gives through the pg driver adapter (checked on a real Postgres 16).
+const adapterConflict = (fields: string[]) =>
+  new Prisma.PrismaClientKnownRequestError('dup', {
+    code: 'P2002',
+    clientVersion: 'test',
+    meta: {
+      modelName: 'User',
+      driverAdapterError: {
+        name: 'DriverAdapterError',
+        cause: { originalCode: '23505', kind: 'UniqueConstraintViolation', constraint: { fields } },
+      },
+    },
+  });
+const nameConflict = () => adapterConflict(['name']);
 
 beforeEach(() => jest.resetAllMocks());
 
@@ -61,10 +73,20 @@ describe('findOrCreate with a taken name', () => {
   });
 
   it('does not treat a conflict on another column as a name conflict', async () => {
-    mockUser.upsert.mockRejectedValue(
-      new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test', meta: { target: ['email'] } }),
-    );
+    mockUser.upsert.mockRejectedValue(adapterConflict(['email']));
     await expect(repo.findOrCreate('did:privy:x', { name: 'alice' })).rejects.toThrow('dup');
     expect(mockUser.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('also reads meta.target (Prisma without a driver adapter)', async () => {
+    mockUser.upsert
+      .mockRejectedValueOnce(
+        new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test', meta: { target: ['name'] } }),
+      )
+      .mockResolvedValueOnce({ id: 9, name: 'alice-abc123' });
+    mockUser.findUnique.mockResolvedValue(null);
+
+    const user = await repo.findOrCreate('did:privy:xyzABC123', { name: 'alice' });
+    expect(user.id).toBe(9);
   });
 });

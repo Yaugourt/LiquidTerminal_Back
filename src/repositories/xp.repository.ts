@@ -83,11 +83,13 @@ export class XpRepository {
     }
 
     /**
-     * Fixe le niveau d'un utilisateur (idempotent : calculé depuis le total stocké)
+     * Fixe le niveau calculé depuis `totalXp`, seulement si le total stocké vaut encore
+     * `totalXp` : quand deux grants se croisent, c'est le dernier total qui fixe le niveau,
+     * jamais un niveau calculé depuis un total déjà dépassé.
      */
-    async setUserLevel(userId: number, level: number): Promise<void> {
-        await this.prismaClient.user.update({
-            where: { id: userId },
+    async setUserLevel(userId: number, level: number, totalXp: number): Promise<void> {
+        await this.prismaClient.user.updateMany({
+            where: { id: userId, totalXp },
             data: { level },
         });
     }
