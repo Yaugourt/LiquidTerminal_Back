@@ -245,6 +245,8 @@ export class AlertEngine<E, R extends AlertRule<E> = AlertRule<E>> {
   private timers: NodeJS.Timeout[] = [];
   private loaded = false;
   private refreshing: Promise<void> | null = null;
+  /** True while Redis dedup is unavailable (logged once per outage). */
+  private redisDown = false;
   /** Over-budget alerts waiting for the next digest, per Telegram user. */
   private readonly held = new Map<string, { lines: string[]; overflow: number }>();
   private readonly opts: Required<AlertEngineOptions>;
@@ -342,6 +344,13 @@ export class AlertEngine<E, R extends AlertRule<E> = AlertRule<E>> {
 
     // One pipeline for the batch. null = Redis unavailable: memory dedup only, fail open.
     const claimed = await redisService.claimKeys(fresh.map((f) => f.key), this.opts.dedupTtlSeconds);
+    if (!claimed && !this.redisDown) {
+      this.redisDown = true;
+      logDeduplicator.warn(`AlertEngine:${this.pipeline.name}: Redis dedup unavailable, delivering with in-memory dedup only`);
+    } else if (claimed && this.redisDown) {
+      this.redisDown = false;
+      logDeduplicator.info(`AlertEngine:${this.pipeline.name}: Redis dedup back`);
+    }
 
     if (this.pipeline.prepare) {
       const going = fresh.filter((_f, i) => !claimed || claimed[i]).map((f) => f.event);

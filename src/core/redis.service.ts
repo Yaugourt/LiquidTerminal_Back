@@ -258,7 +258,8 @@ export class RedisService {
   /**
    * Claim many keys at once (SET NX EX, one pipeline round trip). Returns, per
    * key, true when this call created it (first claim) and false when it already
-   * existed. Returns null when Redis is unavailable, so callers can fall back.
+   * existed. Returns null when Redis is unavailable or any command failed, so callers
+   * can fall back.
    */
   public async claimKeys(keys: string[], ttlSeconds: number): Promise<boolean[] | null> {
     if (!keys.length) return [];
@@ -267,9 +268,20 @@ export class RedisService {
       const pipeline = redisNormal.pipeline();
       for (const key of keys) pipeline.set(key, '1', 'EX', ttlSeconds, 'NX');
       const results = await pipeline.exec();
+      // exec() resolves (does not reject) when the stream is down or a command times
+      // out: the failure sits in each entry. That is not "key already exists".
+      const failed = results?.find(([error]) => error)?.[0];
+      if (failed) {
+        recordRedisFailure();
+        logDeduplicator.error('Redis claimKeys error', {
+          count: keys.length,
+          error: failed.message,
+        });
+        return null;
+      }
       recordRedisSuccess();
       if (!results) return null;
-      return results.map(([error, reply]) => !error && reply === 'OK');
+      return results.map(([, reply]) => reply === 'OK');
     } catch (error) {
       recordRedisFailure();
       logDeduplicator.error('Redis claimKeys error', {

@@ -22,6 +22,7 @@ import { compileLiquidationRules } from '../../../src/services/telegram/telegram
 import type { ActiveFillSubscription } from '../../../src/services/telegram/telegram.fill-subscription.service';
 import type { AggregatedFill } from '../../../src/types/fill-alerts.types';
 import type { AggregatedLiquidation } from '../../../src/types/liquidations.types';
+import { logDeduplicator } from '../../../src/utils/logDeduplicator';
 
 interface Ev { id: string; wallet: string; coin: string; usd: number }
 
@@ -160,6 +161,22 @@ describe('AlertEngine', () => {
     const { engine, delivered } = makeEngine([rule('r1')]);
     await engine.process([ev('e1'), ev('e1'), ev('e2')]);
     expect(delivered).toEqual(['r1:e1', 'r1:e2']);
+  });
+
+  it('logs the Redis outage once, not per batch, and says when dedup is back', async () => {
+    (logDeduplicator.warn as jest.Mock).mockClear();
+    (logDeduplicator.info as jest.Mock).mockClear();
+    claimKeys.mockResolvedValue(null);
+    const { engine, delivered } = makeEngine([rule('r1')]);
+    await engine.process([ev('e1')]);
+    await engine.process([ev('e2')]);
+    await engine.process([ev('e1')]);
+    expect(delivered).toEqual(['r1:e1', 'r1:e2']);
+    expect(logDeduplicator.warn).toHaveBeenCalledTimes(1);
+    claimKeys.mockImplementation(async (keys: string[]) => keys.map(() => true));
+    await engine.process([ev('e3')]);
+    expect(logDeduplicator.info).toHaveBeenCalledWith(expect.stringContaining('Redis dedup back'));
+    expect(delivered).toEqual(['r1:e1', 'r1:e2', 'r1:e3']);
   });
 
   it('shares a per-user dedup scope across subscriptions', async () => {
