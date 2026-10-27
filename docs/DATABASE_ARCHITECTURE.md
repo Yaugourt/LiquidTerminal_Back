@@ -125,24 +125,19 @@ export const prismaHistorical = PrismaHistoricalService.getInstance();
 
 ```typescript
 // src/repositories/interfaces/base.repository.interface.ts
-export interface BaseRepository {
-  setPrismaClient(prismaClient: Omit<PrismaClient, ...>): void;
-  resetPrismaClient(): void;
-}
+export interface BaseRepository {}   // empty on purpose
 ```
 
-These two methods enable **transaction support**: the service injects a transactional client before operations, then resets after.
+A repository has no swappable client. Repositories are singletons shared by every request, so a transaction client stored on one would leak to concurrent requests and stay there, closed, if the block threw. Instead the service **binds** the transaction to the repositories it lists for the duration of one call (`runWithTx`, see section 4).
 
 ### Base Prisma Repository
 
 ```typescript
 // src/repositories/prisma/base-prisma.repository.ts
 export abstract class BasePrismaRepository {
-  protected prismaClient: any = prisma;  // Default: singleton
-
-  // Transaction support
-  setPrismaClient(prismaClient: any): void;
-  resetPrismaClient(): void;
+  protected defaultPrismaClient = prisma;          // The repository's own database
+  protected get prismaClient();                    // Bound transaction client, else defaultPrismaClient
+                                                   // (resolved on each access, read-only)
 
   // Helpers
   protected async executeWithErrorHandling<T>(operation, operationName, context?): Promise<T>;
@@ -305,41 +300,35 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
 #### `create(data)`
 ```
 1. Validate input with Zod → validationSchemas.create
-2. transactionService.execute(async (tx) => {
-     repository.setPrismaClient(tx);
+2. transactionClient.$transaction((tx) => runWithTx(tx, [repository], async () => {
      if (await checkExists(validatedData)) throw alreadyExists;
      return repository.create(validatedData);
-   });
-3. repository.resetPrismaClient();
-4. Cache new entity
-5. Invalidate list cache
-6. Return T
+   }));                                  // binding ends with the block, thrown or not
+3. Cache new entity
+4. Invalidate list cache
+5. Return T
 ```
 
 #### `update(id, data)`
 ```
 1. Validate input with Zod → validationSchemas.update
-2. transactionService.execute(async (tx) => {
-     repository.setPrismaClient(tx);
+2. transactionClient.$transaction((tx) => runWithTx(tx, [repository], async () => {
      if (!await repository.findById(id)) throw notFound;
      if (await checkExistsForUpdate(id, validatedData)) throw alreadyExists;
      return repository.update(id, validatedData);
-   });
-3. repository.resetPrismaClient();
-4. Invalidate entity + list cache
-5. Return T
+   }));
+3. Invalidate entity + list cache
+4. Return T
 ```
 
 #### `delete(id)`
 ```
-1. transactionService.execute(async (tx) => {
-     repository.setPrismaClient(tx);
+1. transactionClient.$transaction((tx) => runWithTx(tx, [repository], async () => {
      if (!await repository.findById(id)) throw notFound;
      await checkCanDelete(id);
      await repository.delete(id);
-   });
-2. repository.resetPrismaClient();
-3. Invalidate entity + list cache
+   }));
+2. Invalidate entity + list cache
 ```
 
 ### Concrete Service Example
@@ -411,19 +400,23 @@ export class TransactionService {
 export const transactionService = new TransactionService();
 ```
 
-**Usage pattern in services:**
+**Usage pattern in services** (`src/utils/tx-scope.ts`):
 ```typescript
-const entity = await transactionService.execute(async (tx) => {
-  this.repository.setPrismaClient(tx);    // Inject transactional client
-  // ... all DB operations use tx
-  return this.repository.create(data);
-});
-this.repository.resetPrismaClient();      // Reset to default singleton
+const entity = await transactionService.execute((tx) =>
+  runWithTx(tx, [this.repository, otherRepository], async () => {
+    // Only the repositories listed above use tx, and only inside this block
+    // (the binding follows its awaits, other requests never see it)
+    return this.repository.create(data);
+  })
+);
+// Back here every repository is on its own client again, whether the block returned or threw
 ```
 
 - Auto-commits on success, auto-rolls back on error
 - 10-second timeout prevents long-running transactions
-- `isTransactionInProgress` flag warns against nesting
+- Binding is per repository instance and explicit; scopes nest (an inner one overrides the repositories it lists)
+- Start nothing inside the block that outlives the transaction (timer, fire-and-forget promise): it would inherit the binding and run on a closed transaction
+- Do cache flushes after the commit, and don't wrap reads in a transaction when the write they lead to opens its own
 
 ---
 
@@ -783,18 +776,16 @@ app.use('/liquidations', liquidationsRoutes);
 
 4. BASE SERVICE (crudBase.service.ts):
    a. validateInput(data, categoryCreateSchema) → Zod validates name/description
-   b. transactionService.execute(async (tx) => {
-        repository.setPrismaClient(tx);
+   b. transactionClient.$transaction((tx) => runWithTx(tx, [repository], async () => {
         exists = await repository.existsByName("DeFi");  → false
         return repository.create({ name: "DeFi", description: "..." });
-      })
-   c. repository.resetPrismaClient();
-   d. cacheService.getOrSet("category:42", ..., 300);   → cache new entity
-   e. cacheService.invalidateByPattern("category*");     → clear list caches
+      }))
+   c. cacheService.getOrSet("category:42", ..., 300);   → cache new entity
+   d. cacheService.invalidateByPattern("category*");     → clear list caches
 
 5. REPOSITORY (prisma.category.repository.ts):
    executeWithErrorHandling(
-     async () => tx.category.create({ data: { name: "DeFi", description: "..." } }),
+     async () => this.prismaClient.category.create({ data: { name: "DeFi", description: "..." } }),  // prismaClient = tx here
      'creating category',
      { name: "DeFi" }
    )
