@@ -12,6 +12,7 @@ import {
   ReadListError
 } from '../../errors/readlist.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { truncateToLength } from '../../utils/truncate';
 import { chunkArray } from '../../utils/chunk';
 import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
 import {
@@ -294,7 +295,7 @@ export class ReadListService extends BaseService<
   /**
    * First of "<name> (Copy)", "<name> (Copy 2)", "<name> (Copy 3)"... that the user does not
    * already have (names are unique per user), so copying a list twice does not answer 409.
-   * The base name is trimmed to keep the result within the name length limit. When
+   * The base name is trimmed (on whole characters) to keep the result within the name length limit. When
    * MAX_COPY_NAME_TRIES names are taken, returns the first one: create then answers
    * alreadyExists as it always did.
    */
@@ -302,7 +303,7 @@ export class ReadListService extends BaseService<
     let first = '';
     for (let n = 1; n <= MAX_COPY_NAME_TRIES; n++) {
       const suffix = n === 1 ? ' (Copy)' : ` (Copy ${n})`;
-      const candidate = `${name.slice(0, READ_LIST_NAME_MAX - suffix.length)}${suffix}`;
+      const candidate = `${truncateToLength(name, READ_LIST_NAME_MAX - suffix.length)}${suffix}`;
       if (n === 1) first = candidate;
       if (!await this.repository.existsByNameAndUser(candidate, userId)) {
         return candidate;

@@ -85,6 +85,31 @@ describe('ReadListService.copyReadList name', () => {
     expect(readListCreateSchema.safeParse({ name, userId: 99 }).success).toBe(true);
   });
 
+  it('trims on whole characters: an emoji straddling the cut is dropped, not split', async () => {
+    // 7 = ' (Copy)'.length: the cut falls between the two UTF-16 halves of the first emoji
+    const emoji = '😀';
+    const long = `${'x'.repeat(READ_LIST_NAME_MAX - 8)}${emoji}${emoji}`;
+    expect(long.length).toBeLessThanOrEqual(READ_LIST_NAME_MAX);
+    const { service, internals } = makeService(long, []);
+
+    await service.copyReadList(1, 99);
+
+    const name = createdName(internals);
+    expect(name).toBe(`${'x'.repeat(READ_LIST_NAME_MAX - 8)} (Copy)`);
+    expect(Buffer.from(name, 'utf8').toString('utf8')).toBe(name); // no lone surrogate
+    expect(name.length).toBeLessThanOrEqual(READ_LIST_NAME_MAX);
+    expect(readListCreateSchema.safeParse({ name, userId: 99 }).success).toBe(true);
+  });
+
+  it('keeps an emoji that fits entirely before the cut', async () => {
+    const long = `${'x'.repeat(READ_LIST_NAME_MAX - 9)}😀😀`;
+    const { service, internals } = makeService(long, []);
+
+    await service.copyReadList(1, 99);
+
+    expect(createdName(internals)).toBe(`${'x'.repeat(READ_LIST_NAME_MAX - 9)}😀 (Copy)`);
+  });
+
   it('gives up after 50 names and lets create answer alreadyExists with the first one', async () => {
     const taken = ['Guides (Copy)', ...Array.from({ length: 49 }, (_, i) => `Guides (Copy ${i + 2})`)];
     const { service, internals } = makeService('Guides', taken);

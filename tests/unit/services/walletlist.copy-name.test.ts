@@ -83,6 +83,31 @@ describe('WalletListService.copyWalletList name', () => {
     expect(walletListCreateSchema.safeParse({ name, userId: 99 }).success).toBe(true);
   });
 
+  it('trims on whole characters: an emoji straddling the cut is dropped, not split', async () => {
+    // 7 = ' (Copy)'.length: the cut falls between the two UTF-16 halves of the first emoji
+    const emoji = '😀';
+    const long = `${'x'.repeat(WALLET_LIST_NAME_MAX - 8)}${emoji}${emoji}`;
+    expect(long.length).toBeLessThanOrEqual(WALLET_LIST_NAME_MAX);
+    const { service, internals } = makeService(long, []);
+
+    await service.copyWalletList(1, 99);
+
+    const name = createdName(internals);
+    expect(name).toBe(`${'x'.repeat(WALLET_LIST_NAME_MAX - 8)} (Copy)`);
+    expect(Buffer.from(name, 'utf8').toString('utf8')).toBe(name); // no lone surrogate
+    expect(name.length).toBeLessThanOrEqual(WALLET_LIST_NAME_MAX);
+    expect(walletListCreateSchema.safeParse({ name, userId: 99 }).success).toBe(true);
+  });
+
+  it('keeps an emoji that fits entirely before the cut', async () => {
+    const long = `${'x'.repeat(WALLET_LIST_NAME_MAX - 9)}😀😀`;
+    const { service, internals } = makeService(long, []);
+
+    await service.copyWalletList(1, 99);
+
+    expect(createdName(internals)).toBe(`${'x'.repeat(WALLET_LIST_NAME_MAX - 9)}😀 (Copy)`);
+  });
+
   it('gives up after 50 names and lets create answer alreadyExists with the first one', async () => {
     const taken = ['Whales (Copy)', ...Array.from({ length: 49 }, (_, i) => `Whales (Copy ${i + 2})`)];
     const { service, internals } = makeService('Whales', taken);
