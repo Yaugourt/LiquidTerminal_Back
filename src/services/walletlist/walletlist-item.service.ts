@@ -11,7 +11,7 @@ import {
   WalletListNotFoundError
 } from '../../errors/walletlist.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { CACHE_PREFIX } from '../../constants/cache.constants';
+import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
 import { 
   walletListItemCreateSchema, 
   walletListItemUpdateSchema, 
@@ -237,13 +237,24 @@ export class WalletListItemService extends BaseService<
 
   /**
    * Invalide le cache spécifique aux wallet list items
+   * Wallet list details (items[]), my-lists and public lists embed the items and
+   * itemsCount, so they are flushed too, like the read list summaries.
    * @param walletListId ID de la wallet list
    */
   protected async invalidateWalletListItemCache(walletListId: number): Promise<void> {
+    const owner = await prisma.walletList.findUnique({
+      where: { id: walletListId },
+      select: { userId: true }
+    });
     await Promise.all([
       cacheService.invalidateByPattern(`${this.cacheKeyPrefix}:list:${walletListId}:*`),
-      cacheService.invalidateByPattern(`${CACHE_PREFIX.READLIST}:wallet:${walletListId}:*`), // Cache de la wallet list parent
-      cacheService.invalidateByPattern(`${CACHE_PREFIX.READLIST}:wallet:user:*`) // Cache des listes utilisateur
+      cacheService.invalidate(CACHE_KEYS.WALLETLIST(walletListId)),
+      // Owner unknown (list just deleted): flush every user's list rather than keep a stale one
+      owner
+        ? cacheService.invalidate(CACHE_KEYS.WALLETLIST_BY_USER(owner.userId))
+        : cacheService.invalidateByPattern(`${CACHE_PREFIX.WALLETLIST}:user:*`),
+      cacheService.invalidateByPattern(`${CACHE_PREFIX.WALLETLIST}:public:*`),
+      cacheService.invalidateByPattern(`${CACHE_PREFIX.WALLETLIST}:list:*`)
     ]);
   }
 
