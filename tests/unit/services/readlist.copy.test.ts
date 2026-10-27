@@ -40,7 +40,11 @@ describe('ReadListService.copyReadList', () => {
       .fn()
       .mockResolvedValueOnce(original)
       .mockResolvedValueOnce({ id: 2, items: [] });
-    const stub = { repository: { findById }, create: jest.fn().mockResolvedValue({ id: 2 }) };
+    const stub = {
+      repository: { findById },
+      create: jest.fn().mockResolvedValue({ id: 2 }),
+      firstFreeCopyName: jest.fn().mockResolvedValue('Reading (Copy)'),
+    };
 
     const result = await ReadListService.prototype.copyReadList.call(stub, 1, 99);
 
