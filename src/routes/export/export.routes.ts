@@ -277,11 +277,20 @@ router.get(
     let aborted = false;
     let rowCount = 0;
     let upstreamPages = 0;
+    let sourceTotal = null as number | null;
 
     try {
-      const stream = service.streamCsv(dataset, params, columns, () => {
-        upstreamPages += 1;
-      });
+      const stream = service.streamCsv(
+        dataset,
+        params,
+        columns,
+        () => {
+          upstreamPages += 1;
+        },
+        ({ totalCount }) => {
+          sourceTotal = totalCount;
+        }
+      );
 
       for await (const chunk of stream) {
         if (!started) {
@@ -289,6 +298,14 @@ router.get(
           res.setHeader('Content-Type', 'text/csv; charset=utf-8');
           res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
           res.setHeader('Cache-Control', 'no-store');
+          // The file stops at maxRows. When the source already says it holds
+          // more, say so before the body starts: headers cannot change once
+          // rows are flowing, and the client otherwise has a cut-off file that
+          // looks complete.
+          if (sourceTotal !== null && sourceTotal > dataset.maxRows) {
+            res.setHeader('X-Export-Truncated', 'true');
+            res.setHeader('X-Export-Total-Rows', String(sourceTotal));
+          }
         }
         if (!res.write(chunk)) {
           // Back-pressure: wait for the socket before pulling the next page.

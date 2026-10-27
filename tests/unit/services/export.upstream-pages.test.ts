@@ -71,3 +71,45 @@ describe('ExportService.streamCsv upstream page count', () => {
     expect(mockFetchPage).not.toHaveBeenCalled();
   });
 });
+
+describe('ExportService.streamCsv ceiling', () => {
+  const dataset = getExportDataset('perp-fills') as ExportDataset;
+  const small = { ...dataset, maxRows: 7 };
+
+  beforeEach(() => mockFetchPage.mockReset());
+
+  async function run(ds: ExportDataset, onFirstPage?: (i: { totalCount: number | null }) => void) {
+    const gen = ExportService.getInstance().streamCsv(ds, {}, undefined, undefined, onFirstPage);
+    let next = await gen.next();
+    while (!next.done) next = await gen.next();
+    return next.value;
+  }
+
+  it('reports the source total before the first chunk and flags the cut', async () => {
+    mockFetchPage.mockResolvedValue({ ...fullPage(7), hasMore: true, totalCount: 20 });
+    const seen: Array<number | null> = [];
+
+    const result = await run(small, ({ totalCount }) => seen.push(totalCount));
+
+    expect(seen).toEqual([20]);
+    expect(result).toEqual({ rowCount: 7, truncated: true });
+  });
+
+  it('is not truncated when the ceiling lands exactly on the last row', async () => {
+    mockFetchPage.mockResolvedValue({ ...fullPage(7), hasMore: false, totalCount: 7 });
+
+    expect(await run(small)).toEqual({ rowCount: 7, truncated: false });
+  });
+
+  it('is not truncated when the data ends before the ceiling', async () => {
+    mockFetchPage.mockResolvedValue({ ...fullPage(3), hasMore: false, totalCount: 3 });
+
+    expect(await run(small)).toEqual({ rowCount: 3, truncated: false });
+  });
+
+  it('assumes a cut when the source gives no total and the last page was full', async () => {
+    mockFetchPage.mockResolvedValue(fullPage(7));
+
+    expect(await run(small)).toEqual({ rowCount: 7, truncated: true });
+  });
+});

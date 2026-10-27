@@ -102,8 +102,14 @@ export class ExportService {
     params: ExportQueryParams,
     requestedColumns?: string[],
     /** Called after each page fetched from a paid upstream (not local sources). */
-    onUpstreamPage?: () => void
-  ): AsyncGenerator<string, { rowCount: number }, void> {
+    onUpstreamPage?: () => void,
+    /**
+     * Called once, with the source's own row count, after the first page is read
+     * and before the first chunk is yielded — the last moment the route can still
+     * put a header on the response.
+     */
+    onFirstPage?: (info: { totalCount: number | null }) => void
+  ): AsyncGenerator<string, { rowCount: number; truncated: boolean }, void> {
     const frozenParams = freezeWindow(dataset, params);
 
     // Deduplicated and filtered: a repeated column multiplies egress for the
@@ -119,6 +125,9 @@ export class ExportService {
     let headerWritten = false;
     let rowCount = 0;
     let pages = 0;
+    let lastPage: ExportPage | null = null;
+    let lastPageLimit = 0;
+    let drained = false;
 
     while (pages < EXPORT_MAX_PAGES && rowCount < dataset.maxRows) {
       const remaining = dataset.maxRows - rowCount;
@@ -141,13 +150,22 @@ export class ExportService {
 
       pages += 1;
       if (dataset.source !== 'local') onUpstreamPage?.();
-      if (page.rows.length === 0) break;
+      if (pages === 1) onFirstPage?.({ totalCount: page.totalCount });
+      lastPage = page;
+      lastPageLimit = pageLimit;
+      if (page.rows.length === 0) {
+        drained = true;
+        break;
+      }
 
       const flattened = page.rows.map((r) => redactRow(flattenRow(r)));
 
       if (!columns) {
         columns = collectColumns(flattened);
-        if (columns.length === 0) break;
+        if (columns.length === 0) {
+          drained = true;
+          break;
+        }
       }
       if (!headerWritten) {
         headerWritten = true;
@@ -161,13 +179,32 @@ export class ExportService {
       }
 
       // Stop conditions, in the order the source makes them knowable.
-      if (dataset.pagination === 'none') break;
-      if (page.hasMore === false) break;
-      if (page.rows.length < pageLimit) break;
+      if (dataset.pagination === 'none' || page.hasMore === false || page.rows.length < pageLimit) {
+        drained = true;
+        break;
+      }
       pageNumber += 1;
     }
 
-    return { rowCount };
+    // Left through the row or page ceiling rather than the end of the data.
+    // The source's own count settles it when it gives one; otherwise a full
+    // last page that did not say it was the last is taken as "there is more".
+    const truncated =
+      !drained &&
+      lastPage !== null &&
+      (lastPage.totalCount !== null
+        ? lastPage.totalCount > rowCount
+        : lastPage.hasMore !== false && lastPage.rows.length >= lastPageLimit);
+    if (truncated) {
+      logDeduplicator.warn('Export stopped at its ceiling with rows left', {
+        dataset: dataset.id,
+        rows: rowCount,
+        pages,
+        totalCount: lastPage?.totalCount ?? null,
+      });
+    }
+
+    return { rowCount, truncated };
   }
 }
 

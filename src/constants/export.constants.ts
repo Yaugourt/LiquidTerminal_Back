@@ -15,8 +15,11 @@ export const EXPORT_LIMITS = {
 
 /**
  * Hard ceiling on rows in a single export, whatever the dataset asks for.
- * Above this the caller is told to narrow the window rather than served a
- * silently truncated file.
+ * The file stops here. When the source reports a total above it, the response
+ * carries `X-Export-Truncated: true` and `X-Export-Total-Rows`, so the caller
+ * can tell the file is cut and narrow the window. A source that reports no
+ * total cannot be flagged up front (the headers are out before the last page);
+ * the service logs that case.
  */
 export const EXPORT_MAX_ROWS = 50_000;
 

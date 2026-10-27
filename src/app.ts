@@ -122,8 +122,9 @@ app.use(cors({
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
-  // Readable by the front, which backs off for the time a 429 or 503 names.
-  exposedHeaders: ['Retry-After'],
+  // Readable by the front, which backs off for the time a 429 or 503 names, and
+  // which tells a CSV cut at the export row ceiling from a complete one.
+  exposedHeaders: ['Retry-After', 'X-Export-Truncated', 'X-Export-Total-Rows'],
   credentials: true
 }));
 
