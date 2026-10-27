@@ -378,7 +378,10 @@ export class ReadListItemService extends BaseService<
     if (!await readListRepository.isOwner(item.readListId, userId)) {
       throw new ReadListPermissionError();
     }
-    return this.update(itemId, data);
+    const result = await this.update(itemId, data);
+    // The list detail embeds notes / isRead, so it must be flushed with the summaries
+    await this.invalidateListSummaryCaches(item.readListId, userId);
+    return result;
   }
 
   /**
