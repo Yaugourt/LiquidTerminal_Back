@@ -1,9 +1,10 @@
 /**
  * /names/mintpass makes api.hlnames.xyz sign with our partner key, and
  * /names/forget drops our cached name of any address: both are POSTs anyone
- * can script, so each has a tight per-IP limiter on top of the general one.
- * A real mint asks for 1-2 passes and sends one forget, a wallet confirmation
- * apart. Real limiters, Redis mocked as fixed-window counters, HL Names mocked.
+ * can script, so they share one tight per-IP limiter (namesWriteRateLimiter,
+ * 3 a second and 20 a minute) on top of the general one. A real mint asks for
+ * 1-2 passes and sends one forget, a wallet confirmation apart. Real limiters,
+ * Redis mocked as fixed-window counters, HL Names mocked.
  */
 import express from 'express';
 import request from 'supertest';
@@ -63,7 +64,7 @@ function buildApp() {
 const mint = (app: express.Express, label = 'alice') => request(app).post(`/names/mintpass/${label}`).send({ token: 'native' });
 const forget = (app: express.Express) => request(app).post(`/names/forget/${ADDR}`).send({});
 
-describe('name mint pass and cache drop limits', () => {
+describe('name write limit (mint passes and cache drops)', () => {
   let now = Date.parse('2026-10-26T10:00:00.000Z');
 
   beforeEach(() => {
@@ -79,29 +80,40 @@ describe('name mint pass and cache drop limits', () => {
     jest.restoreAllMocks();
   });
 
-  it('refuses a third mint pass in one second with 429 and Retry-After, without calling the provider', async () => {
+  it('refuses a fourth mint pass in one second with 429 and Retry-After, without calling the provider', async () => {
     const app = buildApp();
-    expect((await mint(app)).status).toBe(200);
-    expect((await mint(app)).status).toBe(200);
+    for (let i = 0; i < 3; i++) expect((await mint(app)).status).toBe(200);
     const limited = await mint(app);
     expect(limited.status).toBe(429);
     expect(limited.headers['retry-after']).toBe('1');
-    expect(hlNames.mintPass).toHaveBeenCalledTimes(2);
+    expect(hlNames.mintPass).toHaveBeenCalledTimes(3);
     // The next second is a fresh window.
     now += 1000;
     expect((await mint(app)).status).toBe(200);
   });
 
-  it('allows 20 mint passes a minute per IP, then refuses until the minute rolls over', async () => {
+  it('allows 20 name writes a minute per IP, then refuses until the minute rolls over', async () => {
     const app = buildApp();
     const statuses: number[] = [];
     for (let i = 0; i < 21; i++) {
-      statuses.push((await mint(app)).status);
+      statuses.push((i % 3 === 2 ? await forget(app) : await mint(app)).status);
       now += 1000;
     }
     expect(statuses.slice(0, 20).every((s) => s === 200)).toBe(true);
     expect(statuses[20]).toBe(429);
-    expect(hlNames.mintPass).toHaveBeenCalledTimes(20);
+    expect(hlNames.mintPass.mock.calls.length + hlNames.forget.mock.calls.length).toBe(20);
+    now = Math.ceil((now + 1) / 60_000) * 60_000;
+    expect((await mint(app)).status).toBe(200);
+  });
+
+  it('counts mint passes and cache drops together', async () => {
+    const app = buildApp();
+    expect((await mint(app)).status).toBe(200);
+    expect((await mint(app)).status).toBe(200);
+    expect((await forget(app)).status).toBe(200);
+    const limited = await forget(app);
+    expect(limited.status).toBe(429);
+    expect(hlNames.forget).toHaveBeenCalledTimes(1);
   });
 
   it('fits a USDC mint (2 passes, then 1 cache drop) for several people behind one IP', async () => {
@@ -116,32 +128,10 @@ describe('name mint pass and cache drop limits', () => {
     }
   });
 
-  it('refuses a third cache drop in one second and the 11th in a minute', async () => {
+  it('leaves the read routes alone once writes are refused', async () => {
     const app = buildApp();
-    expect((await forget(app)).status).toBe(200);
-    expect((await forget(app)).status).toBe(200);
-    const limited = await forget(app);
-    expect(limited.status).toBe(429);
-    expect(limited.headers['retry-after']).toBe('1');
-    expect(hlNames.forget).toHaveBeenCalledTimes(2);
-
-    counters.clear();
-    now = Math.ceil((now + 1) / 60_000) * 60_000;
-    const statuses: number[] = [];
-    for (let i = 0; i < 11; i++) {
-      statuses.push((await forget(app)).status);
-      now += 1000;
-    }
-    expect(statuses.slice(0, 10).every((s) => s === 200)).toBe(true);
-    expect(statuses[10]).toBe(429);
-  });
-
-  it('keeps the two budgets apart, and leaves the read routes alone', async () => {
-    const app = buildApp();
-    await mint(app);
-    await mint(app);
-    expect((await mint(app)).status).toBe(429);
-    expect((await forget(app)).status).toBe(200);
+    for (let i = 0; i < 3; i++) await mint(app);
+    expect((await forget(app)).status).toBe(429);
     hlNames.profile.mockResolvedValue({ address: ADDR, name: null });
     for (let i = 0; i < 6; i++) {
       expect((await request(app).get(`/names/profile/${ADDR}`)).status).toBe(200);

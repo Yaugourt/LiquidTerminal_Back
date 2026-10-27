@@ -1,6 +1,6 @@
 import express, { Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
-import { marketRateLimiter, nameCacheDropRateLimiter, nameMintPassRateLimiter } from '../../middleware/apiRateLimiter';
+import { addressLookupRateLimiter, marketRateLimiter, namesWriteRateLimiter } from '../../middleware/apiRateLimiter';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { HlNamesClient, HL_NAME_RE } from '../../clients/hlnames/hlnames.client';
 
@@ -58,12 +58,34 @@ router.get('/profile/:address', (async (req: Request, res: Response) => {
   }
 }) as RequestHandler);
 
+/** GET /names/owned/:address → [{ name, expiry }] names the address holds */
+router.get('/owned/:address', addressLookupRateLimiter, (async (req: Request, res: Response) => {
+  const address = String(req.params.address);
+  if (!ADDRESS.test(address)) return res.status(400).json({ success: false, error: 'Not an address', code: 'VALIDATION_ERROR' });
+  try {
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ success: true, data: await names.ownedNames(address) });
+  } catch (error) {
+    unavailable(res, 'names/owned failed', error);
+  }
+}) as RequestHandler);
+
+/** GET /names/card-template → { svg } the NFT card the mint page fills with a name */
+router.get('/card-template', (async (_req: Request, res: Response) => {
+  try {
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({ success: true, data: { svg: await names.cardTemplate() } });
+  } catch (error) {
+    unavailable(res, 'names/card-template failed', error);
+  }
+}) as RequestHandler);
+
 /** A label as the Minter takes it: already ENS-normalized by the client, 1 to 30 characters, no dot or space. */
 const LABEL = /^[^\s./?#%]{1,30}$/u;
 const mintPassSchema = z.object({ token: z.enum(['native', 'usdc']).default('native') }).strict();
 
 /** POST /names/mintpass/:label { token } → signed Minter arguments, valid about 60s */
-router.post('/mintpass/:label', nameMintPassRateLimiter, (async (req: Request, res: Response) => {
+router.post('/mintpass/:label', namesWriteRateLimiter, (async (req: Request, res: Response) => {
   const label = String(req.params.label);
   const body = mintPassSchema.safeParse(req.body ?? {});
   if (!LABEL.test(label) || [...label].length > 30 || !body.success) {
@@ -78,7 +100,7 @@ router.post('/mintpass/:label', nameMintPassRateLimiter, (async (req: Request, r
 }) as RequestHandler);
 
 /** POST /names/forget/:address → drops cached name data so a fresh mint shows up */
-router.post('/forget/:address', nameCacheDropRateLimiter, (async (req: Request, res: Response) => {
+router.post('/forget/:address', namesWriteRateLimiter, (async (req: Request, res: Response) => {
   const address = String(req.params.address);
   if (!ADDRESS.test(address)) return res.status(400).json({ success: false, error: 'Not an address', code: 'VALIDATION_ERROR' });
   await names.forget(address).catch(() => undefined);
