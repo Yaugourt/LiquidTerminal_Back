@@ -214,8 +214,27 @@ export class HlNamesClient {
       method: 'POST',
       body: JSON.stringify(token === 'usdc' ? { token: HLNAMES_USDC } : {}),
     });
-    if (status !== 200 || !body?.sig || !body.amountRequired) throw new Error(`hlnames mint pass status ${status}`);
-    return body;
+    if (status !== 200 || !body) throw new Error(`hlnames mint pass status ${status}`);
+    // The pass goes straight into a user's wallet: forward only a well-formed
+    // one, for the label and the token that were asked for.
+    const expectedToken = token === 'usdc' ? HLNAMES_USDC.toLowerCase() : 'native';
+    const wellFormed =
+      body.label === label &&
+      typeof body.token === 'string' &&
+      body.token.toLowerCase() === expectedToken &&
+      typeof body.sig === 'string' &&
+      /^0x[0-9a-fA-F]{2,1024}$/.test(body.sig) &&
+      Number.isSafeInteger(body.timestamp) &&
+      typeof body.amountRequired === 'string' &&
+      /^[1-9][0-9]{0,29}$/.test(body.amountRequired);
+    if (!wellFormed) throw new Error('hlnames mint pass malformed');
+    return {
+      label: body.label,
+      sig: body.sig,
+      timestamp: body.timestamp,
+      token: body.token,
+      amountRequired: body.amountRequired,
+    };
   }
 
   /** Drops the cached name and profile of an address (after a mint, so the new name shows up). */

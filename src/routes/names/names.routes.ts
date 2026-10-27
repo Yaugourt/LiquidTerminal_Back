@@ -1,6 +1,6 @@
 import express, { Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
-import { marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { marketRateLimiter, namesWriteRateLimiter } from '../../middleware/apiRateLimiter';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { HlNamesClient, HL_NAME_RE } from '../../clients/hlnames/hlnames.client';
 
@@ -63,7 +63,7 @@ const LABEL = /^[^\s./?#%]{1,30}$/u;
 const mintPassSchema = z.object({ token: z.enum(['native', 'usdc']).default('native') }).strict();
 
 /** POST /names/mintpass/:label { token } → signed Minter arguments, valid about 60s */
-router.post('/mintpass/:label', (async (req: Request, res: Response) => {
+router.post('/mintpass/:label', namesWriteRateLimiter, (async (req: Request, res: Response) => {
   const label = String(req.params.label);
   const body = mintPassSchema.safeParse(req.body ?? {});
   if (!LABEL.test(label) || [...label].length > 30 || !body.success) {
@@ -78,7 +78,7 @@ router.post('/mintpass/:label', (async (req: Request, res: Response) => {
 }) as RequestHandler);
 
 /** POST /names/forget/:address → drops cached name data so a fresh mint shows up */
-router.post('/forget/:address', (async (req: Request, res: Response) => {
+router.post('/forget/:address', namesWriteRateLimiter, (async (req: Request, res: Response) => {
   const address = String(req.params.address);
   if (!ADDRESS.test(address)) return res.status(400).json({ success: false, error: 'Not an address', code: 'VALIDATION_ERROR' });
   await names.forget(address).catch(() => undefined);

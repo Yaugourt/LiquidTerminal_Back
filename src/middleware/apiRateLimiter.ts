@@ -318,3 +318,16 @@ export const accountRateLimiter = createIpLimiter(
   { BURST: { WINDOW: 1, MAX_REQUESTS: 60 }, MINUTE: { WINDOW: 60, MAX_REQUESTS: 1200 } },
   'account'
 );
+
+/**
+ * Hyperliquid Names writes: mint passes (each one spends a signature from our
+ * Builder Program key) and cache purges (each one makes the next profile view
+ * cost 3 upstream calls). A mint takes 1 or 2 passes and 1 purge, so 3 a
+ * second and 20 a minute per IP cover a user retrying a few mints and stop a
+ * script from farming either.
+ */
+export const namesWriteRateLimiter = createIpLimiter(
+  'hln',
+  { BURST: { WINDOW: 1, MAX_REQUESTS: 3 }, MINUTE: { WINDOW: 60, MAX_REQUESTS: 20 } },
+  'name write'
+);
