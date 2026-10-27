@@ -1,10 +1,13 @@
 import { z } from 'zod';
 
+// Longest wallet list name (the copy name of a long list is trimmed to fit)
+export const WALLET_LIST_NAME_MAX = 255;
+
 // Schéma pour la création de WalletList
 export const walletListCreateSchema = z.object({
   name: z.string()
     .min(2, 'Le nom doit contenir au moins 2 caractères')
-    .max(255, 'Le nom ne doit pas dépasser 255 caractères')
+    .max(WALLET_LIST_NAME_MAX, 'Le nom ne doit pas dépasser 255 caractères')
     .trim(),
   description: z.string()
     .max(500, 'La description ne doit pas dépasser 500 caractères')
@@ -18,7 +21,7 @@ export const walletListCreateSchema = z.object({
 export const walletListUpdateSchema = z.object({
   name: z.string()
     .min(2, 'Le nom doit contenir au moins 2 caractères')
-    .max(255, 'Le nom ne doit pas dépasser 255 caractères')
+    .max(WALLET_LIST_NAME_MAX, 'Le nom ne doit pas dépasser 255 caractères')
     .trim()
     .optional(),
   description: z.string()

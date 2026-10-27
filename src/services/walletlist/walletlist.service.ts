@@ -16,7 +16,8 @@ import { CACHE_PREFIX, CACHE_KEYS } from '../../constants/cache.constants';
 import {
   walletListCreateSchema,
   walletListUpdateSchema,
-  walletListQuerySchema
+  walletListQuerySchema,
+  WALLET_LIST_NAME_MAX
 } from '../../schemas/walletlist.schema';
 import { BaseService } from '../../core/crudBase.service';
 import { cacheService } from '../../core/cache.service';
@@ -24,6 +25,9 @@ import { CACHE_TTL } from '../../constants/cache.constants';
 import { PrismaWalletListRepository } from '../../repositories/prisma/prisma.walletlist.repository';
 import { WalletListItemService } from './walletlist-item.service';
 import { xpService } from '../xp/xp.service';
+
+// Copying the same list again names it "(Copy 2)", "(Copy 3)"...: how many names are tried before giving up
+const MAX_COPY_NAME_TRIES = 50;
 
 // Type pour les paramètres de requête
 type WalletListQueryParams = {
@@ -278,6 +282,26 @@ export class WalletListService extends BaseService<
   }
 
   /**
+   * First of "<name> (Copy)", "<name> (Copy 2)", "<name> (Copy 3)"... that the user does not
+   * already have (names are unique per user), so copying a list twice does not answer 409.
+   * The base name is trimmed to keep the result within the name length limit. When
+   * MAX_COPY_NAME_TRIES names are taken, returns the first one: create then answers
+   * alreadyExists as it always did.
+   */
+  private async firstFreeCopyName(name: string, userId: number): Promise<string> {
+    let first = '';
+    for (let n = 1; n <= MAX_COPY_NAME_TRIES; n++) {
+      const suffix = n === 1 ? ' (Copy)' : ` (Copy ${n})`;
+      const candidate = `${name.slice(0, WALLET_LIST_NAME_MAX - suffix.length)}${suffix}`;
+      if (n === 1) first = candidate;
+      if (!await this.repository.existsByNameAndUser(candidate, userId)) {
+        return candidate;
+      }
+    }
+    return first;
+  }
+
+  /**
    * Copie une wallet list publique dans les wallet lists de l'utilisateur
    * @param walletListId ID de la wallet list à copier
    * @param userId ID de l'utilisateur qui copie
@@ -304,7 +328,7 @@ export class WalletListService extends BaseService<
       }
 
       // 4. Créer une nouvelle wallet list avec un nom unique
-      const newName = `${originalWalletList.name} (Copy)`;
+      const newName = await this.firstFreeCopyName(originalWalletList.name, userId);
       const newDescription = originalWalletList.description ?
         `${originalWalletList.description}\n\nCopied from: ${originalWalletList.creator.name}` :
         `Copied from: ${originalWalletList.creator.name}`;
