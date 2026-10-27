@@ -9,7 +9,7 @@ export class PrismaProjectRepository extends BasePrismaRepository implements Pro
   constructor() {
     super();
     // Project lives in the Content DB after the multi-DB split.
-    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient, true);
+    this.defaultPrismaClient = prismaContent as unknown as typeof this.defaultPrismaClient;
   }
 
   // Helper pour les includes répétitifs

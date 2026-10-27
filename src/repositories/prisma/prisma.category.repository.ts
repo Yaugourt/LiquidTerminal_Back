@@ -8,7 +8,7 @@ export class PrismaCategoryRepository extends BasePrismaRepository implements Ca
   constructor() {
     super();
     // Category lives in the Content DB after the multi-DB split.
-    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient, true);
+    this.defaultPrismaClient = prismaContent as unknown as typeof this.defaultPrismaClient;
   }
 
   async findAll(params: {

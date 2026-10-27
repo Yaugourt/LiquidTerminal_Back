@@ -286,9 +286,9 @@ export class PrismaReadListItemRepository extends BasePrismaRepository implement
   async deleteByResourceId(resourceId: number): Promise<number> {
     return this.executeWithErrorHandling(
       async () => {
-        // Always the default client: this singleton's live client is swapped to a
-        // transaction while ReadListItemService runs one, and this cleanup runs on
-        // behalf of another request (a resource deletion), outside any transaction.
+        // Always the default client, never a transaction this repository may be bound to
+        // (see runWithTx): this cleanup runs on behalf of a resource deletion, outside
+        // any read list transaction.
         const { count } = await this.defaultPrismaClient.readListItem.deleteMany({
           where: { resourceId }
         });

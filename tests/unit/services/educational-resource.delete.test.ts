@@ -32,8 +32,6 @@ jest.mock('../../../src/core/cache.service', () => ({
 }));
 jest.mock('../../../src/repositories', () => ({
   educationalResourceRepository: {
-    setPrismaClient: jest.fn(),
-    resetPrismaClient: jest.fn(),
     findById: jest.fn(),
     delete: jest.fn(),
   },

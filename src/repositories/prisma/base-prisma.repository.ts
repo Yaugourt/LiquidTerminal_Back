@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { prisma } from '../../core/prisma.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { BasePagination } from '../../types/common.types';
+import { scopedClient } from '../../utils/tx-scope';
 
 export type PrismaTransactionClient = Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
 
@@ -36,15 +37,23 @@ export type ExecuteWithErrorHandlingOptions = {
 };
 
 export abstract class BasePrismaRepository {
-  protected prismaClient: PrismaClient | PrismaTransactionClient = prisma;
   /**
-   * The repository's persistent default client. Set by Content/Telegram repos in their
-   * constructor (via setPrismaClient). `resetPrismaClient()` returns the live client
-   * here, NOT to the Core `prisma` singleton — otherwise after a transactional create
-   * the repo would silently switch from Content to Core and subsequent reads would
-   * miss freshly inserted rows. Initial value is `prisma` so Core repos behave as before.
+   * The repository's own database. Core by default; Content/Telegram/Historical
+   * repos assign theirs in their constructor.
    */
   protected defaultPrismaClient: PrismaClient | PrismaTransactionClient = prisma;
+
+  /**
+   * The client every query goes through: the transaction this repository is bound
+   * to in the current async context (see runWithTx), else its own database.
+   * Resolved on each access, never stored: the repository is a singleton shared
+   * by all requests, and a client kept on it would leak to concurrent requests
+   * and outlive its transaction. Read-only on purpose: subclasses must not
+   * declare a `prismaClient` field, it would shadow this getter.
+   */
+  protected get prismaClient(): PrismaClient | PrismaTransactionClient {
+    return scopedClient<PrismaClient | PrismaTransactionClient>(this) ?? this.defaultPrismaClient;
+  }
 
   // Projection used to enrich RELATIONS (readlist/walletlist creator, item owner).
   // Public by construction — these objects reach unauthenticated list endpoints —
@@ -58,24 +67,6 @@ export abstract class BasePrismaRepository {
   protected static readonly CreatorInclude = {
     creator: { select: BasePrismaRepository.UserSelect }
   } as const;
-
-  /**
-   * Updates the live client. If `markAsDefault` is true (used by Content/Telegram
-   * repo constructors and never by transactional code paths), also updates the
-   * persistent default that `resetPrismaClient` returns to.
-   */
-  setPrismaClient(prismaClient: PrismaClient | PrismaTransactionClient, markAsDefault = false): void {
-    this.prismaClient = prismaClient;
-    if (markAsDefault) {
-      this.defaultPrismaClient = prismaClient;
-    }
-    logDeduplicator.info(`Prisma client updated in ${this.constructor.name}`);
-  }
-
-  resetPrismaClient(): void {
-    this.prismaClient = this.defaultPrismaClient;
-    logDeduplicator.info(`Prisma client reset to default in ${this.constructor.name}`);
-  }
 
   // Helper pour try/catch avec logging
   protected async executeWithErrorHandling<T>(

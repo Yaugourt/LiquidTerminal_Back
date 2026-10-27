@@ -24,6 +24,7 @@ import { cacheService } from '../../core/cache.service';
 import { transactionService } from '../../core/transaction.service';
 import { CACHE_TTL } from '../../constants/cache.constants';
 import { xpService } from '../xp/xp.service';
+import { runWithTx } from '../../utils/tx-scope';
 
 // Type pour les paramètres de requête
 type ReadListItemQueryParams = {
@@ -111,29 +112,22 @@ export class ReadListItemService extends BaseService<
       throw new ReadListResourceNotFoundError();
     }
 
-    try {
-      return await transactionService.execute(async (tx) => {
-        this.repository.setPrismaClient(tx);
-        readListRepository.setPrismaClient(tx);
+    const item = await transactionService.execute((tx) => runWithTx(tx, [this.repository, readListRepository], async () => {
+      const readList = await readListRepository.findById(data.readListId!);
+      if (!readList) {
+        throw new ReadListNotFoundError();
+      }
 
-        const readList = await readListRepository.findById(data.readListId!);
-        if (!readList) {
-          throw new ReadListNotFoundError();
-        }
+      // Adding an item mutates the list — owner only, not "anyone who can see it".
+      if (!await readListRepository.isOwner(data.readListId!, userId)) {
+        throw new ReadListPermissionError();
+      }
 
-        // Adding an item mutates the list — owner only, not "anyone who can see it".
-        if (!await readListRepository.isOwner(data.readListId!, userId)) {
-          throw new ReadListPermissionError();
-        }
-
-        const item = await this.create(data);
-        await this.invalidateListSummaryCaches(data.readListId!, userId);
-        return item;
-      });
-    } finally {
-      this.repository.resetPrismaClient();
-      readListRepository.resetPrismaClient();
-    }
+      return this.create(data);
+    }));
+    // After the commit: a flush inside the transaction lets a concurrent read refill the cache with the old state
+    await this.invalidateListSummaryCaches(data.readListId!, userId);
+    return item;
   }
 
   /**
@@ -190,10 +184,7 @@ export class ReadListItemService extends BaseService<
    */
   async toggleReadStatus(itemId: number, userId: number, isRead: boolean): Promise<{ item: ReadListItemResponse; xpGranted: number }> {
     try {
-      const result = await transactionService.execute(async (tx) => {
-        this.repository.setPrismaClient(tx);
-        readListRepository.setPrismaClient(tx);
-
+      const result = await transactionService.execute((tx) => runWithTx(tx, [this.repository, readListRepository], async () => {
         // Vérifier que l'item existe
         const item = await this.repository.findById(itemId);
         if (!item) {
@@ -208,12 +199,12 @@ export class ReadListItemService extends BaseService<
         // Mettre à jour le statut
         const updatedItem = await this.repository.toggleReadStatus(itemId, isRead);
 
-        // Invalider les caches (items + summaries qui portent readCount)
-        await this.invalidateReadListItemCache(itemId, item.readListId);
-        await this.invalidateListSummaryCaches(item.readListId, userId);
+        return { updatedItem, wasUnread: !item.isRead, readListId: item.readListId };
+      }));
 
-        return { updatedItem, wasUnread: !item.isRead };
-      });
+      // Invalider les caches (items + summaries qui portent readCount), une fois la transaction validée
+      await this.invalidateReadListItemCache(itemId, result.readListId);
+      await this.invalidateListSummaryCaches(result.readListId, userId);
 
       let xpGranted = 0;
 
@@ -241,9 +232,6 @@ export class ReadListItemService extends BaseService<
       return { item: result.updatedItem, xpGranted };
     } catch (error) {
       throw error;
-    } finally {
-      this.repository.resetPrismaClient();
-      readListRepository.resetPrismaClient();
     }
   }
 
@@ -259,10 +247,7 @@ export class ReadListItemService extends BaseService<
     itemOrders: { id: number; order: number }[]
   ): Promise<void> {
     try {
-      return await transactionService.execute(async (tx) => {
-        this.repository.setPrismaClient(tx);
-        readListRepository.setPrismaClient(tx);
-
+      await transactionService.execute((tx) => runWithTx(tx, [this.repository, readListRepository], async () => {
         // Reordering mutates the list — owner only.
         if (!await readListRepository.isOwner(readListId, userId)) {
           throw new ReadListPermissionError();
@@ -270,21 +255,18 @@ export class ReadListItemService extends BaseService<
 
         // Réorganiser les items
         await this.repository.reorderItems(readListId, itemOrders);
+      }));
 
-        // Invalider les caches
-        await this.invalidateReadListItemsCache(readListId);
+      // Invalider les caches, une fois la transaction validée
+      await this.invalidateReadListItemsCache(readListId);
 
-        logDeduplicator.info('Read list items reordered successfully', {
-          readListId,
-          userId,
-          itemsCount: itemOrders.length
-        });
+      logDeduplicator.info('Read list items reordered successfully', {
+        readListId,
+        userId,
+        itemsCount: itemOrders.length
       });
     } catch (error) {
       throw error;
-    } finally {
-      this.repository.resetPrismaClient();
-      readListRepository.resetPrismaClient();
     }
   }
 
@@ -295,10 +277,7 @@ export class ReadListItemService extends BaseService<
    */
   async deleteWithPermission(itemId: number, userId: number): Promise<void> {
     try {
-      return await transactionService.execute(async (tx) => {
-        this.repository.setPrismaClient(tx);
-        readListRepository.setPrismaClient(tx);
-
+      const readListId = await transactionService.execute((tx) => runWithTx(tx, [this.repository, readListRepository], async () => {
         // Vérifier que l'item existe
         const item = await this.repository.findById(itemId);
         if (!item) {
@@ -312,15 +291,14 @@ export class ReadListItemService extends BaseService<
 
         // Supprimer l'item
         await this.delete(itemId);
-        await this.invalidateListSummaryCaches(item.readListId, userId);
+        return item.readListId;
+      }));
 
-        logDeduplicator.info('Read list item deleted successfully', { itemId, userId });
-      });
+      await this.invalidateListSummaryCaches(readListId, userId);
+
+      logDeduplicator.info('Read list item deleted successfully', { itemId, userId });
     } catch (error) {
       throw error;
-    } finally {
-      this.repository.resetPrismaClient();
-      readListRepository.resetPrismaClient();
     }
   }
 

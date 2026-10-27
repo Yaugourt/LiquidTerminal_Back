@@ -1,16 +1,17 @@
 import { PrismaClient, Prisma } from '@prisma/client';
 import { prisma } from '../core/prisma.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
+import { scopedClient } from '../utils/tx-scope';
 
 export class WalletRepository {
-  private prismaClient: PrismaClient | Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'> = prisma;
-
-  setPrismaClient(client: PrismaClient | Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>): void {
-    this.prismaClient = client;
-  }
-
-  resetPrismaClient(): void {
-    this.prismaClient = prisma;
+  /**
+   * The transaction this repository is bound to in the current async context
+   * (see runWithTx), else the Core client. Resolved on each access, never stored:
+   * the repository is a singleton shared by all requests, and a client kept on
+   * it would leak to concurrent requests and outlive its transaction.
+   */
+  private get prismaClient(): PrismaClient | Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'> {
+    return scopedClient<PrismaClient | Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>>(this) ?? prisma;
   }
 
   async findById(id: number) {

@@ -159,14 +159,20 @@ export class PrismaHistoricalLiquidationRepository
   extends BasePrismaRepository
   implements HistoricalLiquidationRepository
 {
-  // Override: default client is the historical database, not the main one
-  protected prismaClient: any = prismaHistorical;
+  constructor() {
+    super();
+    // Default client is the historical database, not the main one
+    this.defaultPrismaClient = prismaHistorical as unknown as typeof this.defaultPrismaClient;
+  }
 
   /**
-   * Override: resetPrismaClient resets to historical DB, not main DB
+   * Same client as the base getter (the bound transaction, else the historical
+   * database), typed `any`: the Historical client is a different generated client
+   * from the Core one the base getter is typed for.
    */
-  resetPrismaClient(): void {
-    this.prismaClient = prismaHistorical;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  protected get prismaClient(): any {
+    return super.prismaClient;
   }
 
   async createMany(data: RawLiquidationCreateInput[]): Promise<{ count: number }> {

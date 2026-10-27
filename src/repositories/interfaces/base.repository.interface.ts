@@ -1,18 +1,7 @@
-import { PrismaClient } from '@prisma/client';
-
 /**
- * Interface de base pour les repositories
- * Définit les méthodes communes à tous les repositories
+ * Interface de base pour les repositories.
+ * Vide à dessein : un repository n'a plus de client Prisma interchangeable, la
+ * transaction lui est liée par appel (voir `runWithTx` dans utils/tx-scope).
  */
-export interface BaseRepository {
-  /**
-   * Définit le client Prisma à utiliser pour les opérations de base de données
-   * @param prismaClient Client Prisma à utiliser
-   */
-  setPrismaClient(prismaClient: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>): void;
-
-  /**
-   * Réinitialise le client Prisma à sa valeur par défaut
-   */
-  resetPrismaClient(): void;
-} 
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface BaseRepository {}

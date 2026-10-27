@@ -27,6 +27,7 @@ jest.mock('../../../src/utils/cross-db-enrich', () => ({
 }));
 
 import { PrismaReadListItemRepository } from '../../../src/repositories/prisma/prisma.readlist-item.repository';
+import { runWithTx } from '../../../src/utils/tx-scope';
 
 describe('PrismaReadListItemRepository', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -67,14 +68,15 @@ describe('PrismaReadListItemRepository', () => {
     expect(mockDeleteMany).toHaveBeenCalledWith({ where: { resourceId: 500 } });
   });
 
-  it('deleteByResourceId ignores a transaction client swapped in by another request', async () => {
+  it('deleteByResourceId ignores a transaction client the repository is bound to', async () => {
     mockDeleteMany.mockResolvedValue({ count: 1 });
     const txDeleteMany = jest.fn();
     const repo = new PrismaReadListItemRepository();
-    // ReadListItemService swaps the shared singleton's live client while its own tx runs
-    repo.setPrismaClient({ readListItem: { deleteMany: txDeleteMany } } as never);
 
-    await expect(repo.deleteByResourceId(500)).resolves.toBe(1);
+    // ReadListItemService binds the repository to its transaction while it runs one
+    await runWithTx({ readListItem: { deleteMany: txDeleteMany } }, [repo], async () => {
+      await expect(repo.deleteByResourceId(500)).resolves.toBe(1);
+    });
     expect(mockDeleteMany).toHaveBeenCalledWith({ where: { resourceId: 500 } });
     expect(txDeleteMany).not.toHaveBeenCalled();
   });

@@ -25,6 +25,7 @@ import { CACHE_PREFIX } from '../../constants/cache.constants';
 import { transactionService } from '../../core/transaction.service';
 import { prisma } from '../../core/prisma.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { runWithTx } from '../../utils/tx-scope';
 
 export class WalletService extends BaseService<WalletResponse, WalletCreateInput, WalletUpdateInput, WalletQueryParams> {
   protected repository = walletRepository;
@@ -89,11 +90,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       }
 
       // Utiliser le service de transaction pour l'ajout du wallet
-      const userWallet = await transactionService.execute(async (tx) => {
-        // Configurer les repositories pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
-        userWalletRepository.setPrismaClient(tx);
-
+      const userWallet = await transactionService.execute((tx) => runWithTx(tx, [this.repository, userWalletRepository], async () => {
         // Vérifier si l'utilisateur existe
         const user = await tx.user.findUnique({
           where: { privyUserId }
@@ -125,7 +122,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           walletId: wallet.id,
           name
         });
-      });
+      }));
 
       // Invalider le cache
       await this.invalidateEntityListCache();
@@ -161,22 +158,14 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       const skip = (page - 1) * limit;
       
       // Utiliser le service de transaction pour la récupération des wallets
-      const result = await transactionService.execute(async (tx) => {
-        // Configurer les repositories pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
-        userWalletRepository.setPrismaClient(tx);
-
+      const result = await transactionService.execute((tx) => runWithTx(tx, [this.repository, userWalletRepository], async () => {
         const [userWallets, total] = await Promise.all([
           userWalletRepository.findByUser(userId, { skip, take: limit }),
           userWalletRepository.countByUser(userId)
         ]);
 
         return { userWallets, total };
-      });
-
-      // Réinitialiser les clients Prisma
-      this.repository.resetPrismaClient();
-      userWalletRepository.resetPrismaClient();
+      }));
 
       logDeduplicator.info('Wallets retrieved successfully', { 
         userId, 
@@ -226,11 +215,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
   public async removeWalletFromUser(walletId: number, userId: number): Promise<void> {
     try {
       // Utiliser le service de transaction pour la suppression
-      await transactionService.execute(async (tx) => {
-        // Configurer les repositories pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
-        userWalletRepository.setPrismaClient(tx);
-        
+      await transactionService.execute((tx) => runWithTx(tx, [this.repository, userWalletRepository], async () => {
         // Vérifier si l'association existe
         const userWallet = await userWalletRepository.findByUserAndWallet(userId, walletId);
         if (!userWallet) {
@@ -239,11 +224,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
 
         // Supprimer l'association
         await userWalletRepository.delete(userWallet.id);
-      });
-
-      // Réinitialiser les clients Prisma
-      this.repository.resetPrismaClient();
-      userWalletRepository.resetPrismaClient();
+      }));
 
       // Invalider le cache
       await this.invalidateEntityListCache();
@@ -274,11 +255,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       }
 
       // Utiliser le service de transaction pour la mise à jour
-      const updatedUserWallet = await transactionService.execute(async (tx) => {
-        // Configurer les repositories pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
-        userWalletRepository.setPrismaClient(tx);
-        
+      const updatedUserWallet = await transactionService.execute((tx) => runWithTx(tx, [this.repository, userWalletRepository], async () => {
         // Vérifier si l'association existe
         const userWallet = await userWalletRepository.findByUserAndWallet(userId, walletId);
         if (!userWallet) {
@@ -287,11 +264,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
 
         // Mettre à jour le nom
         return await userWalletRepository.updateName(userWallet.id, name);
-      });
-
-      // Réinitialiser les clients Prisma
-      this.repository.resetPrismaClient();
-      userWalletRepository.resetPrismaClient();
+      }));
 
       // Invalider le cache
       await this.invalidateEntityListCache();
@@ -366,11 +339,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       }
 
       // Utiliser le service de transaction pour l'import bulk
-      const result = await transactionService.execute(async (tx) => {
-        // Configurer les repositories pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
-        userWalletRepository.setPrismaClient(tx);
-
+      const result = await transactionService.execute((tx) => runWithTx(tx, [this.repository, userWalletRepository], async () => {
         // Vérifier que l'utilisateur existe
         const user = await tx.user.findUnique({
           where: { privyUserId }
@@ -479,11 +448,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           errors,
           addedToList
         };
-      });
-
-      // Réinitialiser les clients Prisma
-      this.repository.resetPrismaClient();
-      userWalletRepository.resetPrismaClient();
+      }));
 
       // Invalider le cache
       await this.invalidateEntityListCache();
@@ -527,11 +492,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
       });
 
       // Utiliser le service de transaction pour le bulk delete
-      const result = await transactionService.execute(async (tx) => {
-        // Configurer les repositories pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx);
-        userWalletRepository.setPrismaClient(tx);
-
+      const result = await transactionService.execute((tx) => runWithTx(tx, [this.repository, userWalletRepository], async () => {
         // Vérifier que l'utilisateur existe
         const user = await tx.user.findUnique({
           where: { privyUserId }
@@ -578,11 +539,7 @@ export class WalletService extends BaseService<WalletResponse, WalletCreateInput
           failed: errors.length,
           errors
         };
-      });
-
-      // Réinitialiser les clients Prisma
-      this.repository.resetPrismaClient();
-      userWalletRepository.resetPrismaClient();
+      }));
 
       // Invalider le cache
       await this.invalidateEntityListCache();

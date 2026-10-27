@@ -1,14 +1,9 @@
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from './prisma.service';
 import { cacheService } from './cache.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { CACHE_TTL } from '../constants/cache.constants';
-
-/**
- * Type for Prisma transaction clients (PrismaClient without connection/transaction methods)
- */
-type PrismaTransactionClient = Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
+import { runWithTx } from '../utils/tx-scope';
 
 /**
  * Minimal structural type for any Prisma client (Core / Content / Telegram / Historical).
@@ -32,12 +27,11 @@ export interface BaseQueryParams {
 
 /**
  * Interface minimale que tous les repositories doivent satisfaire.
- * Garantit le support des transactions Prisma.
+ * Vide à dessein : les transactions ne passent plus par le repository, le service
+ * lui lie le client transactionnel par appel (`runWithTx`).
  */
-export interface BaseServiceRepository {
-  setPrismaClient(client: PrismaTransactionClient): void;
-  resetPrismaClient(): void;
-}
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface BaseServiceRepository {}
 
 /**
  * Contrat CRUD complet pour les repositories utilisés par les méthodes par défaut de BaseService.
@@ -224,10 +218,8 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
       const validatedData = this.validateInput(data, this.validationSchemas.create);
 
       // Utiliser le service de transaction pour la création
-      const entity = await this.transactionClient.$transaction(async (tx) => {
-        // Configurer le repository pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx as PrismaTransactionClient);
-        
+      // Le repository est lié au client transactionnel le temps du callback seulement
+      const entity = await this.transactionClient.$transaction((tx) => runWithTx(tx, [this.repository], async () => {
         // Vérifier si une entité avec le même identifiant existe déjà
         const existingEntity = await this.checkExists(validatedData);
         if (existingEntity) {
@@ -236,10 +228,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
 
         // Créer l'entité
         return this.crudRepo.create(validatedData);
-      });
-
-      // Réinitialiser le client Prisma
-      this.repository.resetPrismaClient();
+      }));
 
       // Mettre en cache la nouvelle entité
       const entityId = (entity as T & { id?: number | string }).id;
@@ -278,10 +267,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
       const validatedData = this.validateInput(data, this.validationSchemas.update);
 
       // Utiliser le service de transaction pour la mise à jour
-      const updatedEntity = await this.transactionClient.$transaction(async (tx) => {
-        // Configurer le repository pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx as PrismaTransactionClient);
-        
+      const updatedEntity = await this.transactionClient.$transaction((tx) => runWithTx(tx, [this.repository], async () => {
         // Vérifier si l'entité existe
         const entity = await this.crudRepo.findById(id);
         if (!entity) {
@@ -295,10 +281,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
 
         // Mettre à jour l'entité
         return this.crudRepo.update(id, validatedData);
-      });
-
-      // Réinitialiser le client Prisma
-      this.repository.resetPrismaClient();
+      }));
 
       // Invalider le cache
       await this.invalidateEntityCache(id);
@@ -332,10 +315,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
   async delete(id: number) {
     try {
       // Utiliser le service de transaction pour la suppression
-      await this.transactionClient.$transaction(async (tx) => {
-        // Configurer le repository pour utiliser le client transactionnel
-        this.repository.setPrismaClient(tx as PrismaTransactionClient);
-
+      await this.transactionClient.$transaction((tx) => runWithTx(tx, [this.repository], async () => {
         // Vérifier si l'entité existe
         const entity = await this.crudRepo.findById(id);
         if (!entity) {
@@ -347,10 +327,7 @@ export abstract class BaseService<T, CreateInput, UpdateInput, QueryParams exten
 
         // Supprimer l'entité
         await this.crudRepo.delete(id);
-      });
-
-      // Réinitialiser le client Prisma
-      this.repository.resetPrismaClient();
+      }));
 
       // Invalider le cache
       await this.invalidateEntityCache(id);

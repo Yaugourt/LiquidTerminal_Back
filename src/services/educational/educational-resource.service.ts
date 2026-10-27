@@ -37,6 +37,7 @@ import { contentFilterService } from './content-filter.service';
 import { xpService } from '../xp/xp.service';
 import { ResourceStatus } from '../../types/prisma-enums';
 import { BasePagination } from '../../types/common.types';
+import { runWithTx } from '../../utils/tx-scope';
 
 type EducationalResourceQueryParams = {
   page?: number;
@@ -124,10 +125,7 @@ export class EducationalResourceService extends BaseService<
     try {
       const validatedData = this.validateInput(data, educationalResourceCategoryCreateSchema);
 
-      return await prismaContent.$transaction(async (tx) => {
-        this.repository.setPrismaClient(tx as any);
-        educationalCategoryRepository.setPrismaClient(tx as any);
-
+      const assignment = await prismaContent.$transaction((tx) => runWithTx(tx, [this.repository, educationalCategoryRepository], async () => {
         const resource = await this.repository.findById(validatedData.resourceId);
         if (!resource) {
           throw new EducationalResourceNotFoundError();
@@ -146,99 +144,93 @@ export class EducationalResourceService extends BaseService<
           throw new EducationalResourceCategoryAlreadyExistsError();
         }
 
-        const assignment = await this.repository.assignToCategory(validatedData);
-        await this.invalidateResourceCaches();
-        return assignment;
-      });
+        return this.repository.assignToCategory(validatedData);
+      }));
+
+      // After the commit: a flush inside the transaction lets a concurrent read refill the caches with the old state
+      await this.invalidateResourceCaches();
+      return assignment;
     } catch (error) {
       throw error;
-    } finally {
-      this.repository.resetPrismaClient();
-      educationalCategoryRepository.resetPrismaClient();
     }
   }
 
   async create(data: EducationalResourceCreateInput): Promise<EducationalResourceResponse> {
     await this.validateUrl(data.url);
 
-    return await prismaContent.$transaction(async (tx) => {
-      this.repository.setPrismaClient(tx as any);
+    // No transaction around the steps below: super.create opens and commits its own, and the
+    // link preview fetch can take ~20 s, longer than Prisma's interactive transaction timeout.
+    try {
+      // 1. Créer la ressource éducative
+      const resource = await super.create(data);
 
+      // 2. Générer automatiquement la LinkPreview (avec gestion d'erreur)
       try {
-        // 1. Créer la ressource éducative
-        const resource = await super.create(data);
+        const linkPreviewService = LinkPreviewService.getInstance();
+        const linkPreview = await linkPreviewService.generatePreview(data.url);
 
-        // 2. Générer automatiquement la LinkPreview (avec gestion d'erreur)
-        try {
-          const linkPreviewService = LinkPreviewService.getInstance();
-          const linkPreview = await linkPreviewService.generatePreview(data.url);
+        // 3. Mettre à jour la ressource avec le linkPreviewId
+        const updatedResource = await this.repository.update(resource.id, {
+          linkPreviewId: linkPreview.id
+        });
 
-          // 3. Mettre à jour la ressource avec le linkPreviewId
-          const updatedResource = await this.repository.update(resource.id, {
-            linkPreviewId: linkPreview.id
-          });
-
-          logDeduplicator.info('Educational resource created with link preview', {
-            resourceId: resource.id,
-            linkPreviewId: linkPreview.id,
-            url: data.url
-          });
-
-          // 4. Attribuer les XP à l'utilisateur
-          try {
-            await xpService.grantXp({
-              userId: resource.addedBy,
-              actionType: 'ADD_EDUCATIONAL_RESOURCE',
-              referenceId: resource.id.toString(),
-              description: `Added educational resource: ${resource.url}`
-            });
-          } catch (error) {
-            // Ne pas bloquer la création si l'XP échoue
-            logDeduplicator.error('Error granting XP for educational resource creation', {
-              error: error instanceof Error ? error.message : String(error),
-              userId: resource.addedBy,
-              resourceId: resource.id
-            });
-          }
-
-          return updatedResource;
-        } catch (linkPreviewError) {
-          // Si la génération de LinkPreview échoue, on garde la ressource sans preview
-          logDeduplicator.warn('Failed to generate link preview, keeping resource without preview', {
-            resourceId: resource.id,
-            url: data.url,
-            error: linkPreviewError instanceof Error ? linkPreviewError.message : String(linkPreviewError)
-          });
-
-          // En cas d'échec de la preview, on attribue quand même les XP
-          try {
-            await xpService.grantXp({
-              userId: resource.addedBy,
-              actionType: 'ADD_EDUCATIONAL_RESOURCE',
-              referenceId: resource.id.toString(),
-              description: `Added educational resource: ${resource.url}`
-            });
-          } catch (xpError) {
-            logDeduplicator.error('Error granting XP for educational resource creation (fallback)', {
-              error: xpError instanceof Error ? xpError.message : String(xpError),
-              userId: resource.addedBy,
-              resourceId: resource.id
-            });
-          }
-
-          return resource; // Retourner la ressource sans LinkPreview
-        }
-      } catch (error) {
-        logDeduplicator.error('Error creating educational resource', {
-          error: error instanceof Error ? error.message : String(error),
+        logDeduplicator.info('Educational resource created with link preview', {
+          resourceId: resource.id,
+          linkPreviewId: linkPreview.id,
           url: data.url
         });
-        throw error;
-      } finally {
-        // Obligatoire : le client `tx` est refermé après le callback — sinon le singleton garde une transaction commitée (P2028)
-        this.repository.resetPrismaClient();
+
+        // 4. Attribuer les XP à l'utilisateur
+        try {
+          await xpService.grantXp({
+            userId: resource.addedBy,
+            actionType: 'ADD_EDUCATIONAL_RESOURCE',
+            referenceId: resource.id.toString(),
+            description: `Added educational resource: ${resource.url}`
+          });
+        } catch (error) {
+          // Ne pas bloquer la création si l'XP échoue
+          logDeduplicator.error('Error granting XP for educational resource creation', {
+            error: error instanceof Error ? error.message : String(error),
+            userId: resource.addedBy,
+            resourceId: resource.id
+          });
+        }
+
+        return updatedResource;
+      } catch (linkPreviewError) {
+        // Si la génération de LinkPreview échoue, on garde la ressource sans preview
+        logDeduplicator.warn('Failed to generate link preview, keeping resource without preview', {
+          resourceId: resource.id,
+          url: data.url,
+          error: linkPreviewError instanceof Error ? linkPreviewError.message : String(linkPreviewError)
+        });
+
+        // En cas d'échec de la preview, on attribue quand même les XP
+        try {
+          await xpService.grantXp({
+            userId: resource.addedBy,
+            actionType: 'ADD_EDUCATIONAL_RESOURCE',
+            referenceId: resource.id.toString(),
+            description: `Added educational resource: ${resource.url}`
+          });
+        } catch (xpError) {
+          logDeduplicator.error('Error granting XP for educational resource creation (fallback)', {
+            error: xpError instanceof Error ? xpError.message : String(xpError),
+            userId: resource.addedBy,
+            resourceId: resource.id
+          });
+        }
+
+        return resource; // Retourner la ressource sans LinkPreview
       }
-    });
+    } catch (error) {
+      logDeduplicator.error('Error creating educational resource', {
+        error: error instanceof Error ? error.message : String(error),
+        url: data.url
+      });
+      throw error;
+    }
   }
 
   async update(id: number, data: EducationalResourceUpdateInput): Promise<EducationalResourceResponse> {
@@ -250,9 +242,7 @@ export class EducationalResourceService extends BaseService<
 
   async removeFromCategory(resourceId: number, categoryId: number): Promise<void> {
     try {
-      return await prismaContent.$transaction(async (tx) => {
-        this.repository.setPrismaClient(tx as any);
-
+      await prismaContent.$transaction((tx) => runWithTx(tx, [this.repository], async () => {
         const resource = await this.repository.findById(resourceId);
         if (!resource) {
           throw new EducationalResourceNotFoundError();
@@ -264,18 +254,18 @@ export class EducationalResourceService extends BaseService<
         }
 
         await this.repository.removeFromCategory(resourceId, categoryId);
-        await this.invalidateResourceCaches();
+      }));
 
-        logDeduplicator.info('Resource removed from category successfully', {
-          resourceId,
-          categoryId
-        });
+      // After the commit: a flush inside the transaction lets a concurrent read refill the caches with the old state
+      await this.invalidateResourceCaches();
+
+      logDeduplicator.info('Resource removed from category successfully', {
+        resourceId,
+        categoryId
       });
     } catch (error) {
       logDeduplicator.error('Error removing resource from category:', { error: error instanceof Error ? error.message : String(error), resourceId, categoryId });
       throw error;
-    } finally {
-      this.repository.resetPrismaClient();
     }
   }
 
@@ -361,9 +351,7 @@ export class EducationalResourceService extends BaseService<
   }
 
   private async deleteInContent(id: number): Promise<void> {
-    return await prismaContent.$transaction(async (tx) => {
-      this.repository.setPrismaClient(tx as any);
-
+    return await prismaContent.$transaction((tx) => runWithTx(tx, [this.repository], async () => {
       try {
         // 1. Récupérer la ressource pour avoir le linkPreviewId
         const resource = await this.repository.findById(id);
@@ -402,10 +390,8 @@ export class EducationalResourceService extends BaseService<
           resourceId: id
         });
         throw error;
-      } finally {
-        this.repository.resetPrismaClient();
       }
-    });
+    }));
   }
 
   /**

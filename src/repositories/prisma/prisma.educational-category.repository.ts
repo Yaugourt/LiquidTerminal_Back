@@ -15,7 +15,7 @@ export class PrismaEducationalCategoryRepository extends BasePrismaRepository im
     super();
     // EducationalCategory lives in the Content DB; User remains in Core,
     // so creator info must be attached via cross-db enrichment helpers.
-    this.setPrismaClient(prismaContent as unknown as typeof this.prismaClient, true);
+    this.defaultPrismaClient = prismaContent as unknown as typeof this.defaultPrismaClient;
   }
 
   async findAll(params: {
