@@ -75,7 +75,7 @@ export class LinkPreviewService extends BaseService<
           return existingPreview;
         }
         return null;
-      }, CACHE_TTL.LONG);
+      }, (preview) => (preview === null ? 1 : CACHE_TTL.LONG)); // a miss is not worth keeping
       
       if (cached) {
         logDeduplicator.info('Link preview found in cache', { url });
@@ -96,7 +96,9 @@ export class LinkPreviewService extends BaseService<
         favicon: previewData.favicon || undefined
       });
 
-      // 5. Mettre en cache Redis (déjà fait par getOrSet)
+      // 5. Mettre en cache Redis : la clé peut encore tenir le "null" du miss ci-dessus, que
+      // getOrSet servirait comme un hit sans jamais stocker le preview
+      await cacheService.invalidate(cacheKey);
       await cacheService.getOrSet(cacheKey, async () => savedPreview, CACHE_TTL.LONG);
 
       logDeduplicator.info('Link preview generated successfully', { url, id: savedPreview.id });
@@ -224,7 +226,7 @@ export class LinkPreviewService extends BaseService<
         excludeResourceId,
         error: error instanceof Error ? error.message : String(error)
       });
-      return false; // En cas d'erreur, on considère qu'elle est utilisée pour éviter la suppression
+      return true; // En cas d'erreur, on considère qu'elle est utilisée pour éviter la suppression
     }
   }
 
