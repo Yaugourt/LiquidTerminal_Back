@@ -104,7 +104,9 @@ export class FillAggregator {
 
     return {
       source: first.source,
-      eventId: `${first.source}:${first.oid}:${first.wallet}`,
+      // One id per burst of an order: a resting order that fills again minutes later
+      // is a new burst and must alert again. Replaying the same burst keeps its id.
+      eventId: `${first.source}:${first.oid}:${first.wallet}:${minTimeMs}`,
       oid: first.oid,
       wallet: first.wallet,
       coin: first.coin,

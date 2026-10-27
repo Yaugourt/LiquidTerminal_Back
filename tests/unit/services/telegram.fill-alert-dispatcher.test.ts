@@ -371,6 +371,6 @@ describe('TelegramFillAlertDispatcherService', () => {
     await drain();
 
     expect(addSpy.mock.calls.map(([fill]) => (fill as NormalizedFill).coin)).toEqual(['HYPE', '@99']);
-    expect(mockState.broadcasts).toEqual([`t-spot-hype|sub-spot-hype|spot:7:${WALLETS[0]}|1|30.000000`]);
+    expect(mockState.broadcasts).toEqual([`t-spot-hype|sub-spot-hype|spot:7:${WALLETS[0]}:1790000000000|1|30.000000`]);
   });
 });

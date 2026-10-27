@@ -86,7 +86,7 @@ export interface NormalizedFill {
  */
 export interface AggregatedFill {
   source: 'perp' | 'spot';
-  eventId: string; // `${source}:${oid}:${wallet}` — deduplication key
+  eventId: string; // `${source}:${oid}:${wallet}:${first fill time ms}` — deduplication key (one per burst of an order)
   oid: number;
   wallet: string; // Always lowercase
   coin: string;
