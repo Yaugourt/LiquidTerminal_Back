@@ -428,8 +428,19 @@ router.get('/stream',
 
     logDeduplicator.info('SSE stream request', { ip, filters, lastEventId });
 
+    // Listen for the disconnect before the first await: addClient replays missed
+    // events (a DB read), and a 'close' that fires meanwhile is not emitted again.
+    let clientId: string | null = null;
+    let disconnected = false;
+    const onDisconnect = () => {
+      disconnected = true;
+      if (clientId) sseManager.removeClient(clientId);
+    };
+    req.on('close', onDisconnect);
+    req.on('error', onDisconnect);
+
     // Add client
-    const clientId = await sseManager.addClient(res, ip, filters, lastEventId);
+    clientId = await sseManager.addClient(res, ip, filters, lastEventId);
 
     if (!clientId) {
       return res.status(429).json({
@@ -439,14 +450,10 @@ router.get('/stream',
       });
     }
 
-    // Handle client disconnect
-    req.on('close', () => {
+    // Gone while it was being added: nothing will fire again, release the slot now.
+    if (disconnected) {
       sseManager.removeClient(clientId);
-    });
-
-    req.on('error', () => {
-      sseManager.removeClient(clientId);
-    });
+    }
 
     // Keep connection open - response handled by SSE manager
   }) as RequestHandler

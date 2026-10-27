@@ -7,6 +7,8 @@
 import type { NextFunction, Request, Response } from 'express';
 import express from 'express';
 import request from 'supertest';
+import http from 'http';
+import type { AddressInfo } from 'net';
 
 const marketLimiter = jest.fn((_req: Request, _res: Response, next: NextFunction) => next());
 const passthroughLimiter = jest.fn((_req: Request, _res: Response, next: NextFunction) => next());
@@ -210,4 +212,31 @@ describe('GET /liquidations/stream', () => {
     await request(app).get('/liquidations/stream').set('X-Forwarded-For', '203.0.113.7');
     expect(ipSeenBySse()).toBe('203.0.113.7');
   });
+
+  it('releases the client when the connection drops while it is being added', async () => {
+    let finishAdding!: (id: string) => void;
+    sse.addClient.mockReset();
+    sse.removeClient.mockReset();
+    sse.addClient.mockReturnValue(new Promise<string>((resolve) => { finishAdding = resolve; }));
+
+    const server = buildApp().listen(0);
+    try {
+      const { port } = server.address() as AddressInfo;
+      const req = http.get({ port, path: '/liquidations/stream' });
+      req.on('error', () => undefined);
+      await waitFor(() => sse.addClient.mock.calls.length === 1);
+      req.destroy();
+      await new Promise((r) => setTimeout(r, 100)); // the server sees the close
+
+      finishAdding('client-1');
+      await waitFor(() => sse.removeClient.mock.calls.length > 0);
+      expect(sse.removeClient).toHaveBeenCalledWith('client-1');
+    } finally {
+      server.close();
+    }
+  });
 });
+
+async function waitFor(cond: () => boolean): Promise<void> {
+  for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setTimeout(r, 20));
+}
