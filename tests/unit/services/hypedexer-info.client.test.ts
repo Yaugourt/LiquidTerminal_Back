@@ -1,6 +1,7 @@
 /**
  * HypeDexer /info client: a 429 waits its Retry-After (5 s at most) and is
- * retried twice at most, the calls in flight are capped process-wide, the
+ * retried twice at most (the wait is 500 ms to 5 s, seconds or HTTP-date), the
+ * calls in flight are capped and their starts paced process-wide, the
  * breaker opens on repeated failures, and the fallback to Hyperliquid is
  * logged once per outage.
  */
@@ -13,6 +14,8 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 import {
   HypeDexerInfoClient,
   INFO_MAX_IN_FLIGHT,
+  INFO_MAX_PER_SECOND,
+  resetInfoPacing,
   resetInfoProxyOutages,
   sortLedgerAscending,
   viaInfoProxy,
@@ -33,6 +36,7 @@ describe('HypeDexerInfoClient', () => {
     warn.mockClear();
     info.mockClear();
     resetInfoProxyOutages();
+    resetInfoPacing(0);
     // A fresh breaker for every test.
     (CircuitBreakerService as unknown as { instances: Map<string, unknown> }).instances.delete('hypedexer-info');
     (client as unknown as { circuitBreaker: CircuitBreakerService }).circuitBreaker =
@@ -136,6 +140,100 @@ describe('HypeDexerInfoClient', () => {
     expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(INFO_MAX_IN_FLIGHT + 2);
     await jest.advanceTimersByTimeAsync(20_000);
     await Promise.all(calls);
+  });
+
+  it('floors the Retry-After wait at 500 ms', async () => {
+    jest.useFakeTimers();
+    fetchMock.mockResolvedValueOnce(reply(429, null, { 'retry-after': '0' })).mockResolvedValueOnce(reply(200, []));
+    const call = client.allPerpMetas();
+    await jest.advanceTimersByTimeAsync(400);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(200);
+    await expect(call).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads a Retry-After given as an HTTP-date', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(Date.parse('2026-10-30T12:00:00.000Z'));
+    fetchMock
+      .mockResolvedValueOnce(reply(429, null, { 'retry-after': 'Fri, 30 Oct 2026 12:00:03 GMT' }))
+      .mockResolvedValueOnce(reply(200, []));
+    const call = client.allPerpMetas();
+    await jest.advanceTimersByTimeAsync(2_900);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(200);
+    await expect(call).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits a second when the Retry-After is missing or unreadable', async () => {
+    jest.useFakeTimers();
+    fetchMock.mockResolvedValueOnce(reply(429, null, { 'retry-after': 'soon' })).mockResolvedValueOnce(reply(200, []));
+    const call = client.allPerpMetas();
+    await jest.advanceTimersByTimeAsync(900);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(200);
+    await expect(call).resolves.toEqual([]);
+  });
+
+  describe('rate bound', () => {
+    beforeEach(() => {
+      resetInfoPacing();
+    });
+
+    it('starts at most INFO_MAX_PER_SECOND requests a second, whatever the callers', async () => {
+      jest.useFakeTimers();
+      fetchMock.mockImplementation(async () => reply(200, { assetPositions: [] }));
+      // 4 "workers" back to back, instant answers: the worst case for the cap alone.
+      const done: Promise<unknown>[] = [];
+      for (let w = 0; w < 4; w += 1) {
+        done.push(
+          (async () => {
+            for (let i = 0; i < 10; i += 1) await client.clearinghouseState(`0x${w}${i}`);
+          })()
+        );
+      }
+      await jest.advanceTimersByTimeAsync(1);
+      expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(1);
+      await jest.advanceTimersByTimeAsync(998);
+      // Starts at t = 0, 100, ... 900 inside the first second.
+      expect(fetchMock).toHaveBeenCalledTimes(INFO_MAX_PER_SECOND);
+      await jest.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2 * INFO_MAX_PER_SECOND);
+      await jest.advanceTimersByTimeAsync(10_000);
+      await Promise.all(done);
+      expect(fetchMock).toHaveBeenCalledTimes(40);
+    });
+
+    it('does not delay a lone call', async () => {
+      fetchMock.mockImplementation(async () => reply(200, []));
+      await client.allPerpMetas();
+      await new Promise((r) => setTimeout(r, 120));
+      const started = Date.now();
+      await client.allPerpMetas();
+      expect(Date.now() - started).toBeLessThan(50);
+    });
+
+    it('paces the retry of a 429 like any other start', async () => {
+      jest.useFakeTimers();
+      fetchMock.mockResolvedValueOnce(reply(429, null, { 'retry-after': '0' })).mockImplementation(async () => reply(200, []));
+      const calls = Array.from({ length: 12 }, () => client.allPerpMetas());
+      // The 12 first attempts start at 0, 100 ... 1100 ms; the retry (ready at 500 ms) takes the next turn.
+      await jest.advanceTimersByTimeAsync(1_150);
+      expect(fetchMock).toHaveBeenCalledTimes(12);
+      await jest.advanceTimersByTimeAsync(100);
+      expect(fetchMock).toHaveBeenCalledTimes(13);
+      await Promise.all(calls);
+    });
+
+    it('rejects, for the caller to fall back, when the turn is further away than the queue wait', async () => {
+      fetchMock.mockImplementation(async () => reply(200, []));
+      resetInfoPacing(20_000); // the first call takes the turn at once and reserves the next one 20 s ahead
+      await client.allPerpMetas();
+      await expect(client.allPerpMetas()).rejects.toThrow(/backlog/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('opens the breaker after repeated failures and then fails without calling HypeDexer', async () => {

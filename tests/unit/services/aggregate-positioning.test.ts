@@ -38,7 +38,7 @@ jest.mock('../../../src/services/toptraders/toptraders.service', () => ({
 }));
 
 import { CircuitBreakerService } from '../../../src/core/circuit.breaker.service';
-import { HypeDexerInfoClient, resetInfoProxyOutages } from '../../../src/clients/hypedexer/rest/info/info.client';
+import { HypeDexerInfoClient, resetInfoPacing, resetInfoProxyOutages } from '../../../src/clients/hypedexer/rest/info/info.client';
 import { AggregatePositioningClient } from '../../../src/clients/hyperliquid/positioning/aggregate-positioning.client';
 
 const json = (status: number, body: unknown): Response =>
@@ -64,6 +64,8 @@ describe('AggregatePositioningClient fan-out', () => {
     infoClient = HypeDexerInfoClient.getInstance() as unknown as { circuitBreaker: unknown };
     infoClient.circuitBreaker = CircuitBreakerService.getInstance('hypedexer-info');
     resetInfoProxyOutages();
+    // The 10 requests/s bound has its own tests; here the fan-out must not take 4 s a run.
+    resetInfoPacing(0);
   });
 
   afterAll(() => {

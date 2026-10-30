@@ -32,7 +32,7 @@ export class HttpApiError extends Error {
  * Parse the standard HTTP `Retry-After` header value into milliseconds.
  * Accepts either delta-seconds or an HTTP-date. Returns undefined on parse failure.
  */
-function parseRetryAfterMs(value: string | undefined | null): number | undefined {
+export function parseRetryAfterMs(value: string | undefined | null): number | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   if (!trimmed) return undefined;

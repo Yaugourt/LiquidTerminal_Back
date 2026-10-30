@@ -1,4 +1,10 @@
-import { HypeDexerInfoClient, sortLedgerAscending, viaInfoProxy } from '../../clients/hypedexer/rest/info/info.client';
+import {
+  HypeDexerInfoClient,
+  INFO_LEDGER_MAX_ROWS,
+  sortLedgerAscending,
+  viaInfoProxy,
+} from '../../clients/hypedexer/rest/info/info.client';
+import { logDeduplicator } from '../../utils/logDeduplicator';
 import { hyperliquidWeightMeter } from '../../utils/hyperliquid-weight-meter';
 import { LedgerUpdate, RY_INTEREST_ADDRESS } from './reserve-yield.ledger';
 
@@ -25,12 +31,24 @@ async function readFromHyperliquid(startTime: number): Promise<LedgerUpdate[]> {
  * oldest first), so the cursor logic of the readers sees one order. Read
  * through HypeDexer's /info (2 + ceil(rows / 10) credits, no Hyperliquid
  * weight), from Hyperliquid (weight 20) when the proxy fails.
+ *
+ * HypeDexer answers 500 rows at most and keeps the newest, so an answer of 500
+ * rows or more may have lost the oldest ones: that call is read from
+ * Hyperliquid, which returns the oldest rows from `startTime`.
  */
 export async function readReserveLedger(startTime: number): Promise<LedgerUpdate[]> {
-  const rows = await viaInfoProxy<LedgerUpdate[]>(
+  const viaProxy = await viaInfoProxy<LedgerUpdate[] | null>(
     'userNonFundingLedgerUpdates',
-    () => HypeDexerInfoClient.getInstance().userNonFundingLedgerUpdates(RY_INTEREST_ADDRESS, startTime),
+    async () => {
+      const rows = await HypeDexerInfoClient.getInstance().userNonFundingLedgerUpdates(RY_INTEREST_ADDRESS, startTime);
+      return rows.length >= INFO_LEDGER_MAX_ROWS ? null : rows;
+    },
     () => readFromHyperliquid(startTime)
   );
-  return sortLedgerAscending(rows);
+  if (viaProxy) return sortLedgerAscending(viaProxy);
+  logDeduplicator.warn('HypeDexer /info ledger answer may be truncated, reading it from Hyperliquid', {
+    maxRows: INFO_LEDGER_MAX_ROWS,
+    startTime,
+  });
+  return sortLedgerAscending(await readFromHyperliquid(startTime));
 }

@@ -99,7 +99,12 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
       const data = await this.readState(force);
       if (!data) return;
 
-      await redisService.set(this.CACHE_KEY, JSON.stringify(data));
+      // Written and announced only when the state changed: at a 5 s tick it
+      // usually has not, and nothing should be told about the same state again.
+      const serialized = JSON.stringify(data);
+      if (serialized === (await redisService.get(this.CACHE_KEY))) return;
+
+      await redisService.set(this.CACHE_KEY, serialized);
       const now = Date.now();
       await redisService.publish(this.UPDATE_CHANNEL, JSON.stringify({
         type: 'DATA_UPDATED',

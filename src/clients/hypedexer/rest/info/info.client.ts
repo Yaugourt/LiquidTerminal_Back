@@ -1,5 +1,5 @@
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
-import { HttpApiError } from '../../../../core/base.api.service';
+import { HttpApiError, parseRetryAfterMs } from '../../../../core/base.api.service';
 import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { GasAuctionResponse } from '../../../../types/auction.types';
 import { ClearinghouseState } from '../../../../types/positioning.types';
@@ -11,6 +11,21 @@ import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 
 /** Most calls this process keeps in flight on HypeDexer's /info for its background reads. */
 export const INFO_MAX_IN_FLIGHT = 6;
+/**
+ * Most requests a second this process starts on HypeDexer's /info, whatever the
+ * callers: the cap above bounds the calls in flight, not the rate (4 positioning
+ * workers at 100-150 ms a call send 27-40 a second), and the burst limit
+ * (~25-30 requests/s) is shared with the user-facing routes, the TWAP and HIP-4
+ * pollers and the portfolio-margin scan.
+ */
+export const INFO_MAX_PER_SECOND = 10;
+export const INFO_MIN_SPACING_MS = 1000 / INFO_MAX_PER_SECOND;
+/**
+ * HypeDexer answers a userNonFundingLedgerUpdates with 500 rows at most, the
+ * newest ones (Hyperliquid: the oldest 2,000 from startTime). An answer this
+ * long may have lost its oldest rows.
+ */
+export const INFO_LEDGER_MAX_ROWS = 500;
 /** Callers waiting for one of those slots; past this a call fails at once (the caller falls back). */
 const INFO_QUEUE_MAX = 200;
 const INFO_QUEUE_WAIT_MS = 15_000;
@@ -18,6 +33,7 @@ const INFO_TIMEOUT_MS = 10_000;
 /** A 429 is retried twice at most, after the Retry-After it carries (HypeDexer sends seconds), capped. */
 const INFO_MAX_429_RETRIES = 2;
 const INFO_RETRY_AFTER_CAP_MS = 5_000;
+const INFO_RETRY_AFTER_FLOOR_MS = 500;
 const INFO_RETRY_AFTER_DEFAULT_MS = 1_000;
 
 /** `spotClearinghouseState`, the fields read here. */
@@ -72,11 +88,37 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** How long a 429 asks to wait: Retry-After in seconds, at most INFO_RETRY_AFTER_CAP_MS. */
+/**
+ * How long a 429 asks to wait: its Retry-After (seconds or HTTP-date), between
+ * INFO_RETRY_AFTER_FLOOR_MS and INFO_RETRY_AFTER_CAP_MS; a second when absent.
+ */
 function retryAfterMs(error: HttpApiError): number {
-  const seconds = Number(error.retryAfter);
-  const ms = Number.isFinite(seconds) && seconds >= 0 && error.retryAfter ? seconds * 1000 : INFO_RETRY_AFTER_DEFAULT_MS;
-  return Math.min(ms, INFO_RETRY_AFTER_CAP_MS);
+  const ms = parseRetryAfterMs(error.retryAfter) ?? INFO_RETRY_AFTER_DEFAULT_MS;
+  return Math.min(Math.max(ms, INFO_RETRY_AFTER_FLOOR_MS), INFO_RETRY_AFTER_CAP_MS);
+}
+
+let minSpacingMs = INFO_MIN_SPACING_MS;
+/** performance.now() before which no further request may start. */
+let nextSendAt = 0;
+
+/**
+ * Waits for this call's turn: request starts are at least `minSpacingMs` apart,
+ * for every caller. The turn is reserved at once (first come, first served); a
+ * backlog longer than the queue wait rejects, so the caller falls back instead
+ * of waiting for ever.
+ */
+async function paceSend(): Promise<void> {
+  const now = performance.now();
+  const at = Math.max(now, nextSendAt);
+  if (at - now > INFO_QUEUE_WAIT_MS) throw new Error('HypeDexer /info rate bound backlog is too long');
+  nextSendAt = at + minSpacingMs;
+  if (at > now) await sleep(at - now);
+}
+
+/** Test helper: forget the turns reserved so far and set the spacing (default: the production one). */
+export function resetInfoPacing(spacingMs: number = INFO_MIN_SPACING_MS): void {
+  minSpacingMs = spacingMs;
+  nextSendAt = 0;
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -102,10 +144,11 @@ export function sortLedgerAscending(rows: LedgerUpdate[]): LedgerUpdate[] {
  * types it refuses (400) stay on Hyperliquid.
  *
  * For background reads, which keep Hyperliquid as their fallback:
- * - the calls in flight are capped process-wide (INFO_MAX_IN_FLIGHT), since
- *   the burst limit (~25-30 requests/s) is shared with every HypeDexer caller;
- * - a 429 waits its Retry-After (5 s at most) and is retried twice at most; the
- *   slot is free during the wait;
+ * - the calls in flight are capped process-wide (INFO_MAX_IN_FLIGHT) and their
+ *   starts are paced to INFO_MAX_PER_SECOND, since the burst limit (~25-30
+ *   requests/s) is shared with every HypeDexer caller;
+ * - a 429 waits its Retry-After (500 ms to 5 s) and is retried twice at most;
+ *   the slot is free during the wait;
  * - circuit breaker id: `hypedexer-info`.
  * Not charged to a caller's upstream budget: these are shared, cadence-driven
  * reads, and a refusal of one visitor must not degrade them for everyone.
@@ -134,6 +177,7 @@ export class HypeDexerInfoClient extends HypeDexerBaseClient {
       await acquireSlot();
       let waitMs = 0;
       try {
+        await paceSend();
         return await this.fetchWithTimeout<T>('/info', { method: 'POST', body: payload }, INFO_TIMEOUT_MS);
       } catch (error) {
         if (!(error instanceof HttpApiError) || !error.isRateLimited || attempt >= INFO_MAX_429_RETRIES) throw error;
@@ -164,7 +208,10 @@ export class HypeDexerInfoClient extends HypeDexerBaseClient {
     return data as SpotClearinghouseState;
   }
 
-  /** The ledger rows from `startTime`, oldest first (Hyperliquid's order). */
+  /**
+   * The ledger rows from `startTime`, oldest first (Hyperliquid's order). A
+   * result of INFO_LEDGER_MAX_ROWS rows or more may be cut: the caller decides.
+   */
   public async userNonFundingLedgerUpdates(user: string, startTime: number): Promise<LedgerUpdate[]> {
     const data = await this.info<unknown>({ type: 'userNonFundingLedgerUpdates', user, startTime });
     if (!Array.isArray(data)) throw new Error('Unexpected userNonFundingLedgerUpdates payload');

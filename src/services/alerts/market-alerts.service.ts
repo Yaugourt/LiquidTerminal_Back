@@ -458,6 +458,14 @@ const POLL_MS = 10_000;
 const RY_POLL_MS = 60_000;
 /** Time of the last ledger entry turned into events, so a restart neither replays nor skips. */
 const RY_CURSOR_KEY = 'alerts:market:reserve_yield_cursor';
+/**
+ * Each read starts this long before the cursor, so a row the indexer commits
+ * late (out of time order) still alerts. The rows read twice are absorbed by the
+ * engine's per-event dedup (`alert:market:<rule>:<event id>`, claimed in Redis
+ * for 24 h, and the in-memory recent-event cache): the id holds the stage, hash
+ * and time, so it is the same on every read.
+ */
+const RY_OVERLAP_MS = 60_000;
 
 /**
  * Feeds market events into an AlertEngine. Rules come from AlertRule and are
@@ -552,9 +560,10 @@ export class MarketAlertsService {
       }
       const cursor = Number(stored);
       // Oldest first whichever source answers (HypeDexer's /info, else Hyperliquid).
-      const updates = await readReserveLedger(cursor);
+      const readFrom = Math.max(0, cursor - RY_OVERLAP_MS);
+      const updates = await readReserveLedger(readFrom);
       const latest = updates.reduce((m, u) => Math.max(m, u.time), cursor);
-      const events = reserveYieldEvents(updates, cursor);
+      const events = reserveYieldEvents(updates, readFrom);
       if (events.length) this.engine.ingest(events);
       if (latest > cursor) await redisService.set(RY_CURSOR_KEY, String(latest));
     } catch (error) {

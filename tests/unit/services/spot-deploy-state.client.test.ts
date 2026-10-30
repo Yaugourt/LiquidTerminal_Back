@@ -8,10 +8,13 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 }));
 const store = new Map<string, string>();
 const publish = jest.fn(async () => undefined);
+const setSpy = jest.fn();
+const redisSetCalls = (): number => setSpy.mock.calls.length;
 jest.mock('../../../src/core/redis.service', () => ({
   redisService: {
     get: jest.fn(async (key: string) => store.get(key) ?? null),
     set: jest.fn(async (key: string, value: string) => {
+      setSpy(key);
       store.set(key, value);
     }),
     publish: (...args: unknown[]) => publish(...(args as [])),
@@ -46,6 +49,7 @@ describe('HyperliquidSpotDeployClient', () => {
     jest.spyOn(Date, 'now').mockImplementation(() => now);
     store.clear();
     publish.mockClear();
+    setSpy.mockClear();
     fetchMock = jest.fn(async (url: string) => {
       if (onHyperliquid(url)) return json(200, STATE);
       return proxyUp ? json(200, STATE) : json(502, null);
@@ -83,6 +87,25 @@ describe('HyperliquidSpotDeployClient', () => {
     expect(JSON.parse(store.get('spot:deploy:state') ?? 'null')).toEqual(STATE);
     expect(publish).toHaveBeenCalledWith('spot:deploy:updated', expect.stringContaining('DATA_UPDATED'));
     await expect(client.getSpotDeployState()).resolves.toEqual(STATE);
+  });
+
+  it('announces the state only when it changed, not at every 5 s tick', async () => {
+    await internals.updateDeployState();
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    // Same state: nothing written, nothing announced.
+    await internals.updateDeployState();
+    await internals.updateDeployState();
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(redisSetCalls()).toBe(1);
+
+    // A new auction state is.
+    const next = { ...STATE, gasAuction: { ...STATE.gasAuction, currentGas: '8' } };
+    fetchMock.mockImplementation(async () => json(200, next));
+    now += 5_000;
+    await internals.updateDeployState();
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(store.get('spot:deploy:state') ?? 'null')).toEqual(next);
   });
 
   it('falls back to api-ui when the proxy fails, then reads it at most every 20 s', async () => {
