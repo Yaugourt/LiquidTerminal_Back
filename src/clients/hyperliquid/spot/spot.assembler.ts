@@ -1,4 +1,5 @@
 import { SpotContext, AssetContext, Market, Token, MarketData } from '../../../types/market.types';
+import type { LiveCtx } from '../websocket/asset-ctx.ws.client';
 import * as unitTokens from './unit.json';
 
 /** What the spot poller derives from one (meta, contexts) pair. */
@@ -81,4 +82,24 @@ export function assembleSpot(
     .map(token => token.name);
 
   return { markets, tokensWithoutPairs };
+}
+
+/**
+ * Lays the contexts the socket pushed over the last REST read, by coin.
+ *
+ * Entries the socket does not cover stay as REST read them: the HIP-4 `#`
+ * outcome coins, which the stream does not carry, and coins not subscribed yet.
+ * A pushed context older than the REST read (`restAt`) would put older numbers
+ * over newer ones, so it is ignored. Neither input is modified; the order and
+ * the fields of every entry are the REST ones, the values the freshest.
+ */
+export function mergeSpotContexts(
+  rest: AssetContext[],
+  live: ReadonlyMap<string, LiveCtx>,
+  restAt: number
+): AssetContext[] {
+  return rest.map((entry) => {
+    const pushed = live.get(entry.coin);
+    return pushed && pushed.at > restAt ? ({ ...entry, ...pushed.ctx } as AssetContext) : entry;
+  });
 }

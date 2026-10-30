@@ -1,3 +1,4 @@
+import type { LiveCtx } from '../websocket/asset-ctx.ws.client';
 import { PerpMarket, PerpAssetContext, PerpMarketData } from '../../../types/market.types';
 
 /** Hyperliquid's `metaAndAssetCtxs`: the universe, and one context per perp by position. */
@@ -37,4 +38,24 @@ export function assemblePerp(
       };
     })
     .filter(market => market.volume > 0); // Filtrer les tokens avec un volume de 0
+}
+
+/**
+ * Lays the contexts the socket pushed over the last REST read. The REST array
+ * is positional, so the coin of entry `i` is `meta.universe[i].name`; entries
+ * the socket does not cover (delisted perps, coins not subscribed yet) stay as
+ * REST read them. A pushed context older than the REST read (`restAt`) is
+ * ignored. Neither input is modified.
+ */
+export function mergePerpContexts(
+  meta: { universe: PerpMarket[] },
+  rest: PerpAssetContext[],
+  live: ReadonlyMap<string, LiveCtx>,
+  restAt: number
+): PerpAssetContext[] {
+  return rest.map((entry, index) => {
+    const name = meta.universe[index]?.name;
+    const pushed = name === undefined ? undefined : live.get(name);
+    return pushed && pushed.at > restAt ? ({ ...entry, ...pushed.ctx } as PerpAssetContext) : entry;
+  });
 }

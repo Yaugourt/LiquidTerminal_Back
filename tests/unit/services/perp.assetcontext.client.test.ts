@@ -33,7 +33,7 @@ const META = {
   universe: [
     { name: 'BTC', szDecimals: 5, maxLeverage: 40 },
     { name: 'ETH', szDecimals: 4, maxLeverage: 25, onlyIsolated: true },
-    { name: 'DEAD', szDecimals: 1, maxLeverage: 3, },
+    { name: 'DEAD', szDecimals: 1, maxLeverage: 3, isDelisted: true },
     { name: 'ZERO', szDecimals: 1, maxLeverage: 5 },
   ],
 };

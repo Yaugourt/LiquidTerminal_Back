@@ -92,6 +92,8 @@ export interface PerpMarket {
     szDecimals: number;
     maxLeverage: number;
     onlyIsolated?: boolean;
+    /** Hyperliquid keeps delisted perps in the universe so positions stay aligned with the contexts. */
+    isDelisted?: boolean;
 }
 
 export interface PerpAssetContext {
