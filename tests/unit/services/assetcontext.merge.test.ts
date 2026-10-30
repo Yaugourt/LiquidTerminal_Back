@@ -91,7 +91,7 @@ describe('mergePerpContexts', () => {
     expect(merged[1]).toBe(rest[1]);
   });
 
-  it('keeps a delisted perp as REST read it, whatever the socket says', () => {
+  it('keeps a delisted perp (never subscribed, so never pushed) as REST read it', () => {
     const merged = mergePerpContexts(meta, rest, live({ BTC: { markPx: '81000' } }), REST_AT);
     expect(merged[0].markPx).toBe('81000');
     expect(merged[1]).toBe(rest[1]);

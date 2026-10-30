@@ -9,6 +9,7 @@
  * - the bridge reserve of tokens minted on their HyperEVM system address is
  *   taken out of the circulating supply, so out of the market cap.
  */
+process.env.HL_CTX_STREAM_ENABLED = 'false'; // the REST-only poller; the stream has its own tests
 const mockRedis = {
   set: jest.fn<Promise<unknown>, [string, string]>(),
   publish: jest.fn<Promise<unknown>, [string, string]>(),

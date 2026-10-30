@@ -5,6 +5,7 @@
  * - perps with no 24h volume are left out;
  * - the raw pair is cached as read (`perp:raw_data`) and an update is published.
  */
+process.env.HL_CTX_STREAM_ENABLED = 'false'; // the REST-only poller; the stream has its own tests
 const mockRedis = {
   set: jest.fn<Promise<unknown>, [string, string]>(),
   get: jest.fn<Promise<string | null>, [string]>(),

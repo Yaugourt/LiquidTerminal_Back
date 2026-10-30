@@ -6,7 +6,9 @@ import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../../utils/guardedInterval';
 import { SpotBridgeReserveService } from '../../../services/spot/bridgeReserve.service';
-import { assembleSpot } from './spot.assembler';
+import { assembleSpot, mergeSpotContexts } from './spot.assembler';
+import { HyperliquidAssetCtxWSClient } from '../websocket/asset-ctx.ws.client';
+import { CtxCadence, CTX_FLUSH_INTERVAL_MS, CTX_REST_ONLY_MS, isCtxStreamEnabled } from '../ctx.cadence';
 
 export class HyperliquidSpotClient extends BaseApiService {
   private static instance: HyperliquidSpotClient;
@@ -20,8 +22,14 @@ export class HyperliquidSpotClient extends BaseApiService {
   private readonly CACHE_KEY_MARKETS = 'spot:markets';
   private readonly CACHE_KEY_TOKENS = 'spot:tokens:without_pairs';
   private readonly UPDATE_CHANNEL = 'spot:data:updated';
-  private readonly UPDATE_INTERVAL = 10000;
+  /** REST-only cadence (stream switched off with HL_CTX_STREAM_ENABLED=false). */
+  private readonly UPDATE_INTERVAL = CTX_REST_ONLY_MS;
   private pollingInterval: NodeJS.Timeout | null = null;
+
+  /** Set while the activeAssetCtx stream feeds this poller. */
+  private cadence: CtxCadence | null = null;
+  /** The last REST read, and when it arrived: the base the stream's contexts are laid over. */
+  private lastRest: { spotContext: SpotContext; assetContexts: AssetContext[]; at: number } | null = null;
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
@@ -48,12 +56,63 @@ export class HyperliquidSpotClient extends BaseApiService {
       return;
     }
 
+    if (isCtxStreamEnabled()) {
+      // Contexts come from the socket every 2 s; REST reconciles (60 s) or covers for it (20 s).
+      logDeduplicator.info('Starting spot polling (activeAssetCtx stream)');
+      this.cadence = new CtxCadence('spot', 'Spot');
+      this.pollingInterval = startGuardedInterval(
+        'Spot polling',
+        () => this.streamTick(),
+        CTX_FLUSH_INTERVAL_MS
+      );
+      return;
+    }
+
     logDeduplicator.info('Starting spot polling');
     this.pollingInterval = startGuardedInterval(
       'Spot polling',
       () => this.updateSpotData(),
       this.UPDATE_INTERVAL
     );
+  }
+
+  private async streamTick(): Promise<void> {
+    const cadence = this.cadence;
+    if (!cadence) return;
+    await cadence.tick(
+      () => this.updateSpotData(),
+      () => this.publishStreamed()
+    );
+  }
+
+  /** The last REST read with the stream's newer contexts laid over it, through the same assembler. */
+  private async publishStreamed(): Promise<void> {
+    const rest = this.lastRest;
+    if (!rest) return;
+    try {
+      const merged = mergeSpotContexts(
+        rest.assetContexts,
+        HyperliquidAssetCtxWSClient.getInstance().getLive('spot'),
+        rest.at
+      );
+      await this.assembleAndPublish(rest.spotContext, merged);
+    } catch (error) {
+      logDeduplicator.error('Failed to publish streamed spot data:', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  public stopPolling(): void {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+      if (this.cadence) {
+        HyperliquidAssetCtxWSClient.getInstance().setCoins('spot', []);
+        this.cadence = null;
+      }
+      logDeduplicator.info('Spot polling stopped');
+    }
   }
 
   private async updateSpotData(): Promise<void> {
@@ -65,6 +124,14 @@ export class HyperliquidSpotClient extends BaseApiService {
         })
       );
       logDeduplicator.info('API call successful, processing data...');
+
+      // One assignment: a flush sees the previous read or this one, never a mix.
+      this.lastRest = { spotContext, assetContexts, at: Date.now() };
+      this.cadence?.restSucceeded();
+      // A new listing gets subscribed, a delisted pair unsubscribed.
+      if (this.cadence) {
+        HyperliquidAssetCtxWSClient.getInstance().setCoins('spot', spotContext.universe.map((market) => market.name));
+      }
 
       await this.assembleAndPublish(spotContext, assetContexts);
     } catch (error) {

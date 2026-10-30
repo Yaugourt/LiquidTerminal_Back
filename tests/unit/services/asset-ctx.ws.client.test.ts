@@ -7,7 +7,11 @@
  * - spot pairs answer on `activeSpotAssetCtx`, perps on `activeAssetCtx`; the
  *   latest context per coin is kept and the market flagged as changed;
  * - healthy = socket up, a frame within 15 s, >= 80 % of the subscribed coins
- *   updated within 30 s.
+ *   updated within 30 s;
+ * - acknowledgements are tracked per coin, error frames are logged once per
+ *   kind; a market unhealthy for over 60 s gets its missing subscribes sent
+ *   again, then (60 s later) the socket is dropped, at most every 5 minutes;
+ * - stop() also aborts a socket that is still connecting.
  */
 import { EventEmitter } from 'events';
 
@@ -30,8 +34,12 @@ class FakeWS extends EventEmitter {
   send(message: string): void {
     this.sent.push(JSON.parse(message));
   }
-  ping(): void {}
+  terminated = 0;
+  ping(): void {
+    setTimeout(() => this.emit('pong'), 0); // a live peer: the keep-alive never drops the socket
+  }
   terminate(): void {
+    this.terminated++;
     this.drop();
   }
   close(): void {
@@ -45,6 +53,12 @@ class FakeWS extends EventEmitter {
     this.readyState = FakeWS.CLOSED;
     this.emit('close', 1006, Buffer.from(''));
   }
+  raw(message: unknown): void {
+    this.emit('message', Buffer.from(JSON.stringify(message)));
+  }
+  ack(coin: string): void {
+    this.raw({ channel: 'subscriptionResponse', data: { method: 'subscribe', subscription: { type: 'activeAssetCtx', coin } } });
+  }
   frame(channel: string, coin: string, ctx: Record<string, unknown> = { markPx: '1.0' }): void {
     this.emit('message', Buffer.from(JSON.stringify({ channel, data: { coin, ctx } })));
   }
@@ -52,6 +66,7 @@ class FakeWS extends EventEmitter {
 
 jest.mock('ws', () => ({ __esModule: true, default: FakeWS }));
 
+import { logDeduplicator } from '../../../src/utils/logDeduplicator';
 import { HyperliquidAssetCtxWSClient } from '../../../src/clients/hyperliquid/websocket/asset-ctx.ws.client';
 
 const coins = (prefix: string, n: number): string[] => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
@@ -65,6 +80,8 @@ describe('HyperliquidAssetCtxWSClient', () => {
     FakeWS.instances = [];
     client = HyperliquidAssetCtxWSClient.getInstance();
     client.stop();
+    jest.mocked(logDeduplicator.error).mockClear();
+    jest.mocked(logDeduplicator.warn).mockClear();
   });
 
   afterEach(() => {
@@ -279,6 +296,193 @@ describe('HyperliquidAssetCtxWSClient', () => {
       client.setCoins('spot', [...all, '@new']);
       // 10 of 11 subscribed and covered: the queued listing does not flip health
       expect(client.isHealthy('spot')).toBe(true);
+    });
+  });
+  describe('acknowledgements and error frames', () => {
+    beforeEach(() => {
+      client.setCoins('spot', ['@1', '@2', '@3']);
+      current().open();
+      jest.advanceTimersByTime(1000);
+    });
+
+    it('counts a coin as acknowledged on its subscriptionResponse, and ignores one nobody sent', () => {
+      expect(client.getStats().acknowledged).toBe(0);
+      current().ack('@1');
+      current().ack('@1');
+      current().ack('@404');
+      current().raw({ channel: 'subscriptionResponse', data: { method: 'unsubscribe', subscription: { type: 'activeAssetCtx', coin: '@2' } } });
+      expect(client.getStats().acknowledged).toBe(1);
+    });
+
+    it('takes a first frame as an acknowledgement', () => {
+      current().frame('activeSpotAssetCtx', '@2');
+      expect(client.getStats().acknowledged).toBe(1);
+    });
+
+    it('forgets the acknowledgements on a new connection', () => {
+      current().ack('@1');
+      current().drop();
+      jest.advanceTimersByTime(3000);
+      current().open();
+      expect(client.getStats().acknowledged).toBe(0);
+    });
+
+    it('logs an error frame with its message, once per kind of error, and counts them all', () => {
+      for (const coin of ['@1', '@2', '@3']) {
+        current().raw({ channel: 'error', data: `Invalid subscription {"type":"activeAssetCtx","coin":"${coin}"}` });
+      }
+      expect(client.getStats().errorFrames).toBe(3);
+      const errors = jest.mocked(logDeduplicator.error).mock.calls.filter(([m]) => String(m).includes('error frame'));
+      expect(errors).toHaveLength(1);
+      expect(errors[0][1]).toMatchObject({ message: expect.stringContaining('Invalid subscription'), coin: '@1' });
+
+      current().raw({ channel: 'error', data: 'Too many subscriptions' });
+      expect(jest.mocked(logDeduplicator.error).mock.calls.filter(([m]) => String(m).includes('error frame'))).toHaveLength(2);
+
+      jest.advanceTimersByTime(61_000);
+      current().raw({ channel: 'error', data: 'Invalid subscription {"type":"activeAssetCtx","coin":"@9"}' });
+      const again = jest.mocked(logDeduplicator.error).mock.calls.filter(([m]) => String(m).includes('error frame'));
+      expect(again).toHaveLength(3);
+      expect(again[2][1]).toMatchObject({ suppressedSincePrevious: 2 });
+    });
+
+    it('reads "Already subscribed" as an acknowledgement and any other error as a refusal', () => {
+      current().ack('@1');
+      current().ack('@2');
+      current().raw({ channel: 'error', data: 'Already subscribed: {"type":"activeAssetCtx","coin":"@3"}' });
+      expect(client.getStats().acknowledged).toBe(3);
+      current().raw({ channel: 'error', data: 'Invalid subscription {"type":"activeAssetCtx","coin":"@2"}' });
+      expect(client.getStats().acknowledged).toBe(2);
+    });
+
+    it('survives an error frame with a non-string payload', () => {
+      current().raw({ channel: 'error', data: { code: 1 } });
+      current().raw({ channel: 'error' });
+      expect(client.getStats().errorFrames).toBe(2);
+    });
+  });
+
+  describe('recovery of an unhealthy market', () => {
+    const all = coins('@', 10);
+    const resentCoins = (ws: FakeWS, from: number): string[] => ws.sent.slice(from).map((m) => m.subscription.coin);
+
+    beforeEach(() => {
+      client.setCoins('spot', all);
+      current().open();
+      jest.advanceTimersByTime(1000); // all 10 sent at t = 1 s
+      for (const coin of all.slice(0, 8)) current().ack(coin); // @8 and @9 were refused
+    });
+
+    it('subscribes again, after 60 s unhealthy, the coins not acknowledged or not updating only', () => {
+      jest.advanceTimersByTime(59_000); // t = 60 s
+      for (const coin of all.slice(0, 7)) current().frame('activeSpotAssetCtx', coin); // 70 %: unhealthy
+      expect(current().sent).toHaveLength(10);
+
+      jest.advanceTimersByTime(5_000); // t = 65 s: the clock started at 5 s, 60 s not yet over
+      expect(current().sent).toHaveLength(10);
+
+      jest.advanceTimersByTime(10_000); // t = 75 s
+      expect(resentCoins(current(), 10).sort()).toEqual(['@7', '@8', '@9']);
+      expect(client.getStats().recovery).toEqual({ resends: 1, forcedReconnects: 0 });
+      expect(logDeduplicator.warn).toHaveBeenCalledWith(
+        expect.stringContaining('subscribing again'),
+        expect.objectContaining({ resent: 3, notAcknowledged: 2 })
+      );
+    });
+
+    it('resends once per episode, paced like any subscribe', () => {
+      jest.advanceTimersByTime(70_000);
+      const afterFirst = current().sent.length;
+      expect(afterFirst).toBeGreaterThan(10);
+      jest.advanceTimersByTime(40_000); // t = 110 s: still waiting for the 60 s after the resend
+      expect(current().sent).toHaveLength(afterFirst);
+    });
+
+    it('waits for the send queue to be empty before counting the 60 s', () => {
+      client.stop();
+      const many = coins('@', 1500); // 75 s of pacing
+      client.setCoins('spot', many);
+      current().open();
+      jest.advanceTimersByTime(70_000);
+      // still draining: nothing is sent twice, no recovery yet
+      expect(new Set(current().sent.map((m) => m.subscription.coin)).size).toBe(current().sent.length);
+      expect(client.getStats().recovery.resends).toBe(0);
+    });
+
+    it('drops the socket 60 s after the resend if the market is still unhealthy, and subscribes everything again', () => {
+      jest.advanceTimersByTime(70_000); // resend
+      const first = current();
+      jest.advanceTimersByTime(55_000); // t = 125 s
+      expect(first.terminated).toBe(0);
+      jest.advanceTimersByTime(15_000); // t = 140 s
+      expect(first.terminated).toBe(1);
+      expect(client.getStats().recovery.forcedReconnects).toBe(1);
+
+      jest.advanceTimersByTime(3_000);
+      expect(FakeWS.instances).toHaveLength(2);
+      current().open();
+      jest.advanceTimersByTime(1000);
+      expect(new Set(current().sent.map((m) => m.subscription.coin))).toEqual(new Set(all));
+    });
+
+    it('forces at most one reconnect every 5 minutes', () => {
+      jest.advanceTimersByTime(140_000); // first forced reconnect at about 135 s
+      jest.advanceTimersByTime(3_000);
+      expect(FakeWS.instances).toHaveLength(2);
+      current().open();
+
+      jest.advanceTimersByTime(280_000); // t = 423 s: well past a resend + 60 s, under 135 + 300
+      expect(FakeWS.instances).toHaveLength(2);
+      expect(client.getStats().recovery.forcedReconnects).toBe(1);
+
+      jest.advanceTimersByTime(25_000); // t = 448 s
+      jest.advanceTimersByTime(3_000);
+      expect(FakeWS.instances).toHaveLength(3);
+      expect(client.getStats().recovery.forcedReconnects).toBe(2);
+    });
+
+    it('does nothing while the market is healthy', () => {
+      for (let i = 0; i < 15; i++) {
+        for (const coin of all) current().frame('activeSpotAssetCtx', coin);
+        jest.advanceTimersByTime(10_000);
+      }
+      expect(current().sent).toHaveLength(10);
+      expect(client.getStats().recovery).toEqual({ resends: 0, forcedReconnects: 0 });
+    });
+
+    it('stops looking once the socket is down', () => {
+      current().drop();
+      jest.advanceTimersByTime(2_000); // before the reconnect
+      expect(client.getState()).toBe('reconnecting');
+      expect(client.getStats().recovery).toEqual({ resends: 0, forcedReconnects: 0 });
+    });
+  });
+
+  describe('stop', () => {
+    it('terminates a socket that is still connecting and does not reconnect', () => {
+      client.setCoins('spot', ['@1']);
+      const connecting = current();
+      expect(connecting.readyState).toBe(FakeWS.CONNECTING);
+
+      client.stop();
+      expect(connecting.terminated).toBe(1);
+      expect(client.getState()).toBe('disconnected');
+
+      connecting.open(); // too late: nobody listens
+      jest.advanceTimersByTime(120_000);
+      expect(client.isConnected()).toBe(false);
+      expect(FakeWS.instances).toHaveLength(1);
+      expect(client.getStats().subscribed).toBe(0);
+    });
+
+    it('can start again after stopping a connecting socket', () => {
+      client.setCoins('spot', ['@1']);
+      client.stop();
+      client.setCoins('spot', ['@2']);
+      expect(FakeWS.instances).toHaveLength(2);
+      current().open();
+      jest.advanceTimersByTime(500);
+      expect(current().sent.map((m) => m.subscription.coin)).toEqual(['@2']);
     });
   });
 });

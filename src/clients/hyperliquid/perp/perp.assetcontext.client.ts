@@ -5,7 +5,9 @@ import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.servic
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../../utils/guardedInterval';
-import { assemblePerp, PerpMetaAndContexts } from './perp.assembler';
+import { assemblePerp, mergePerpContexts, PerpMetaAndContexts } from './perp.assembler';
+import { HyperliquidAssetCtxWSClient } from '../websocket/asset-ctx.ws.client';
+import { CtxCadence, CTX_FLUSH_INTERVAL_MS, CTX_REST_ONLY_MS, isCtxStreamEnabled } from '../ctx.cadence';
 
 export class HyperliquidPerpClient extends BaseApiService {
   private static instance: HyperliquidPerpClient;
@@ -16,9 +18,15 @@ export class HyperliquidPerpClient extends BaseApiService {
   private readonly CACHE_KEY_RAW = 'perp:raw_data';
   private readonly CACHE_KEY_MARKETS = 'perp:markets';
   private readonly UPDATE_CHANNEL = 'perp:data:updated';
-  private readonly UPDATE_INTERVAL = 10000; // 10 secondes
+  /** REST-only cadence (stream switched off with HL_CTX_STREAM_ENABLED=false). */
+  private readonly UPDATE_INTERVAL = CTX_REST_ONLY_MS;
   private lastUpdate: number = 0;
   private pollingInterval: NodeJS.Timeout | null = null;
+
+  /** Set while the activeAssetCtx stream feeds this poller. */
+  private cadence: CtxCadence | null = null;
+  /** The last REST read, and when it arrived: the base the stream's contexts are laid over. */
+  private lastRest: { meta: { universe: PerpMarket[] }; assetContexts: PerpAssetContext[]; at: number } | null = null;
 
   private circuitBreaker: CircuitBreakerService;
   private rateLimiter: RateLimiterService;
@@ -45,6 +53,18 @@ export class HyperliquidPerpClient extends BaseApiService {
       return;
     }
 
+    if (isCtxStreamEnabled()) {
+      // Contexts come from the socket every 2 s; REST reconciles (60 s) or covers for it (20 s).
+      logDeduplicator.info('Starting perp polling (activeAssetCtx stream)');
+      this.cadence = new CtxCadence('perp', 'Perp');
+      this.pollingInterval = startGuardedInterval(
+        'Perp polling',
+        () => this.streamTick(),
+        CTX_FLUSH_INTERVAL_MS
+      );
+      return;
+    }
+
     logDeduplicator.info('Starting perp polling');
     this.pollingInterval = startGuardedInterval(
       'Perp polling',
@@ -53,10 +73,36 @@ export class HyperliquidPerpClient extends BaseApiService {
     );
   }
 
+  private async streamTick(): Promise<void> {
+    const cadence = this.cadence;
+    if (!cadence) return;
+    await cadence.tick(
+      () => this.updatePerpData(),
+      () => this.publishStreamed()
+    );
+  }
+
+  /** The last REST read with the stream's newer contexts laid over it, through the same assembler. */
+  private async publishStreamed(): Promise<void> {
+    const rest = this.lastRest;
+    if (!rest) return;
+    const merged = mergePerpContexts(
+      rest.meta,
+      rest.assetContexts,
+      HyperliquidAssetCtxWSClient.getInstance().getLive('perp'),
+      rest.at
+    );
+    await this.assembleAndPublish(rest.meta, merged);
+  }
+
   public stopPolling(): void {
     if (this.pollingInterval) {
       clearInterval(this.pollingInterval);
       this.pollingInterval = null;
+      if (this.cadence) {
+        HyperliquidAssetCtxWSClient.getInstance().setCoins('perp', []);
+        this.cadence = null;
+      }
       logDeduplicator.info('Perp polling stopped');
     }
   }
@@ -68,6 +114,17 @@ export class HyperliquidPerpClient extends BaseApiService {
           type: "metaAndAssetCtxs"
         })
       );
+
+      // One assignment: a flush sees the previous read or this one, never a mix.
+      this.lastRest = { meta, assetContexts, at: Date.now() };
+      this.cadence?.restSucceeded();
+      // A new listing gets subscribed, a delisted perp (no longer trades) unsubscribed.
+      if (this.cadence) {
+        HyperliquidAssetCtxWSClient.getInstance().setCoins(
+          'perp',
+          meta.universe.filter((market) => !market.isDelisted).map((market) => market.name)
+        );
+      }
 
       await this.assembleAndPublish(meta, assetContexts);
     } catch (error) {
