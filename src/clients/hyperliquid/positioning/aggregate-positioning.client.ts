@@ -5,6 +5,7 @@ import { prismaHistorical } from '../../../core/prisma.historical.service';
 import { withDistributedLock } from '../../../utils/distributedLock';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { TopTradersService } from '../../../services/toptraders/toptraders.service';
+import { HypeDexerInfoClient, viaInfoProxy } from '../../hypedexer/rest/info/info.client';
 import {
   AggregatePositioning,
   ClearinghouseState,
@@ -25,8 +26,13 @@ const CACHE_TTL = 120;
 
 /** Upper bound on the fanned-out cohort, so a refresh cannot balloon upstream calls. */
 const COHORT_CAP = 80;
-/** Concurrent clearinghouseState calls; kept under BaseApiService's global cap of 50. */
-const FANOUT_CONCURRENCY = 12;
+/**
+ * Concurrent clearinghouseState calls. HypeDexer's /info (3 credits a call, no
+ * Hyperliquid weight) takes the bursts of every HypeDexer caller on one key
+ * (~25-30 requests/s), so the fan-out stays small; the proxy client also caps
+ * its calls in flight and waits out a 429's Retry-After.
+ */
+const FANOUT_CONCURRENCY = 4;
 
 /**
  * Run `fn` over `items` with at most `limit` in flight; never rejects (settled
@@ -57,7 +63,7 @@ async function mapWithConcurrency<T, R>(
   return { results: out, aborted };
 }
 
-/** Hyperliquid answered 429: the backend's /info weight budget is spent. */
+/** Hyperliquid answered 429 (the fallback path; the proxy's own 429s are waited out): the backend's /info weight budget is spent. */
 const isRateLimited = (error: unknown): boolean => error instanceof HttpApiError && error.isRateLimited;
 
 /**
@@ -69,7 +75,8 @@ const isRateLimited = (error: unknown): boolean => error instanceof HttpApiError
  * notional into per-coin long/short totals. The heavy fan-out lives here on
  * the server, cached, so the browser reads one small snapshot.
  *
- * Circuit breaker id: `positioning`. Keyless upstream (HL public /info).
+ * Read through HypeDexer's /info (breaker `hypedexer-info`), Hyperliquid's
+ * public /info as the fallback (breaker id `positioning`).
  */
 export class AggregatePositioningClient extends BaseApiService {
   private static instance: AggregatePositioningClient;
@@ -143,9 +150,19 @@ export class AggregatePositioningClient extends BaseApiService {
     return [...seen];
   }
 
+  /**
+   * One wallet's state through HypeDexer's /info (same payload, `time` ~0.5 s
+   * older), from Hyperliquid (weight 2) when the proxy fails. Only a
+   * Hyperliquid 429 aborts the cycle (see `isRateLimited`).
+   */
   private async getClearinghouseState(address: string): Promise<ClearinghouseState> {
-    return this.circuitBreaker.execute(() =>
-      this.post<ClearinghouseState>('', { type: 'clearinghouseState', user: address })
+    return viaInfoProxy<ClearinghouseState>(
+      'clearinghouseState',
+      () => HypeDexerInfoClient.getInstance().clearinghouseState(address),
+      () =>
+        this.circuitBreaker.execute(() =>
+          this.post<ClearinghouseState>('', { type: 'clearinghouseState', user: address })
+        )
     );
   }
 

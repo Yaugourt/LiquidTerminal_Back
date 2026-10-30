@@ -150,6 +150,8 @@ const spotRawData = (fixtures: Fixture[]): string => {
   return JSON.stringify([{ tokens, universe }, contexts]);
 };
 
+const onHyperliquid = (url: unknown): boolean => String(url).includes('hyperliquid.xyz');
+
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -163,11 +165,20 @@ describe('SpotBridgeReserveService', () => {
   let systemBalances: Map<string, Balance[]>;
   let mod: ServiceModule;
 
+  /** HypeDexer's /info is down: the balance reads fall back to Hyperliquid. */
+  let proxyDown: boolean;
+
+  /**
+   * The cycle's logical reads: a balance read that went to Hyperliquid after
+   * the proxy failed is the same read again, not a new one.
+   */
   const reads = (): { type: string; key: string }[] =>
-    fetchMock.mock.calls.map((call) => {
-      const body = JSON.parse(String((call[1] as RequestInit).body));
-      return { type: body.type, key: body.tokenId ?? body.user };
-    });
+    fetchMock.mock.calls
+      .filter((call) => !(onHyperliquid(call[0]) && JSON.parse(String((call[1] as RequestInit).body)).type === 'spotClearinghouseState'))
+      .map((call) => {
+        const body = JSON.parse(String((call[1] as RequestInit).body));
+        return { type: body.type, key: body.tokenId ?? body.user };
+      });
   const nameOf = (key: string): string =>
     FIXTURES.find((f) => f.tokenId === key || sys(f.index) === key)?.name ?? key;
   const genesisReads = (): string[] => reads().filter((r) => r.type === 'tokenDetails').map((r) => nameOf(r.key));
@@ -192,9 +203,11 @@ describe('SpotBridgeReserveService', () => {
     redisMget.mockClear();
     redisDown = false;
     failing = new Set();
+    proxyDown = false;
     systemBalances = new Map(FIXTURES.map((f) => [sys(f.index), f.systemBalances ?? []]));
-    fetchMock = jest.fn(async (_url: string, init: RequestInit) => {
+    fetchMock = jest.fn(async (url: string, init: RequestInit) => {
       const body = JSON.parse(String(init.body));
+      if (!onHyperliquid(url) && proxyDown) return json({ error: 'down' }, 502);
       if (body.type === 'tokenDetails') {
         const f = FIXTURES.find((x) => x.tokenId === body.tokenId);
         if (!f || failing.has(f.name)) return json(null);
@@ -515,5 +528,30 @@ describe('SpotBridgeReserveService', () => {
     expect(genesisReads().slice(-1)).toEqual(['T4']);
     expect(redisSet).toHaveBeenCalledTimes(1);
     expect(saved()[XAUT0.tokenId]).toEqual({ role: 'reserve', balance: 184467436800.4237670898, balanceReadAt: now });
+  });
+
+  it('reads the system address balances through HypeDexer, never Hyperliquid', async () => {
+    const service = mod.SpotBridgeReserveService.getInstance();
+    await runCycle(service);
+    const balanceCalls = fetchMock.mock.calls.filter((c) => JSON.parse(String((c[1] as RequestInit).body)).type === 'spotClearinghouseState');
+    expect(balanceCalls.length).toBeGreaterThan(0);
+    expect(balanceCalls.every((c) => !onHyperliquid(c[0]) && /\/info$/.test(String(c[0])))).toBe(true);
+    // The genesis reads stay on Hyperliquid.
+    const genesisCalls = fetchMock.mock.calls.filter((c) => JSON.parse(String((c[1] as RequestInit).body)).type === 'tokenDetails');
+    expect(genesisCalls.length).toBeGreaterThan(0);
+    expect(genesisCalls.every((c) => onHyperliquid(c[0]))).toBe(true);
+    expect(service.reserveOf(AAPL.tokenId)).toBe(18362499981.61);
+  });
+
+  it('falls back to Hyperliquid for the balances when the proxy fails, with the same result', async () => {
+    proxyDown = true;
+    const service = mod.SpotBridgeReserveService.getInstance();
+    await runCycle(service);
+    const hlBalanceCalls = fetchMock.mock.calls.filter(
+      (c) => onHyperliquid(c[0]) && JSON.parse(String((c[1] as RequestInit).body)).type === 'spotClearinghouseState'
+    );
+    expect(hlBalanceCalls.length).toBeGreaterThan(0);
+    expect(service.reserveOf(AAPL.tokenId)).toBe(18362499981.61);
+    expect(service.reserveOf(XAUT0.tokenId)).toBe(184467436800.4237670898);
   });
 });

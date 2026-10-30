@@ -16,6 +16,7 @@ import {
   RY_INTEREST_ADDRESS,
   RY_MIN_USDC,
 } from '../revenue/reserve-yield.ledger';
+import { readReserveLedger } from '../revenue/reserve-yield.source';
 
 /**
  * Market alerts: price, funding, open interest, listings, leverage changes and
@@ -457,7 +458,6 @@ const POLL_MS = 10_000;
 const RY_POLL_MS = 60_000;
 /** Time of the last ledger entry turned into events, so a restart neither replays nor skips. */
 const RY_CURSOR_KEY = 'alerts:market:reserve_yield_cursor';
-const INFO_URL = 'https://api.hyperliquid.xyz/info';
 
 /**
  * Feeds market events into an AlertEngine. Rules come from AlertRule and are
@@ -551,14 +551,8 @@ export class MarketAlertsService {
         return;
       }
       const cursor = Number(stored);
-      const res = await fetch(INFO_URL, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ type: 'userNonFundingLedgerUpdates', user: RY_INTEREST_ADDRESS, startTime: cursor }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) throw new Error(`info ${res.status}`);
-      const updates = (await res.json()) as LedgerUpdate[];
+      // Oldest first whichever source answers (HypeDexer's /info, else Hyperliquid).
+      const updates = await readReserveLedger(cursor);
       const latest = updates.reduce((m, u) => Math.max(m, u.time), cursor);
       const events = reserveYieldEvents(updates, cursor);
       if (events.length) this.engine.ingest(events);

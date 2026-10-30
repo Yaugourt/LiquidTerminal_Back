@@ -4,6 +4,7 @@ import { redisService } from '../../core/redis.service';
 import { MarketData, PerpMarketData } from '../../types/market.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { OnDemandSnapshot } from '../../utils/onDemandSnapshot';
+import { HypeDexerInfoClient, viaInfoProxy } from '../../clients/hypedexer/rest/info/info.client';
 import {
   AllPerpMetas,
   enrichTwapOrders,
@@ -29,8 +30,13 @@ class HyperliquidPerpMetasClient extends BaseApiService {
     super((process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info');
   }
 
+  /** Through HypeDexer's /info (byte-identical, 4 credits, no Hyperliquid weight), from Hyperliquid (weight 20) when that fails. */
   getAllPerpMetas(): Promise<AllPerpMetas> {
-    return this.post<AllPerpMetas>('', { type: 'allPerpMetas' });
+    return viaInfoProxy<AllPerpMetas>(
+      'allPerpMetas',
+      () => HypeDexerInfoClient.getInstance().allPerpMetas(),
+      () => this.post<AllPerpMetas>('', { type: 'allPerpMetas' })
+    );
   }
 }
 

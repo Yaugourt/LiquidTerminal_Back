@@ -5,6 +5,9 @@ import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.servic
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../../utils/guardedInterval';
+import { HypeDexerInfoClient, viaInfoProxy } from '../../hypedexer/rest/info/info.client';
+
+const DEPLOY_STATE_USER = '0x0000000000000000000000000000000000000000';
 
 export class HyperliquidSpotDeployClient extends BaseApiService {
   private static instance: HyperliquidSpotDeployClient;
@@ -14,11 +17,16 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
 
   private readonly CACHE_KEY = 'spot:deploy:state';
   private readonly UPDATE_CHANNEL = 'spot:deploy:updated';
-  // 20 s (weight 20 → 60 a minute; counted in the backend's Hyperliquid
-  // budget, as api-ui may share api.hyperliquid.xyz's per-IP weight): the
-  // front polls every 30 s and the Dutch-auction price moves on a schedule.
-  private readonly UPDATE_INTERVAL = 20000;
+  // 5 s through HypeDexer's /info (3 credits a call, no Hyperliquid weight),
+  // so the auction countdown and a new auction show within seconds. The
+  // Dutch-auction price itself moves on a schedule the front computes.
+  private readonly UPDATE_INTERVAL = 5000;
+  // While the proxy is down, Hyperliquid (api-ui) is read at the former 20 s
+  // pace (weight 20 → 60 a minute, counted in the backend's budget as api-ui
+  // may share api.hyperliquid.xyz's per-IP weight), not at every 5 s tick.
+  private static readonly DIRECT_MIN_INTERVAL_MS = 20000;
   private lastUpdate: number = 0;
+  private lastDirectRead: number = 0;
   private pollingInterval: NodeJS.Timeout | null = null;
 
   private circuitBreaker: CircuitBreakerService;
@@ -62,15 +70,35 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
     }
   }
 
-  private async updateDeployState(): Promise<void> {
+  /**
+   * The state through the HypeDexer proxy, from Hyperliquid (api-ui) when the
+   * proxy fails. null: the proxy is down and the last direct read is too
+   * recent (DIRECT_MIN_INTERVAL_MS) to spend 20 more weight on; the cached
+   * state stays. `force` (a cold cache) always reads.
+   */
+  private readState(force: boolean): Promise<GasAuctionResponse | null> {
+    return viaInfoProxy<GasAuctionResponse | null>(
+      'spotDeployState',
+      () => HypeDexerInfoClient.getInstance().spotDeployState(DEPLOY_STATE_USER),
+      async () => {
+        const now = Date.now();
+        if (!force && now - this.lastDirectRead < HyperliquidSpotDeployClient.DIRECT_MIN_INTERVAL_MS) return null;
+        this.lastDirectRead = now;
+        return this.circuitBreaker.execute(() =>
+          this.post<GasAuctionResponse>('', {
+            type: "spotDeployState",
+            user: DEPLOY_STATE_USER
+          })
+        );
+      }
+    );
+  }
+
+  private async updateDeployState(force = false): Promise<void> {
     try {
-      const data = await this.circuitBreaker.execute(() => 
-        this.post<GasAuctionResponse>('', {
-          type: "spotDeployState",
-          user: "0x0000000000000000000000000000000000000000"
-        })
-      );
-      
+      const data = await this.readState(force);
+      if (!data) return;
+
       await redisService.set(this.CACHE_KEY, JSON.stringify(data));
       const now = Date.now();
       await redisService.publish(this.UPDATE_CHANNEL, JSON.stringify({
@@ -101,7 +129,7 @@ export class HyperliquidSpotDeployClient extends BaseApiService {
       }
 
       logDeduplicator.warn('No spot deploy state in cache, forcing update');
-      await this.updateDeployState();
+      await this.updateDeployState(true);
       const freshData = await redisService.get(this.CACHE_KEY);
       if (!freshData) {
         throw new Error('Failed to get spot deploy state after update');

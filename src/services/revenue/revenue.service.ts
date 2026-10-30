@@ -25,9 +25,9 @@ import {
 import {
   LedgerUpdate,
   RY_ACTIVATION_MS,
-  RY_INTEREST_ADDRESS,
   bucketReserveYieldByDay,
 } from './reserve-yield.ledger';
+import { readReserveLedger } from './reserve-yield.source';
 
 
 const HIP3_CACHE_KEY = 'revenue:hip3:auctions';
@@ -38,7 +38,6 @@ const PRIORITY_CACHE_KEY = 'revenue:priority:daily';
 const PRIORITY_CACHE_TTL_SECONDS = 30 * 60;
 const RESERVE_CACHE_KEY = 'revenue:reserve:ledger';
 const RESERVE_CACHE_TTL_SECONDS = 10 * 60;
-const INFO_URL = 'https://api.hyperliquid.xyz/info';
 const BREAKDOWN_CACHE_PREFIX = 'revenue:breakdown:';
 const BREAKDOWN_CACHE_TTL_SECONDS = 5 * 60;
 
@@ -379,15 +378,7 @@ export class RevenueService {
       }
     }
 
-    const res = await fetch(INFO_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'userNonFundingLedgerUpdates', user: RY_INTEREST_ADDRESS, startTime: RY_ACTIVATION_MS }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) throw new Error(`info userNonFundingLedgerUpdates ${res.status}`);
-    const rows = (await res.json()) as LedgerUpdate[];
-    if (!Array.isArray(rows)) throw new Error('unexpected ledger payload');
+    const rows = await readReserveLedger(RY_ACTIVATION_MS);
 
     await redisService.set(RESERVE_CACHE_KEY, JSON.stringify(rows), RESERVE_CACHE_TTL_SECONDS);
     return rows;

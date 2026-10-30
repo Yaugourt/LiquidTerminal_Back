@@ -4,6 +4,7 @@ import { AssetContext, SpotContext } from '../../types/market.types';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../utils/guardedInterval';
 import { positiveIntEnv } from '../../utils/env';
+import { HypeDexerInfoClient, viaInfoProxy } from '../../clients/hypedexer/rest/info/info.client';
 
 /** `tokenDetails`, the fields read here. */
 interface RawTokenGenesis {
@@ -77,8 +78,17 @@ class HyperliquidReserveClient extends BaseApiService {
     return this.post<RawTokenGenesis | null>('', { type: 'tokenDetails', tokenId });
   }
 
+  /**
+   * Through HypeDexer's /info (same payload, no Hyperliquid weight), from
+   * Hyperliquid (weight 2) when the proxy fails. The cycle's weight budget
+   * charges the read either way, which also bounds the proxy calls per cycle.
+   */
   spotClearinghouseState(user: string): Promise<RawSpotBalances | null> {
-    return this.post<RawSpotBalances | null>('', { type: 'spotClearinghouseState', user });
+    return viaInfoProxy<RawSpotBalances | null>(
+      'spotClearinghouseState',
+      () => HypeDexerInfoClient.getInstance().spotClearinghouseState(user),
+      () => this.post<RawSpotBalances | null>('', { type: 'spotClearinghouseState', user })
+    );
   }
 }
 
@@ -97,8 +107,10 @@ class HyperliquidReserveClient extends BaseApiService {
  * - The genesis of each listed token is read once (`tokenDetails`, weight
  *   20), largest reported cap first: it never changes, so the role it gives
  *   the system address is kept in Redis for good.
- * - The system address's HyperCore balance (`spotClearinghouseState`, weight
- *   2) is read when the role is found, then every RESERVE_REFRESH_MS for a
+ * - The system address's HyperCore balance (`spotClearinghouseState`, read
+ *   through HypeDexer's /info for 3 credits and no Hyperliquid weight, from
+ *   Hyperliquid at weight 2 when that fails; the budget below charges 2
+ *   either way) is read when the role is found, then every RESERVE_REFRESH_MS for a
  *   reserve and every WATCH_REFRESH_MS for a watched token. A watched token
  *   becomes a reserve, for good, once the address holds PARKED_SHARE of the
  *   circulating supply.
