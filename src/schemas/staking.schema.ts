@@ -63,6 +63,23 @@ export const trendingValidatorsGetSchema = z.object({
   params: z.object({})
 });
 
+// Schéma pour GET /staking/holders (page >= 1, limit 1..1000; entiers uniquement)
+export const stakedHoldersGetSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(1000).optional().default(20)
+  }),
+  params: z.object({})
+});
+
+// Schéma pour GET /staking/holders/top (limit 1..100)
+export const topHoldersGetSchema = z.object({
+  query: z.object({
+    limit: z.coerce.number().int().min(1).max(100).optional().default(10)
+  }),
+  params: z.object({})
+});
+
 // Schéma pour les routes sans query params
 export const stakingStatsGetSchema = z.object({
   query: z.object({}),

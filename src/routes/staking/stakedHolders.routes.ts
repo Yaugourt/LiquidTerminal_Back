@@ -1,6 +1,8 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { StakedHoldersService, StakedHoldersUnavailableError } from '../../services/staking/stakedHolders.service';
 import { marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { validateGetRequest } from '../../middleware/validation';
+import { stakedHoldersGetSchema, topHoldersGetSchema } from '../../schemas/staking.schema';
 
 const router = Router();
 const stakedHoldersService = StakedHoldersService.getInstance();
@@ -25,7 +27,8 @@ function sendUnavailable(res: Response): void {
  * GET /api/staking/holders
  * Récupère la liste paginée des holders de stakedHYPE triés par montant décroissant
  */
-router.get('/', 
+router.get('/',
+  validateGetRequest(stakedHoldersGetSchema),
   (async (req: Request, res: Response) => {
     try {
       const page = parseInt(req.query.page as string) || 1;
@@ -53,6 +56,7 @@ router.get('/',
  * Récupère les top holders de stakedHYPE
  */
 router.get('/top',
+  validateGetRequest(topHoldersGetSchema),
   (async (req: Request, res: Response) => {
     try {
       const limit = parseInt(req.query.limit as string) || 10;

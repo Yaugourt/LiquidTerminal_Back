@@ -60,8 +60,8 @@ describe('GET /staking/holders', () => {
   });
 
   it('keeps 500 for anything else', async () => {
-    service.getStakedHolders.mockRejectedValue(new Error('Page must be greater than 0'));
-    const res = await request(buildApp()).get('/staking/holders?page=0');
+    service.getStakedHolders.mockRejectedValue(new Error('boom'));
+    const res = await request(buildApp()).get('/staking/holders?page=1');
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('STAKED_HOLDERS_ERROR');
   });
