@@ -52,6 +52,8 @@ type Hip4FillsQuery = NonNullable<Parameters<HypeDexerHip4Client['getFills']>[0]
 const HOUR_MS = 60 * 60 * 1000;
 /** A tape whose newest fill is this old is dormant. */
 const DORMANT_FILLS_MS = 24 * HOUR_MS;
+/** The coin page's head read: the newest fills, polled every 5 s. */
+const HIP4_HEAD_FILLS_LIMIT = 50;
 const HL_INFO_URL = 'https://api.hyperliquid.xyz/info';
 const OUTCOME_META_TIMEOUT_MS = 5_000;
 /** The backend validates the analytics `coin` filter as a string of at most 256 chars. */
@@ -176,8 +178,9 @@ function coinResolution(
  * How long a market's fills stay cached, from the age of its newest fill. An
  * empty answer may be a market about to open, so it is only kept a minute. A
  * dormant tape is kept a day once its market is `delisted` from outcomeMeta.
+ * The `head` read of an active coin gets the shorter `hip4ActiveHeadFills`.
  */
-function marketFillsTtl(rows: unknown, delisted: boolean): number {
+function marketFillsTtl(rows: unknown, delisted: boolean, head = false): number {
   if (!Array.isArray(rows) || rows.length === 0) return HYPEDEXER_TTL.hip4QuietFills;
   const age = newestFillAgeMs(rows);
   // No readable time (field renamed upstream?): don't mistake it for dormant.
@@ -186,7 +189,7 @@ function marketFillsTtl(rows: unknown, delisted: boolean): number {
     return delisted ? HYPEDEXER_TTL.hip4DelistedFills : HYPEDEXER_TTL.hip4DormantFills;
   }
   if (age >= HOUR_MS) return HYPEDEXER_TTL.hip4QuietFills;
-  return HYPEDEXER_TTL.hip4ActiveFills;
+  return head ? HYPEDEXER_TTL.hip4ActiveHeadFills : HYPEDEXER_TTL.hip4ActiveFills;
 }
 
 /** Raw outcome N behind a side coin `#<10N + side>`; null for any other filter. */
@@ -261,6 +264,9 @@ export class IndexerHip4Service {
     // Only a dormant coin tape, read as the front reads it, asks whether its
     // market is still listed.
     const outcome = isPlainCoinTape(p) ? outcomeOfCoin(p.coin) : null;
+    // The coin page's head read (one coin, the newest 50): the only read kept
+    // 5 s. The global tape and every other limit keep the TTLs by activity.
+    const head = outcome !== null && p.limit === HIP4_HEAD_FILLS_LIMIT;
     let delisted = false;
     return cacheService.getOrSet(
       buildHypedexerCacheKey('hip4', 'fills', { ...p }),
@@ -275,7 +281,7 @@ export class IndexerHip4Service {
         return rows;
       },
       // getOrSet runs it on the value this call's own fetch just returned.
-      (rows) => marketFillsTtl(rows, delisted)
+      (rows) => marketFillsTtl(rows, delisted, head)
     );
   }
 

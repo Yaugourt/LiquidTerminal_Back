@@ -145,6 +145,25 @@ describe('IndexerHip4Service caching', () => {
       expect(outcomeMetaReads()).toBe(0);
     });
 
+    it('keeps an active coin\u2019s head read (limit 50) 5 s, and only that read', async () => {
+      listOutcomes([5, 120]);
+      mockClient.getFills.mockImplementation(async ({ coin }: { coin?: string }) =>
+        coin === '#1200' ? [fill(coin, 2 * 24 * HOUR)] : [fill(coin ?? '#1110', 5_000)]);
+
+      await svc.getFills({ coin: '#1100', limit: 50 }); // head of an active coin
+      await svc.getFills({ coin: '#1100', limit: 400 }); // its full read
+      await svc.getFills({ coin: '#1110', limit: 49 }); // not the head the front sends
+      await svc.getFills({ limit: 50 }); // the global tape
+      await svc.getFills({ coin: '#1200', limit: 50 }); // head of a dormant coin: back-off kept
+
+      expect(storedTtl('"coin":"#1100","limit":50')).toBe(HYPEDEXER_TTL.hip4ActiveHeadFills);
+      expect(storedTtl('"coin":"#1100","limit":400')).toBe(HYPEDEXER_TTL.hip4ActiveFills);
+      expect(storedTtl('"coin":"#1110","limit":49')).toBe(HYPEDEXER_TTL.hip4ActiveFills);
+      expect(storedTtl('fills:{"limit":50}')).toBe(HYPEDEXER_TTL.hip4ActiveFills);
+      expect(storedTtl('"coin":"#1200","limit":50')).toBe(HYPEDEXER_TTL.hip4DormantFills);
+      expect(HYPEDEXER_TTL.hip4ActiveHeadFills).toBe(5);
+    });
+
     it('keeps the hour for reads the front does not make, without asking', async () => {
       listOutcomes([5]);
       mockClient.getFills.mockImplementation(async ({ coin }: { coin?: string }) => [fill(coin ?? '#0', 2 * 24 * HOUR)]);

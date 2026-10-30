@@ -72,9 +72,14 @@ export const HYPEDEXER_TTL = {
   hip4OutcomeMeta:        60,
   /** Market fills (a coin's tape, the global tape), by age of the newest fill:
    * a market trading in the last hour, one quiet for hours, one dormant for a
-   * day or more (settled/expired: its history no longer moves). The tapes
-   * poll every 10 s. */
+   * day or more (settled/expired: its history no longer moves). The global
+   * tape and a coin's full read poll every 10 s / 60 s. */
   hip4ActiveFills:        10,
+  /** The head read of an active coin's tape (`HIP4_HEAD_FILLS_LIMIT` newest
+   * fills, 7 credits): the coin page polls it every 5 s and merges it over its
+   * full read, so the newest fills are at most ~10 s old. A quiet or dormant
+   * market keeps the TTLs above. */
+  hip4ActiveHeadFills:     5,
   hip4QuietFills:         60,
   hip4DormantFills:     3600,
   /** A dormant coin tape whose market Hyperliquid no longer lists
