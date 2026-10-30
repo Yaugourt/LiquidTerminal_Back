@@ -1,14 +1,24 @@
+import https from 'node:https';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import pkg from '../../../package.json';
+import { currentRegistrator, expiries, fullRecord } from './hlnames.chain';
+import { HlNamesDirectory, ListPageFetcher } from './hlnames.directory';
 
 /**
- * Hyperliquid Names (.hl) resolution, through their public REST API
- * (https://api.hlnames.xyz/api, documented at
- * hyperliquid-names.gitbook.io/hyperliquid-names/dapp-integration).
+ * Hyperliquid Names (.hl) resolution.
  *
- * Every lookup is cached in Redis so the whole site costs their API a few
- * calls per address per day: names 6h, "no name" 5 min, failures are not cached.
- * Batch reverse lookups go in chunks of 150 (their endpoint fails past ~200).
+ * Primary names come from an in-memory copy of their full list (see
+ * HlNamesDirectory: a few conditional calls every 10 minutes), expiries and
+ * profiles from HyperEVM (see hlnames.chain), so page views and alerts cost
+ * their REST API (https://api.hlnames.xyz/api) nothing. The REST path below
+ * stays as the fallback while the copy is loading, and for forward lookups of
+ * names nobody uses as primary, owned names and mint passes.
+ *
+ * Every REST call goes through a shared budget and a circuit breaker, and is
+ * counted in a log line every 10 minutes. Lookups are cached in Redis: names
+ * 6 h, "no name" 5 min, failures are not cached. Batch reverse lookups go in
+ * chunks of 150 (their endpoint fails past ~200).
  */
 
 const BASE = process.env.HLNAMES_API_URL || 'https://api.hlnames.xyz/api';
@@ -24,6 +34,8 @@ const TTL_S = 6 * 3600;
 const NEGATIVE_TTL_S = 300;
 const CHUNK = 150;
 const TIMEOUT_MS = 6_000;
+/** Same User-Agent as our other upstreams, so HL Names can attribute our traffic. */
+const USER_AGENT = `liquidterminal-back/${pkg.version || '0.0.0'}`;
 const NONE = '';
 
 const ADDRESS_RE = /^0x[0-9a-f]{40}$/;
@@ -56,21 +68,143 @@ export interface MintPass {
   amountRequired: string;
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T | null }> {
+/**
+ * Shared budget for REST calls a visitor can trigger: a bucket of BUDGET_MAX
+ * refilled at BUDGET_PER_S, and a breaker that stops calling for BREAKER_MS
+ * after BREAKER_FAILURES failures in a row (5xx, 429, network). Mint passes
+ * and the list refresh are "essential": they skip the bucket, not the breaker.
+ */
+const BUDGET_MAX = 60;
+const BUDGET_PER_S = 1;
+const BREAKER_FAILURES = 5;
+const BREAKER_MS = 60_000;
+const STATS_EVERY_MS = 10 * 60_000;
+/** A page of 1,000 primary names is about 250 KB. */
+const LIST_PAGE_MAX_BYTES = 2_000_000;
+
+export class HlNamesBudgetError extends Error {
+  constructor(reason: string) {
+    super(`hlnames ${reason}`);
+  }
+}
+
+const guard = {
+  tokens: BUDGET_MAX,
+  at: Date.now(),
+  failures: 0,
+  openUntil: 0,
+  counts: {} as Record<string, number>,
+  statsAt: Date.now(),
+};
+
+/** Test hook: a fresh budget and breaker. */
+export function resetHlNamesGuard(now = Date.now()): void {
+  Object.assign(guard, { tokens: BUDGET_MAX, at: now, failures: 0, openUntil: 0, counts: {}, statsAt: now });
+}
+
+function admit(kind: string, essential: boolean): void {
+  const now = Date.now();
+  if (now < guard.openUntil) throw new HlNamesBudgetError('circuit open');
+  guard.tokens = Math.min(BUDGET_MAX, guard.tokens + ((now - guard.at) / 1000) * BUDGET_PER_S);
+  guard.at = now;
+  if (!essential) {
+    if (guard.tokens < 1) throw new HlNamesBudgetError('budget exhausted');
+    guard.tokens -= 1;
+  }
+  guard.counts[kind] = (guard.counts[kind] ?? 0) + 1;
+  if (now - guard.statsAt >= STATS_EVERY_MS) {
+    logDeduplicator.info('HlNames upstream calls', { windowMin: Math.round((now - guard.statsAt) / 60_000), ...guard.counts });
+    guard.counts = {};
+    guard.statsAt = now;
+  }
+}
+
+function settle(ok: boolean): void {
+  if (ok) {
+    guard.failures = 0;
+    return;
+  }
+  guard.failures += 1;
+  if (guard.failures >= BREAKER_FAILURES) {
+    guard.openUntil = Date.now() + BREAKER_MS;
+    guard.failures = 0;
+  }
+}
+
+/** Kind of call for the counters: the first two path segments (no addresses or names). */
+const kindOf = (path: string): string => path.split('?')[0].split('/').slice(1, 3).join('/');
+
+async function call<T>(
+  path: string,
+  init?: RequestInit & { essential?: boolean }
+): Promise<{ status: number; body: T | null }> {
+  const { essential = false, ...rest } = init ?? {};
+  admit(kindOf(path), essential);
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(`${BASE}${path}`, {
-      ...init,
-      headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      ...rest,
+      headers: { 'X-API-Key': KEY, 'Content-Type': 'application/json', 'User-Agent': USER_AGENT, ...(rest.headers ?? {}) },
       signal: ctrl.signal,
     });
+    settle(res.status < 500 && res.status !== 429);
     const body = res.headers.get('content-type')?.includes('json') ? ((await res.json()) as T) : null;
     return { status: res.status, body };
+  } catch (error) {
+    settle(false);
+    throw error;
   } finally {
     clearTimeout(t);
   }
 }
+
+/**
+ * One page of their primary-name list, conditional on the ETag we hold.
+ * Plain node:https, not fetch: fetch adds "Cache-Control: no-cache" to any
+ * request carrying If-None-Match, and their server then never answers 304.
+ */
+const fetchPrimaryPage: ListPageFetcher = async (begin, end, etag) => {
+  const path = `/utils/all_primary_names?begin=${begin}&end=${end}`;
+  admit(kindOf(path), true);
+  let answered = false;
+  try {
+    const res = await new Promise<{ status: number; etag: string | null; text: string }>((resolve, reject) => {
+      const req = https.get(
+        `${BASE}${path}`,
+        {
+          headers: { 'X-API-Key': KEY, 'User-Agent': USER_AGENT, Accept: 'application/json', ...(etag ? { 'If-None-Match': etag } : {}) },
+          timeout: TIMEOUT_MS,
+        },
+        (r) => {
+          const chunks: Buffer[] = [];
+          let size = 0;
+          r.on('data', (c: Buffer) => {
+            size += c.length;
+            if (size > LIST_PAGE_MAX_BYTES) req.destroy(new Error('list page too large'));
+            else chunks.push(c);
+          });
+          r.on('end', () => {
+            const tag = r.headers.etag;
+            resolve({ status: r.statusCode ?? 0, etag: typeof tag === 'string' ? tag : null, text: Buffer.concat(chunks).toString('utf8') });
+          });
+          r.on('error', reject);
+        }
+      );
+      req.on('timeout', () => req.destroy(new Error('timeout')));
+      req.on('error', reject);
+    });
+    answered = true;
+    settle(res.status < 500 && res.status !== 429);
+    if (res.status === 304) return { status: 304 };
+    const rows = res.status === 200 ? (JSON.parse(res.text) as unknown) : null;
+    if (!Array.isArray(rows)) throw new Error(`all_primary_names status ${res.status}`);
+    return { status: 200, etag: res.etag, rows };
+  } catch (error) {
+    if (!answered) settle(false);
+    throw error;
+  }
+};
 
 /** A name an address holds, with its expiry (Unix seconds, null when unknown). */
 export interface OwnedName {
@@ -137,9 +271,15 @@ export class HlNamesClient {
   private static instance: HlNamesClient;
 
   public static getInstance(): HlNamesClient {
-    if (!HlNamesClient.instance) HlNamesClient.instance = new HlNamesClient();
+    if (!HlNamesClient.instance) {
+      HlNamesClient.instance = new HlNamesClient();
+      if (process.env.NODE_ENV !== 'test') HlNamesClient.instance.directory.start();
+    }
     return HlNamesClient.instance;
   }
+
+  /** Local copy of every primary name (see HlNamesDirectory). */
+  readonly directory = new HlNamesDirectory(fetchPrimaryPage);
 
   /**
    * Primary .hl name for each address (lowercase in, lowercase keys out).
@@ -150,6 +290,12 @@ export class HlNamesClient {
     const wanted = [...new Set(addresses.map((a) => a.toLowerCase()).filter((a) => ADDRESS_RE.test(a)))];
     const out: Record<string, string | null> = {};
     if (!wanted.length) return out;
+
+    // Served from the local copy once it is loaded: no Redis, no upstream call.
+    if (this.directory.ready) {
+      for (const a of wanted) out[a] = this.directory.primaryName(a) ?? null;
+      return out;
+    }
 
     const cached = await redisService.mget(wanted.map(keyPrimary));
     const misses: string[] = [];
@@ -194,6 +340,8 @@ export class HlNamesClient {
   async resolve(name: string): Promise<string | null> {
     const n = name.trim().toLowerCase();
     if (!HL_NAME_RE.test(n)) return null;
+    const local = this.directory.addressOf(n);
+    if (local) return local;
     const hit = await redisService.get(keyForward(n));
     if (hit !== null) return hit === NONE ? null : hit;
     const { status, body } = await call<{ address?: string }>(`/resolve/address/${encodeURIComponent(n)}`);
@@ -214,6 +362,30 @@ export class HlNamesClient {
     if (!ADDRESS_RE.test(a)) return empty;
     const hit = await redisService.get(keyProfile(a));
     if (hit) return JSON.parse(hit) as HlProfile;
+
+    // Once the local copy is loaded: no live primary name means an empty
+    // profile at no cost, and records are read on chain.
+    const entry = this.directory.entry(a);
+    if (entry === null) return empty;
+    const registrator = this.directory.registratorAddress();
+    if (entry && registrator) {
+      try {
+        const { records } = await fullRecord(registrator, entry.namehash);
+        const avatarKey = Object.keys(records).find((k) => k.toLowerCase() === 'avatar');
+        const profile: HlProfile = {
+          address: a,
+          name: entry.name,
+          avatar: avatarKey ? safeUrl(records[avatarKey]) : null,
+          records: sanitizeRecords(records),
+        };
+        await redisService.set(keyProfile(a), JSON.stringify(profile), TTL_S);
+        return profile;
+      } catch (error) {
+        logDeduplicator.warn('HlNames: on-chain profile failed, using the API', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
     const { status, body } = await call<{ primaryName: string | null; avatar: string | null }>(`/resolve/profile/${a}`);
     if (status !== 200 || !body) throw new Error(`hlnames profile status ${status}`);
@@ -245,6 +417,7 @@ export class HlNamesClient {
   async mintPass(label: string, token: 'native' | 'usdc'): Promise<MintPass> {
     const { status, body } = await call<MintPass>(`/sign_mintpass/${encodeURIComponent(label)}`, {
       method: 'POST',
+      essential: true,
       body: JSON.stringify(token === 'usdc' ? { token: HLNAMES_USDC } : {}),
     });
     if (status !== 200 || !body) throw new Error(`hlnames mint pass status ${status}`);
@@ -275,6 +448,7 @@ export class HlNamesClient {
     const a = address.toLowerCase();
     if (!ADDRESS_RE.test(a)) return;
     await Promise.all([redisService.delete(keyPrimary(a)), redisService.delete(keyProfile(a)), redisService.delete(keyOwned(a))]);
+    this.directory.refreshSoon();
   }
 
   /**
@@ -305,13 +479,10 @@ export class HlNamesClient {
     const { status, body } = await call<{ name: string; namehash: string }[]>(`/utils/names_owner/${a}`);
     if (status !== 200 || !Array.isArray(body)) throw new Error(`hlnames names_owner status ${status}`);
     const rows = body.filter((r) => typeof r?.name === 'string' && HL_NAME_RE.test(r.name) && /^0x[0-9a-f]{64}$/i.test(r.namehash)).slice(0, OWNED_MAX);
-    const owned = await Promise.all(
-      rows.map(async (r): Promise<OwnedName> => {
-        const e = await call<{ expiry?: string }>(`/metadata/expiry/${r.namehash}`).catch(() => null);
-        const expiry = Number(e?.body?.expiry);
-        return { name: r.name, expiry: Number.isSafeInteger(expiry) && expiry > 0 ? expiry : null };
-      })
-    );
+    // Expiries from HyperEVM in one Multicall3 call instead of one REST call per name.
+    const registrator = this.directory.registratorAddress() ?? (await currentRegistrator().catch(() => null));
+    const exp = registrator ? await expiries(registrator, rows.map((r) => r.namehash)).catch(() => null) : null;
+    const owned = rows.map((r, i): OwnedName => ({ name: r.name, expiry: exp?.[i] ?? null }));
     owned.sort((x, y) => (x.expiry ?? Infinity) - (y.expiry ?? Infinity));
     await redisService.set(keyOwned(a), JSON.stringify(owned), NEGATIVE_TTL_S);
     return owned;
