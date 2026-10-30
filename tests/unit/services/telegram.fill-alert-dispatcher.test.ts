@@ -205,7 +205,7 @@ function randomStream(rnd: () => number, orders: number): Stream {
       const px = 1 + rnd() * 100;
       const sz = rnd() * 200;
       const common = {
-        oid, wallet, coin, px, sz, notionalUsd: px * sz, side,
+        oid, tid: oid, wallet, coin, px, sz, notionalUsd: px * sz, side,
         time: 1_790_000_000_000 + o, hash: `0xh${oid}`, twapId: null,
       } as const;
       if (source === 'perp') {
@@ -361,7 +361,7 @@ describe('TelegramFillAlertDispatcherService', () => {
     await drain();
 
     const hypeSpot: NormalizedFill = {
-      source: 'spot', oid: 7, wallet: WALLETS[0], coin: '@2', px: 10, sz: 3, notionalUsd: 30,
+      source: 'spot', oid: 7, tid: 7, wallet: WALLETS[0], coin: '@2', px: 10, sz: 3, notionalUsd: 30,
       side: 'B', time: 1_790_000_000_000, hash: '0xh7', twapId: null,
     };
     // A pair listed after the last load keeps its id until the next reload.

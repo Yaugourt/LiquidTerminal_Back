@@ -11,7 +11,7 @@ import { FillAggregator } from '../../../src/services/telegram/fill-aggregator';
 import type { AggregatedFill, NormalizedFill } from '../../../src/types/fill-alerts.types';
 
 const fill = (time: number, sz = 1): NormalizedFill => ({
-  source: 'perp', oid: 42, wallet: '0xabc', coin: 'BTC', px: 100, sz, notionalUsd: 100 * sz, side: 'B', time, hash: '0xh',
+  source: 'perp', oid: 42, tid: 1, wallet: '0xabc', coin: 'BTC', px: 100, sz, notionalUsd: 100 * sz, side: 'B', time, hash: '0xh',
 });
 
 describe('FillAggregator event ids', () => {

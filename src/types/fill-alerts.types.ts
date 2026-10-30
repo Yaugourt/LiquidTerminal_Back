@@ -66,6 +66,7 @@ export interface HypeDexerAllFillsEvent {
 export interface NormalizedFill {
   source: 'perp' | 'spot';
   oid: number; // Order id — aggregation key (all fills of one order share it)
+  tid: number; // Trade id — with the twapId, tells a replayed fill from a new one
   wallet: string; // Always lowercase
   coin: string; // Spot: pair id ("@107") from the client, base token name once resolved
   px: number;

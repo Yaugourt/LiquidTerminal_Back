@@ -6,6 +6,7 @@ import {
   HypeDexerAllFillsEvent,
   NormalizedFill,
 } from '../../../types/fill-alerts.types';
+import { HypeDexerTwapStatusEvent, TwapStatusEvent } from '../../../types/twap-live.types';
 
 /**
  * Callback type for normalized fill events (perp and spot)
@@ -13,10 +14,24 @@ import {
 export type FillCallback = (fills: NormalizedFill[]) => void;
 
 /**
+ * Callback type for TWAP status events (`allTwapStatusUpdates`). Snapshot
+ * events are delivered too, flagged `isSnapshot`.
+ */
+export type TwapStatusCallback = (events: TwapStatusEvent[]) => void;
+
+/**
+ * Callback type for the upstream connection: `connected` once the socket is
+ * open and both subscriptions are sent, false as soon as it closes, errors or
+ * starts reconnecting. `at` is when it changed (epoch ms).
+ */
+export type ConnectionCallback = (connected: boolean, at: number) => void;
+
+/**
  * HypeDexer Live-Data WebSocket Client
  *
  * Connects to the live-data (mirror) endpoint wss://api.hypedexer.com/ws?mode=mirror
- * and subscribes to the `allFills` channel: every fill, market-wide — native
+ * and subscribes to the `allFills` channel (and `allTwapStatusUpdates`, see
+ * below): every fill, market-wide — native
  * perps ("BTC"), HIP-3 perps ("xyz:GOLD"), HIP-4 outcomes ("#123") and spot
  * ("@107"). HypeDexer dropped its separate `fills_spot` channel (2026-09), so
  * spot fills are told apart here and normalized with `source: 'spot'`.
@@ -24,7 +39,14 @@ export type FillCallback = (fills: NormalizedFill[]) => void;
  * Unlike the multiplex endpoint, live-data messages are discriminated by `channel`
  * (NOT `type`). Heartbeat still uses `{type:'ping'}` / `{type:'pong'}`.
  *
- * 1 shared connection — consumed by the Fill Alert dispatcher.
+ * `allTwapStatusUpdates` rides the same socket: TWAP status events (activated /
+ * finished / terminated, ~20 a minute), a snapshot of the latest 200 on
+ * subscribe and live frames after. It never reports failed TWAPs.
+ *
+ * 1 shared connection — consumed by the Fill Alert dispatcher (fills) and the
+ * live TWAP book (fills, status events, connection state). start()/stop() are
+ * reference-counted: each consumer releases only its own callbacks, and the
+ * socket closes with the last one.
  */
 export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   private static instance: HypeDexerLiveDataWSClient;
@@ -36,6 +58,14 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
 
   // Callbacks
   private fillCallbacks: Set<FillCallback> = new Set();
+  private twapStatusCallbacks: Set<TwapStatusCallback> = new Set();
+  private connectionCallbacks: Set<ConnectionCallback> = new Set();
+
+  /** Consumers that called start() and not stop() yet. */
+  private consumers = 0;
+  /** True once the socket is open and both subscriptions are sent. */
+  private upstreamConnected = false;
+  private upstreamSince: number | null = null;
 
   private constructor() {
     super(
@@ -57,6 +87,7 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
       },
       {
         onStateChange: (state: WSConnectionState) => this.handleStateChange(state),
+        onError: () => this.setUpstreamConnected(false),
         onReconnect: (attempt: number) => {
           // Emit one degraded-signal error log when consecutive failures cross 10.
           if (attempt === 10) {
@@ -83,18 +114,30 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   }
 
   /**
-   * Start the WebSocket connection and subscribe to allFills
+   * Start the WebSocket connection and subscribe to allFills and
+   * allTwapStatusUpdates. Reference-counted: every consumer calls start() once
+   * and stop() once.
    */
   public start(): void {
-    this.connect();
+    this.consumers++;
+    // A later consumer joins the open (or reconnecting) socket.
+    if (this.consumers === 1) this.connect();
   }
 
   /**
-   * Stop the WebSocket connection
+   * Release one consumer. The socket closes (and every callback is dropped)
+   * with the last one; a consumer's own callbacks go through the unsubscribe
+   * functions of onFill / onTwapStatus / onConnectionChange.
    */
   public stop(): void {
+    this.consumers = Math.max(0, this.consumers - 1);
+    if (this.consumers > 0) return;
+
     this.disconnect();
+    this.setUpstreamConnected(false);
     this.fillCallbacks.clear();
+    this.twapStatusCallbacks.clear();
+    this.connectionCallbacks.clear();
   }
 
   /**
@@ -109,15 +152,47 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   }
 
   /**
+   * Register a callback for TWAP status events (snapshot events included,
+   * flagged `isSnapshot`). Returns an unsubscribe function.
+   */
+  public onTwapStatus(callback: TwapStatusCallback): () => void {
+    this.twapStatusCallbacks.add(callback);
+    return () => {
+      this.twapStatusCallbacks.delete(callback);
+    };
+  }
+
+  /**
+   * Register a callback for upstream connection changes. Returns an
+   * unsubscribe function. See getConnection() for the current state.
+   */
+  public onConnectionChange(callback: ConnectionCallback): () => void {
+    this.connectionCallbacks.add(callback);
+    return () => {
+      this.connectionCallbacks.delete(callback);
+    };
+  }
+
+  /**
+   * Current upstream state: `at` is when the current connection became ready
+   * (null while disconnected).
+   */
+  public getConnection(): { connected: boolean; at: number | null } {
+    return { connected: this.upstreamConnected, at: this.upstreamSince };
+  }
+
+  /**
    * Get connection statistics
    */
   public getStats(): {
     state: WSConnectionState;
     fillCallbackCount: number;
+    twapStatusCallbackCount: number;
   } {
     return {
       state: this.getState(),
       fillCallbackCount: this.fillCallbacks.size,
+      twapStatusCallbackCount: this.twapStatusCallbacks.size,
     };
   }
 
@@ -126,12 +201,14 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   // ============================================================================
 
   /**
-   * Called when connection is established — subscribe to allFills
+   * Called when connection is established — subscribe to allFills and allTwapStatusUpdates
    */
   protected onOpen(): void {
     logDeduplicator.info('HypeDexerLiveDataWSClient: Connection opened');
-    this.send({ method: 'subscribe', subscription: { type: 'allFills' } });
-    logDeduplicator.info('HypeDexerLiveDataWSClient: Subscription sent (allFills)');
+    const fillsSent = this.send({ method: 'subscribe', subscription: { type: 'allFills' } });
+    const twapsSent = this.send({ method: 'subscribe', subscription: { type: 'allTwapStatusUpdates' } });
+    logDeduplicator.info('HypeDexerLiveDataWSClient: Subscriptions sent (allFills, allTwapStatusUpdates)');
+    this.setUpstreamConnected(fillsSent && twapsSent);
   }
 
   /**
@@ -160,6 +237,10 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
       switch (event.channel) {
         case 'allFills':
           this.handleAllFillsEvent(event as HypeDexerAllFillsEvent);
+          break;
+
+        case 'allTwapStatusUpdates':
+          this.handleTwapStatusEvent(event as HypeDexerTwapStatusEvent);
           break;
 
         case 'subscriptionResponse':
@@ -223,6 +304,102 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   }
 
   /**
+   * Handle `allTwapStatusUpdates` channel event — parse both frame shapes
+   * (snapshot object, live array) and dispatch the valid events.
+   */
+  private handleTwapStatusEvent(event: HypeDexerTwapStatusEvent): void {
+    const data: unknown = event.data;
+    let rawEvents: unknown;
+    let isSnapshot = false;
+    if (Array.isArray(data)) {
+      rawEvents = data;
+    } else if (typeof data === 'object' && data !== null) {
+      rawEvents = (data as { events?: unknown }).events;
+      isSnapshot = (data as { isSnapshot?: unknown }).isSnapshot === true;
+    }
+    if (!Array.isArray(rawEvents) || rawEvents.length === 0) return;
+
+    const events: TwapStatusEvent[] = [];
+    let malformed = 0;
+    for (const raw of rawEvents) {
+      const parsed = HypeDexerLiveDataWSClient.parseTwapStatus(raw, isSnapshot);
+      if (parsed) events.push(parsed);
+      else malformed++;
+    }
+    if (malformed > 0) {
+      logDeduplicator.warn('HypeDexerLiveDataWSClient: malformed allTwapStatusUpdates event dropped', {
+        count: malformed,
+      });
+    }
+    if (events.length === 0) return;
+
+    for (const callback of this.twapStatusCallbacks) {
+      try {
+        callback(events);
+      } catch (error) {
+        logDeduplicator.error('HypeDexerLiveDataWSClient: TWAP status callback error', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  /** A finite number from a JSON number or numeric string, else null. */
+  private static toNumber(value: unknown): number | null {
+    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /** Validate one status event; null when a field the book relies on is missing or malformed. */
+  private static parseTwapStatus(raw: unknown, isSnapshot: boolean): TwapStatusEvent | null {
+    if (typeof raw !== 'object' || raw === null) return null;
+    const e = raw as { twapId?: unknown; status?: unknown; time?: unknown; state?: unknown };
+    const state = e.state;
+    if (typeof state !== 'object' || state === null) return null;
+    const s = state as Record<string, unknown>;
+
+    const twapId = HypeDexerLiveDataWSClient.toNumber(e.twapId);
+    const time = HypeDexerLiveDataWSClient.toNumber(e.time);
+    const sz = HypeDexerLiveDataWSClient.toNumber(s.sz);
+    const executedSz = HypeDexerLiveDataWSClient.toNumber(s.executedSz);
+    const executedNtl = HypeDexerLiveDataWSClient.toNumber(s.executedNtl);
+    const minutes = HypeDexerLiveDataWSClient.toNumber(s.minutes);
+    const startTime = HypeDexerLiveDataWSClient.toNumber(s.timestamp);
+    if (
+      twapId === null ||
+      time === null ||
+      sz === null ||
+      executedSz === null ||
+      executedNtl === null ||
+      minutes === null ||
+      startTime === null
+    ) {
+      return null;
+    }
+    if (typeof e.status !== 'string' || e.status === '') return null;
+    if (typeof s.coin !== 'string' || s.coin === '') return null;
+    if (typeof s.user !== 'string' || s.user === '') return null;
+    if (s.side !== 'A' && s.side !== 'B') return null;
+
+    return {
+      twapId,
+      status: e.status,
+      time,
+      coin: s.coin,
+      user: s.user.toLowerCase(),
+      side: s.side,
+      sz,
+      executedSz,
+      executedNtl,
+      minutes,
+      reduceOnly: s.reduceOnly === true,
+      randomize: s.randomize === true,
+      startTime,
+      isSnapshot,
+    };
+  }
+
+  /**
    * Spot pairs are "@<pair index>" plus the legacy "PURR/USDC"; every other
    * coin on allFills is a perp-like market (native, HIP-3 "dex:COIN", HIP-4 "#N").
    */
@@ -240,6 +417,7 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
     const sz = parseFloat(raw.sz);
     const fill = {
       oid: raw.oid,
+      tid: raw.tid,
       wallet: address.toLowerCase(),
       coin: raw.coin,
       px,
@@ -268,5 +446,25 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
    */
   private handleStateChange(state: WSConnectionState): void {
     logDeduplicator.info('HypeDexerLiveDataWSClient: State changed', { state });
+    // 'connected' alone is not "ready": onOpen decides once both subscriptions are sent.
+    if (state !== 'connected') this.setUpstreamConnected(false);
+  }
+
+  /** Record the upstream state and tell the listeners when it changed. */
+  private setUpstreamConnected(connected: boolean): void {
+    if (this.upstreamConnected === connected) return;
+
+    const at = Date.now();
+    this.upstreamConnected = connected;
+    this.upstreamSince = connected ? at : null;
+    for (const callback of this.connectionCallbacks) {
+      try {
+        callback(connected, at);
+      } catch (error) {
+        logDeduplicator.error('HypeDexerLiveDataWSClient: Connection callback error', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 }
