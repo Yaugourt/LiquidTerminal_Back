@@ -300,6 +300,19 @@ describe('TwapLiveService', () => {
       expect(entry(22)).toMatchObject({ exact: true, executedSz: 2, fills: 2 });
     });
 
+    it('rounds a REST last fill written a microsecond early, so that fill is not counted twice', async () => {
+      // HypeDexer answered 18:44:19.000999 for the fill the socket timed 18:44:19.001.
+      const last = T0 + 1_001;
+      client.setConnected(true, T0);
+      await settle();
+      client.statuses([status(24, { startTime: T0 - 20 * MIN })]);
+      client.fills([fill(24, last, 1, 100), fill(24, last + 30_000, 2, 100)]);
+      const early = new Date(T0 + 1_000).toISOString().replace('Z', '999');
+      fetchTwap.mockResolvedValue(detail(3, 30, 3_000, early));
+      await svc.runSweep();
+      expect(entry(24)).toMatchObject({ exact: true, executedSz: 32, fills: 4, lastFillAt: last + 30_000 });
+    });
+
     it('parses REST times as UTC, with or without a zone suffix', async () => {
       client.setConnected(true, T0);
       await settle();

@@ -148,11 +148,24 @@ function isSpotCoin(coin: string): boolean {
 }
 
 /** Epoch ms of a REST timestamp (UTC, with or without a zone suffix); null when unparseable. */
+/**
+ * HypeDexer writes times with microseconds, and a fill's millisecond can come
+ * back a hair early (18:44:19.000999 for the socket's 18:44:19.001): the
+ * sub-second part is rounded to the nearest millisecond, as the socket reports
+ * it. Date.parse truncates it, which put a seeded last fill 1 ms before the
+ * same fill on the socket, so that fill was counted twice (seen on prod data
+ * 2026-10-30).
+ */
 function parseUtcMs(value: unknown): number | null {
   if (typeof value !== 'string' || value === '') return null;
-  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
-  const ms = Date.parse(hasZone ? value : `${value}Z`);
-  return Number.isFinite(ms) ? ms : null;
+  const match = /^(.+T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$/i.exec(value);
+  if (!match) {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  const whole = Date.parse(`${match[1]}${match[3] ?? 'Z'}`);
+  if (!Number.isFinite(whole)) return null;
+  return whole + (match[2] ? Math.round(Number(`0.${match[2]}`) * 1_000) : 0);
 }
 
 function finite(value: unknown): number | null {
