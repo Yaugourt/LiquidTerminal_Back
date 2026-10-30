@@ -5,6 +5,7 @@ import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.servic
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../../utils/guardedInterval';
+import { assemblePerp, PerpMetaAndContexts } from './perp.assembler';
 
 export class HyperliquidPerpClient extends BaseApiService {
   private static instance: HyperliquidPerpClient;
@@ -63,53 +64,40 @@ export class HyperliquidPerpClient extends BaseApiService {
   private async updatePerpData(): Promise<void> {
     try {
       const [meta, assetContexts] = await this.circuitBreaker.execute(() => 
-        this.post<[{ universe: PerpMarket[] }, PerpAssetContext[]]>('', {
+        this.post<PerpMetaAndContexts>('', {
           type: "metaAndAssetCtxs"
         })
       );
-      
-      const marketsData = meta.universe
-        .map((market: PerpMarket, index: number) => {
-          const assetContext = assetContexts[index];
-          const currentPrice = Number(assetContext.markPx);
-          const prevDayPrice = Number(assetContext.prevDayPx);
-          const change = prevDayPrice !== 0 ? Number((((currentPrice - prevDayPrice) / prevDayPrice) * 100).toFixed(2)) : 0;
-          const volume = Number(assetContext.dayNtlVlm);
 
-          return {
-            index: index,
-            name: market.name,
-            logo: `https://app.hyperliquid.xyz/coins/${market.name}.svg`,
-            price: currentPrice,
-            change24h: change,
-            volume: volume,
-            openInterest: Number(assetContext.openInterest),
-            funding: Number(assetContext.funding),
-            maxLeverage: market.maxLeverage,
-            onlyIsolated: market.onlyIsolated || false
-          };
-        })
-        .filter(market => market.volume > 0); // Filtrer les tokens avec un volume de 0
-
-      await Promise.all([
-        redisService.set(this.CACHE_KEY_RAW, JSON.stringify([meta, assetContexts])),
-        redisService.set(this.CACHE_KEY_MARKETS, JSON.stringify(marketsData))
-      ]);
-
-      const now = Date.now();
-      await redisService.publish(this.UPDATE_CHANNEL, JSON.stringify({
-        type: 'DATA_UPDATED',
-        timestamp: now
-      }));
-      this.lastUpdate = now;
-      logDeduplicator.info('Perp data updated & cached', {
-        markets: marketsData.length,
-        filteredOut: meta.universe.length - marketsData.length
-      });
+      await this.assembleAndPublish(meta, assetContexts);
     } catch (error) {
       logDeduplicator.error('Failed to update perp data:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
+  }
+
+  /**
+   * Everything the poller writes, from one (meta, contexts) pair: the single
+   * path for the REST read and for contexts merged from the socket.
+   */
+  private async assembleAndPublish(meta: { universe: PerpMarket[] }, assetContexts: PerpAssetContext[]): Promise<void> {
+    const marketsData = assemblePerp(meta, assetContexts);
+
+    await Promise.all([
+      redisService.set(this.CACHE_KEY_RAW, JSON.stringify([meta, assetContexts])),
+      redisService.set(this.CACHE_KEY_MARKETS, JSON.stringify(marketsData))
+    ]);
+
+    const now = Date.now();
+    await redisService.publish(this.UPDATE_CHANNEL, JSON.stringify({
+      type: 'DATA_UPDATED',
+      timestamp: now
+    }));
+    this.lastUpdate = now;
+    logDeduplicator.info('Perp data updated & cached', {
+      markets: marketsData.length,
+      filteredOut: meta.universe.length - marketsData.length
+    });
   }
 
   /**
