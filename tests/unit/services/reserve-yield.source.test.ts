@@ -22,6 +22,7 @@ jest.mock('../../../src/core/redis.service', () => ({
   },
 }));
 
+import { hyperliquidWeightMeter } from '../../../src/utils/hyperliquid-weight-meter';
 import { CircuitBreakerService } from '../../../src/core/circuit.breaker.service';
 import { HypeDexerInfoClient, resetInfoProxyOutages } from '../../../src/clients/hypedexer/rest/info/info.client';
 import { readReserveLedger } from '../../../src/services/revenue/reserve-yield.source';
@@ -91,6 +92,19 @@ describe('reserve yield ledger source', () => {
     const rows = await readReserveLedger(5);
     expect(fetchMock.mock.calls.filter((c) => onHyperliquid(c[0]))).toHaveLength(1);
     expect(rows).toEqual(OLDEST_FIRST);
+  });
+
+  it('spends Hyperliquid weight only on the fallback', async () => {
+    hyperliquidWeightMeter.reset();
+    await readReserveLedger(5);
+    hyperliquidWeightMeter.flush();
+    expect(hyperliquidWeightMeter.lastMinute()).toMatchObject({ weight: 0, calls: 0 });
+
+    proxyUp = false;
+    await readReserveLedger(5);
+    hyperliquidWeightMeter.flush();
+    expect(hyperliquidWeightMeter.lastMinute()).toMatchObject({ weight: 20, calls: 1 });
+    hyperliquidWeightMeter.reset();
   });
 
   it('fails when both sources fail', async () => {

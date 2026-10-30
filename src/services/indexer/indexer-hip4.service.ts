@@ -3,6 +3,7 @@ import { buildHypedexerCacheKey } from '../../clients/hypedexer/rest/shared/hype
 import { cacheService, SHARED_LAST_COPY_KEEP_S } from '../../core/cache.service';
 import { redisService } from '../../core/redis.service';
 import { upstreamRefusal } from '../../utils/request-context';
+import { hyperliquidWeightMeter } from '../../utils/hyperliquid-weight-meter';
 import {
   HYPEDEXER_HIP4_CACHE_KEY,
   HYPEDEXER_TTL,
@@ -703,6 +704,7 @@ export class IndexerHip4Service {
 
   /** One HL outcomeMeta read (weight 20, ~100 KB), reduced to the outcome ids. Throws on any failure. */
   private async readHlOutcomeIds(): Promise<number[]> {
+    hyperliquidWeightMeter.record('outcomeMeta');
     const resp = await fetch(HL_INFO_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -795,6 +797,7 @@ export class IndexerHip4Service {
 
   private async fetchHlOutcomeTemplates(): Promise<unknown[]> {
     try {
+      hyperliquidWeightMeter.record('outcomeTemplates');
       const resp = await fetch(HL_INFO_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -816,6 +819,7 @@ export class IndexerHip4Service {
 
   /** One HL allMids read, HIP-4 coins only. Throws on any failure (the shared map keeps the last one). */
   private async readHlMidPrices(): Promise<Map<string, number>> {
+    hyperliquidWeightMeter.record('allMids');
     const resp = await fetch(HL_INFO_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

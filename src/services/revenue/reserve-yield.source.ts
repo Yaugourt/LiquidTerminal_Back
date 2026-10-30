@@ -1,10 +1,12 @@
 import { HypeDexerInfoClient, sortLedgerAscending, viaInfoProxy } from '../../clients/hypedexer/rest/info/info.client';
+import { hyperliquidWeightMeter } from '../../utils/hyperliquid-weight-meter';
 import { LedgerUpdate, RY_INTEREST_ADDRESS } from './reserve-yield.ledger';
 
 const HL_INFO_URL = (process.env.HYPERLIQUID_API_URL || 'https://api.hyperliquid.xyz') + '/info';
 const TIMEOUT_MS = 10_000;
 
 async function readFromHyperliquid(startTime: number): Promise<LedgerUpdate[]> {
+  hyperliquidWeightMeter.record('userNonFundingLedgerUpdates');
   const res = await fetch(HL_INFO_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

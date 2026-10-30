@@ -1,6 +1,7 @@
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { maskSensitiveUrl } from '../utils/url-masking';
 import { hypedexerCreditMeter } from '../utils/hypedexer-credit-meter';
+import { hyperliquidWeightMeter } from '../utils/hyperliquid-weight-meter';
 
 /**
  * HTTP API error with status code for granular error handling.
@@ -182,6 +183,9 @@ export abstract class BaseApiService {
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      // Hyperliquid /info spends weight from the IP's 1,200 a minute: count
+      // each request sent, whatever the answer.
+      const hyperliquidType = isHyperliquidInfoUrl(this.baseUrl) ? hyperliquidWeightMeter.record(options.body) : undefined;
 
       try {
         const response = await fetch(fullUrl, {
@@ -219,7 +223,12 @@ export abstract class BaseApiService {
           response.headers.get('x-credit-balance')
         );
 
-        return response.json();
+        const parsed = response.json();
+        if (hyperliquidType === undefined) return parsed;
+        return parsed.then((data: T) => {
+          hyperliquidWeightMeter.recordItems(hyperliquidType, data);
+          return data;
+        });
       } catch (error) {
         logDeduplicator.error('API request failed', {
           url: safeUrl,

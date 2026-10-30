@@ -5,6 +5,7 @@ import { prismaTelegram } from '../core/prisma.telegram.service';
 import { prismaHistorical } from '../core/prisma.historical.service';
 import { redisService } from '../core/redis.service';
 import { ClientInitializerService } from '../core/client.initializer.service';
+import { hyperliquidWeightMeter, WeightMinute } from '../utils/hyperliquid-weight-meter';
 
 const router = Router();
 const clientInitializer = ClientInitializerService.getInstance();
@@ -30,6 +31,10 @@ interface HealthStatus {
     heapUsed: string;
     heapTotal: string;
     external: string;
+  };
+  upstream: {
+    /** Weight this backend spent on Hyperliquid /info in its last finished minute (limit 1,200); null before the first. */
+    hyperliquidWeightLastMinute: WeightMinute | null;
   };
 }
 
@@ -131,6 +136,7 @@ router.get('/', async (_req, res) => {
     },
     checks,
     memory: formatMemory(),
+    upstream: { hyperliquidWeightLastMinute: hyperliquidWeightMeter.lastMinute() },
   };
 
   const httpStatus = health.status === 'unhealthy' ? 503 : 200;
