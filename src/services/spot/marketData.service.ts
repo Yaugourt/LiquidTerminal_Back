@@ -11,6 +11,8 @@ export class SpotAssetContextService {
   private readonly CACHE_KEY = 'spot:raw_data';
   private lastUpdate: Record<string, number> = {};
   private readonly MARKET_CACHE_KEY = 'spot:markets';
+  /** `spot:markets` as last parsed: the poller rewrites it every 2 s at most, the front polls every 5 s. */
+  private parsedMarkets: { raw: string; markets: MarketData[] } | null = null;
 
   // Mettre le constructeur en privé
   private constructor() {
@@ -44,6 +46,12 @@ export class SpotAssetContextService {
     });
   }
 
+  /** Parses `spot:markets` once per write instead of once per request. */
+  private parseMarkets(raw: string): MarketData[] {
+    if (this.parsedMarkets?.raw !== raw) this.parsedMarkets = { raw, markets: JSON.parse(raw) as MarketData[] };
+    return this.parsedMarkets.markets;
+  }
+
   /**
    * Récupère les données de marché depuis le cache
    */
@@ -54,7 +62,8 @@ export class SpotAssetContextService {
         throw new MarketDataError('No market data available');
       }
       
-      let markets = JSON.parse(raw) as MarketData[];
+      // A copy: the sort below reorders it in place.
+      let markets = [...this.parseMarkets(raw)];
 
       // Appliquer les filtres
       if (params.token) {

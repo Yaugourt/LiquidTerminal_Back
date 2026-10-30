@@ -9,6 +9,8 @@ export class PerpAssetContextService {
 
   private readonly UPDATE_CHANNEL = 'perp:data:updated';
   private readonly MARKET_CACHE_KEY = 'perp:markets';
+  /** `perp:markets` as last parsed: the poller rewrites it every 2 s at most, the front polls every 5 s. */
+  private parsedMarkets: { raw: string; markets: PerpMarketData[] } | null = null;
   private lastUpdate: Record<string, number> = {};
 
   // Le constructeur devient privé
@@ -43,6 +45,12 @@ export class PerpAssetContextService {
     });
   }
 
+  /** Parses `perp:markets` once per write instead of once per request. */
+  private parseMarkets(raw: string): PerpMarketData[] {
+    if (this.parsedMarkets?.raw !== raw) this.parsedMarkets = { raw, markets: JSON.parse(raw) as PerpMarketData[] };
+    return this.parsedMarkets.markets;
+  }
+
   /**
    * Récupère les données des marchés perpétuels depuis le cache
    */
@@ -53,7 +61,8 @@ export class PerpAssetContextService {
         throw new PerpMarketDataError('No perp market data available');
       }
       
-      let markets = JSON.parse(raw) as PerpMarketData[];
+      // Not copied: the map below builds new rows.
+      let markets = this.parseMarkets(raw);
 
       // Convertir l'openInterest en dollars pour tous les marchés
       markets = markets.map(market => ({
