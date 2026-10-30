@@ -65,7 +65,7 @@ describe('HyperliquidWeightMeter', () => {
     meter.flush();
     expect(meter.lastMinute()).toMatchObject({ weight: 20 + 20 + 2 + 2, calls: 4 });
     expect(info).toHaveBeenCalledWith(
-      'Hyperliquid weight (last minute)',
+      expect.stringMatching(/^Hyperliquid weight \d+ of 1,200, minute ending \d{2}:\d{2} UTC$/),
       expect.objectContaining({ weight: 44, calls: 4, topTypes: ['metaAndAssetCtxs 40/2', 'clearinghouseState 2/1', 'allMids 2/1'] })
     );
   });
@@ -93,7 +93,7 @@ describe('HyperliquidWeightMeter', () => {
   it('warns when a minute gets close to the limit and starts the next from zero', () => {
     for (let i = 0; i < 50; i++) meter.record('metaAndAssetCtxs');
     meter.flush();
-    expect(warn).toHaveBeenCalledWith('Hyperliquid weight (last minute) near the 1,200 limit', expect.objectContaining({ weight: 1000 }));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^Hyperliquid weight 1000 of 1,200, .*: near the limit$/), expect.objectContaining({ weight: 1000 }));
     meter.flush();
     expect(meter.lastMinute()).toMatchObject({ weight: 0, calls: 0 });
   });

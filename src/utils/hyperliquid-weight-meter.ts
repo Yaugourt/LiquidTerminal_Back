@@ -157,8 +157,12 @@ export class HyperliquidWeightMeter {
         limit: 1200,
         topTypes: entries.slice(0, TOP_TYPES_LOGGED).map(([type, s]) => `${type} ${s.weight}/${s.calls}`),
       };
-      if (weight >= WARN_WEIGHT) logDeduplicator.warn('Hyperliquid weight (last minute) near the 1,200 limit', fields);
-      else logDeduplicator.info('Hyperliquid weight (last minute)', fields);
+      // The minute is in the text: the logger folds a repeated level+message
+      // within 60 s, and a steady weight would read the same every minute.
+      const minute = new Date(this.last.endedAt).toISOString().slice(11, 16);
+      const message = `Hyperliquid weight ${weight} of 1,200, minute ending ${minute} UTC`;
+      if (weight >= WARN_WEIGHT) logDeduplicator.warn(`${message}: near the limit`, fields);
+      else logDeduplicator.info(message, fields);
     } catch {
       // never throws
     }
@@ -167,6 +171,13 @@ export class HyperliquidWeightMeter {
   /** The last finished minute, or null before the first one. */
   lastMinute(): WeightMinute | null {
     return this.last;
+  }
+
+  /** Weight counted so far in the minute that is still running. */
+  runningWeight(): number {
+    let weight = 0;
+    for (const spend of this.perType.values()) weight += spend.weight;
+    return weight;
   }
 
   /** Test helper: stop the timer and forget everything. */
