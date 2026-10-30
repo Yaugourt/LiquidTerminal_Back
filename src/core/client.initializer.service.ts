@@ -34,6 +34,8 @@ import { TelegramLiquidationDispatcherService } from '../services/telegram/teleg
 import { TelegramDocUpdateDispatcherService } from '../services/telegram/telegram.doc-update-dispatcher.service';
 import { TelegramFillAlertDispatcherService } from '../services/telegram/telegram.fill-alert-dispatcher.service';
 import { MarketAlertsService } from '../services/alerts/market-alerts.service';
+import { TwapLiveService } from '../services/twap/twap-live.service';
+import { enabledUnlessFalseEnv } from '../utils/env';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export type StartupStatus = 'booting' | 'ready' | 'degraded';
@@ -254,6 +256,14 @@ export class ClientInitializerService {
       this.clients.set('marketAlerts', marketAlerts);
       logDeduplicator.info('Market Alerts service initialized successfully');
 
+      // Live TWAPs: fills + status events from the HypeDexer live-data socket,
+      // served on the public /ws `twap` channel. Independent of the Telegram
+      // fill-alert dispatcher (they only share the socket). TWAP_LIVE_ENABLED=false switches it off.
+      if (enabledUnlessFalseEnv('TWAP_LIVE_ENABLED')) {
+        this.clients.set('twapLive', TwapLiveService.getInstance());
+        logDeduplicator.info('Live TWAP service initialized successfully');
+      }
+
       // Démarrer le polling pour tous les clients
       logDeduplicator.info('All clients created, starting polling...');
       await this.startAllPolling();
@@ -377,6 +387,17 @@ export class ClientInitializerService {
       }
     }
 
+    // 5f. Start the live TWAP book (shares the HypeDexer live-data socket with 5e)
+    const twapLive = this.clients.get('twapLive');
+    if (twapLive) {
+      try {
+        twapLive.start();
+        logDeduplicator.info('Started Live TWAP Service');
+      } catch (error) {
+        logDeduplicator.error('Error starting Live TWAP Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     // 6. Start Telegram Liquidation Dispatcher (subscribes to LiquidationsWebSocketService)
     const liquidationDispatcher = this.clients.get('liquidationDispatcher');
     if (liquidationDispatcher) {
@@ -474,6 +495,17 @@ export class ClientInitializerService {
         marketAlerts.stop();
       } catch (error) {
         logDeduplicator.error('Error stopping Market Alerts Service:', { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    // Stop the live TWAP book (releases its hold on the shared live-data socket)
+    const twapLive = this.clients.get('twapLive');
+    if (twapLive) {
+      try {
+        twapLive.stop();
+        logDeduplicator.info('Live TWAP Service stopped');
+      } catch (error) {
+        logDeduplicator.error('Error stopping Live TWAP Service:', { error: error instanceof Error ? error.message : String(error) });
       }
     }
 

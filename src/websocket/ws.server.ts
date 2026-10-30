@@ -6,7 +6,9 @@ import { matchesAnyKey } from '../utils/constant-time-compare';
 import { LiquidationsWebSocketService } from '../services/liquidations/liquidations.ws.service';
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
 import { L4BookService } from '../services/orderbook/l4book.service';
+import { TwapLiveService } from '../services/twap/twap-live.service';
 import { AggregatedLiquidation } from '../types/liquidations.types';
+import { TwapLiveDelta } from '../types/twap-live.types';
 import { L4BookDeltaPayload, L4BookSnapshotPayload } from '../types/l4book.types';
 import {
   WSClient,
@@ -59,7 +61,7 @@ export class InternalWebSocketServer {
   /**
    * Subscription types that carry another user's private data (Telegram chat
    * id, watched wallet addresses, PnL) and must NOT be readable by the public.
-   * Only `liquidation` stays open — it is market data, same as the SSE feed.
+   * `liquidation`, `l4book` and `twap` stay open — they are market data, same as the SSE feed.
    * A client may subscribe to these only after presenting the bot API key on
    * the upgrade request.
    */
@@ -72,6 +74,21 @@ export class InternalWebSocketServer {
     'alert',
   ]);
 
+  /** Every subscription type, with the list the INVALID_SUBSCRIPTION error shows. */
+  private static readonly SUBSCRIPTION_TYPES: ReadonlySet<string> = new Set([
+    'liquidation',
+    'l4book',
+    'wallet_event',
+    'liquidation_alert',
+    'fill_alert',
+    'doc_update_alert',
+    'bot_announcement',
+    'alert',
+    'twap',
+  ]);
+  private static readonly SUBSCRIPTION_ERROR =
+    'Invalid subscription type. Supported: liquidation, l4book, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement, alert, twap';
+
   /**
    * L4 books are expensive to mirror (a few MB of resident state each), so a
    * single client cannot pin an unbounded number of them.
@@ -82,6 +99,10 @@ export class InternalWebSocketServer {
 
   /** Unsent backlog past which a public client is dropped (see dropIfBackedUp). */
   private static readonly MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+  /** The serialized twap snapshot is shared by the subscribers of one second. */
+  private static readonly TWAP_SNAPSHOT_CACHE_MS = 1_000;
+  /** A client gets a twap snapshot at most this often (a re-subscribe in between only gets `subscribed`). */
+  private static readonly TWAP_SNAPSHOT_MIN_GAP_MS = 5_000;
 
   // Heartbeat
   private static readonly HEARTBEAT_INTERVAL_MS = 30000;
@@ -91,6 +112,15 @@ export class InternalWebSocketServer {
   private liquidationsWSService: LiquidationsWebSocketService | null = null;
   private sseManager: SSEManagerService | null = null;
   private l4BookService: L4BookService | null = null;
+  private twapService: TwapLiveService | null = null;
+  /**
+   * Sockets subscribed to `twap`: the 1 s delta goes to these only, and the
+   * service is asked for deltas only while this set is not empty.
+   */
+  private twapSockets: Set<WebSocket> = new Set();
+  private twapUnsubscribe: (() => void) | null = null;
+  private twapSnapshotCache: { at: number; serialized: string } | null = null;
+  private twapSnapshotSentAt: WeakMap<WebSocket, number> = new WeakMap();
 
   private constructor() {}
 
@@ -143,6 +173,10 @@ export class InternalWebSocketServer {
     this.l4BookService.onDelta((payload) => this.broadcastL4Delta(payload));
     this.l4BookService.onUnavailable((coin) => this.broadcastL4Unavailable(coin));
 
+    // Live TWAPs — one book shared by every viewer; deltas are requested from
+    // it only while somebody is subscribed (see attachTwap).
+    this.twapService = TwapLiveService.getInstance();
+
     logDeduplicator.info('InternalWebSocketServer: Initialized', {
       path: '/ws',
       maxPayload: '64KB',
@@ -185,6 +219,13 @@ export class InternalWebSocketServer {
     this.l4BookService?.shutdown();
     this.l4BookService = null;
 
+    this.twapUnsubscribe?.();
+    this.twapUnsubscribe = null;
+    this.twapSockets.clear();
+    this.twapSnapshotCache = null;
+    this.twapSnapshotSentAt = new WeakMap();
+    this.twapService = null;
+
     logDeduplicator.info('InternalWebSocketServer: Shutdown complete');
   }
 
@@ -202,6 +243,7 @@ export class InternalWebSocketServer {
       doc_update_alert: 0,
       bot_announcement: 0,
       alert: 0,
+      twap: 0,
     };
 
     for (const client of this.clients.values()) {
@@ -403,21 +445,10 @@ export class InternalWebSocketServer {
   private handleSubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
     const subType = message.subscription?.type;
 
-    if (
-      !subType ||
-      (subType !== 'liquidation' &&
-        subType !== 'l4book' &&
-        subType !== 'wallet_event' &&
-        subType !== 'liquidation_alert' &&
-        subType !== 'fill_alert' &&
-        subType !== 'doc_update_alert' &&
-        subType !== 'bot_announcement' &&
-        subType !== 'alert')
-    ) {
+    if (!subType || !InternalWebSocketServer.SUBSCRIPTION_TYPES.has(subType)) {
       this.sendMessage(ws, {
         type: 'error',
-        error:
-          'Invalid subscription type. Supported: liquidation, l4book, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement, alert',
+        error: InternalWebSocketServer.SUBSCRIPTION_ERROR,
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -493,6 +524,12 @@ export class InternalWebSocketServer {
       timestamp: new Date().toISOString(),
     });
 
+    // Re-subscribing re-sends the snapshot (it is how a client resyncs), at most every few seconds.
+    if (subType === 'twap') {
+      this.attachTwap(ws);
+      this.sendTwapSnapshot(ws);
+    }
+
     logDeduplicator.info('InternalWebSocketServer: Client subscribed', {
       clientId: client.id,
       type: subType,
@@ -519,21 +556,10 @@ export class InternalWebSocketServer {
   private handleUnsubscribe(ws: WebSocket, client: WSClient, message: WSClientMessage): void {
     const subType = message.subscription?.type;
 
-    if (
-      !subType ||
-      (subType !== 'liquidation' &&
-        subType !== 'l4book' &&
-        subType !== 'wallet_event' &&
-        subType !== 'liquidation_alert' &&
-        subType !== 'fill_alert' &&
-        subType !== 'doc_update_alert' &&
-        subType !== 'bot_announcement' &&
-        subType !== 'alert')
-    ) {
+    if (!subType || !InternalWebSocketServer.SUBSCRIPTION_TYPES.has(subType)) {
       this.sendMessage(ws, {
         type: 'error',
-        error:
-          'Invalid subscription type. Supported: liquidation, l4book, wallet_event, liquidation_alert, fill_alert, doc_update_alert, bot_announcement, alert',
+        error: InternalWebSocketServer.SUBSCRIPTION_ERROR,
         code: 'INVALID_SUBSCRIPTION',
         timestamp: new Date().toISOString(),
       });
@@ -549,6 +575,7 @@ export class InternalWebSocketServer {
       if (index >= 0) {
         client.subscriptions.splice(index, 1);
       }
+      if (subType === 'twap') this.detachTwap(ws);
     }
 
     this.sendMessage(ws, {
@@ -573,6 +600,7 @@ export class InternalWebSocketServer {
     // Release every mirrored book this client held, or the service keeps
     // paying for upstream feeds nobody is watching.
     this.releaseL4Books(client);
+    this.detachTwap(ws);
 
     this.decrementIpCount(client.ip);
     this.clients.delete(clientId);
@@ -685,6 +713,70 @@ export class InternalWebSocketServer {
         liquidationCount: liquidations.length,
         clientCount: sentCount,
       });
+    }
+  }
+
+  // ============================================================================
+  // LIVE TWAPS
+  // ============================================================================
+
+  /** Add a viewer; the first one starts the delta feed from the book. */
+  private attachTwap(ws: WebSocket): void {
+    this.twapSockets.add(ws);
+    if (!this.twapUnsubscribe && this.twapService) {
+      this.twapUnsubscribe = this.twapService.onDelta((delta) => this.broadcastTwapDelta(delta));
+    }
+  }
+
+  /** Remove a viewer; the last one stops the feed, so nothing is built for nobody. */
+  private detachTwap(ws: WebSocket): void {
+    if (!this.twapSockets.delete(ws)) return;
+    if (this.twapSockets.size === 0 && this.twapUnsubscribe) {
+      this.twapUnsubscribe();
+      this.twapUnsubscribe = null;
+    }
+  }
+
+  /**
+   * The book's snapshot is hundreds of entries: serialized once a second for
+   * every subscriber of that second, and a client gets one every
+   * TWAP_SNAPSHOT_MIN_GAP_MS at most, so re-subscribing in a loop costs nothing.
+   */
+  private sendTwapSnapshot(ws: WebSocket): void {
+    if (!this.twapService) return;
+    const now = Date.now();
+    const last = this.twapSnapshotSentAt.get(ws);
+    if (last !== undefined && now - last < InternalWebSocketServer.TWAP_SNAPSHOT_MIN_GAP_MS) return;
+
+    let cache = this.twapSnapshotCache;
+    if (!cache || now - cache.at >= InternalWebSocketServer.TWAP_SNAPSHOT_CACHE_MS || now < cache.at) {
+      cache = {
+        at: now,
+        serialized: JSON.stringify({
+          type: 'twap_snapshot',
+          data: this.twapService.getSnapshot(),
+          timestamp: new Date(now).toISOString(),
+        } satisfies WSServerMessage),
+      };
+      this.twapSnapshotCache = cache;
+    }
+    this.twapSnapshotSentAt.set(ws, now);
+    this.sendRawMessage(ws, cache.serialized);
+  }
+
+  /** One serialization for every viewer, through the backpressure guard. */
+  private broadcastTwapDelta(delta: TwapLiveDelta): void {
+    if (!this.wss || this.twapSockets.size === 0) return;
+
+    const serialized = JSON.stringify({
+      type: 'twap_delta',
+      data: delta,
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    // Copy: dropIfBackedUp may terminate a socket whose close handler edits the set.
+    for (const ws of [...this.twapSockets]) {
+      this.sendRawMessage(ws, serialized);
     }
   }
 

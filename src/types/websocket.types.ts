@@ -179,7 +179,8 @@ export type WSInternalSubscriptionType =
   | 'fill_alert'
   | 'doc_update_alert'
   | 'bot_announcement'
-  | 'alert';
+  | 'alert'
+  | 'twap';
 
 export interface WSClientSubscription {
   type: WSInternalSubscriptionType;
@@ -235,6 +236,8 @@ export type WSEventType =
   | 'doc_update_alert'
   | 'bot_announcement'
   | 'alert'
+  | 'twap_snapshot'
+  | 'twap_delta'
   | 'heartbeat'
   | 'error';
 

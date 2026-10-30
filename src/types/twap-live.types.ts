@@ -14,7 +14,7 @@
 
 /**
  * One event as HypeDexer sends it. Numbers travel as strings in `state`.
- * `executedSz`/`executedNtl` are 0 on `activated` events and final on ended ones.
+ * `executedSz`/`executedNtl` are 0 on non-terminal events (`activated`, `waitingForTrigger`) and final on terminal ones.
  */
 export interface HypeDexerTwapStatusRaw {
   twapId: number;
@@ -52,7 +52,12 @@ export interface HypeDexerTwapStatusEvent {
 
 /**
  * A status event, validated and normalized: numbers parsed, address lowercased.
- * `status` is the raw HypeDexer string ('activated', 'finished', 'terminated', …).
+ * `status` is the raw HypeDexer string. Terminal (final) statuses are
+ * 'finished', 'terminated', 'stopped', 'canceled', 'cancelled' and anything
+ * starting with 'error'; every other one ('activated', 'waitingForTrigger',
+ * an unknown one) is live: a later event wins by time and fills accumulate.
+ * Only a terminal status is final: fills after it are ignored and the totals
+ * come from its event.
  */
 export interface TwapStatusEvent {
   twapId: number;
@@ -78,7 +83,8 @@ export interface TwapStatusEvent {
 export interface TwapLiveEntry {
   twapId: number;
   // present when the TWAP is known from HypeDexer's status channel; absent on progress-only patches
-  status?: string; // raw HypeDexer/REST vocabulary: 'activated', 'finished', 'terminated', 'stopped', 'waitingForTrigger', ...
+  // A TWAP is sent only from its first fill (or its terminal event): never-filled ones stay off the wire.
+  status?: string; // raw HypeDexer/REST vocabulary; terminal = finished, terminated, stopped, canceled, cancelled, error*; live = activated, waitingForTrigger, ...
   coin?: string; // 'BTC', 'xyz:GOLD', '@107', 'PURR/USDC', '#123'
   user?: string; // lowercase address
   side?: 'A' | 'B'; // B = buy, A = sell
