@@ -5,6 +5,7 @@ import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.servic
 import { redisService } from '../../../core/redis.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../../utils/guardedInterval';
+import { adaptiveReadGate } from '../fast-poll';
 
 export class ValidatorClient extends BaseApiService {
   private static instance: ValidatorClient;
@@ -16,7 +17,10 @@ export class ValidatorClient extends BaseApiService {
   private readonly UPDATE_CHANNEL = 'staking:validators:updated';
   // 30 s (weight 20 → 40 a minute): stake, commission and APR barely move
   // in a minute, and the front polls every 30 s.
-  private readonly UPDATE_INTERVAL = 30000;
+  /** Every 10 s while Hyperliquid weight has room, else every 30 s (as before 2026-10-30). */
+  private readonly UPDATE_INTERVAL = 10000;
+  private readonly SLOW_INTERVAL = 30000;
+  private readonly shouldRead = adaptiveReadGate(this.SLOW_INTERVAL);
   private lastUpdate: number = 0;
   private pollingInterval: NodeJS.Timeout | null = null;
 
@@ -48,7 +52,7 @@ export class ValidatorClient extends BaseApiService {
     logDeduplicator.info('Starting validator polling');
     this.pollingInterval = startGuardedInterval(
       'Validator polling',
-      () => this.updateValidators(),
+      () => (this.shouldRead() ? this.updateValidators() : Promise.resolve()),
       this.UPDATE_INTERVAL
     );
   }

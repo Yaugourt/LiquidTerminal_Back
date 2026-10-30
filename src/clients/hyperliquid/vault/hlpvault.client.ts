@@ -4,6 +4,7 @@ import { CircuitBreakerService } from '../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../core/hyperLiquid.ratelimiter.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../../utils/guardedInterval';
+import { adaptiveReadGate } from '../fast-poll';
 import { redisService } from '../../../core/redis.service';
 
 export class HyperliquidVaultClient extends BaseApiService {
@@ -15,9 +16,12 @@ export class HyperliquidVaultClient extends BaseApiService {
   private static readonly CACHE_KEY = 'vault:hlp:tvl';
   private static readonly UPDATE_CHANNEL = 'vault:hlp:updated';
   // 30 s (weight 20 → 40 a minute): HLP TVL, APR and PnL move slowly.
-  private static readonly UPDATE_INTERVAL = 30000;
+  /** Every 10 s while Hyperliquid weight has room, else every 30 s (as before 2026-10-30). */
+  private static readonly UPDATE_INTERVAL = 10000;
+  private static readonly SLOW_INTERVAL = 30000;
+  private readonly shouldRead = adaptiveReadGate(HyperliquidVaultClient.SLOW_INTERVAL);
   /**
-   * Safety TTL of the stored TVL (10 polls): every poll rewrites it, so readers
+   * Safety TTL of the stored TVL (30 polls at 10 s, 10 at the slow 30 s): every poll rewrites it, so readers
    * see a value at most one poll old; if the poller stops or Hyperliquid keeps
    * failing, the value expires instead of being served frozen forever.
    */
@@ -53,7 +57,7 @@ export class HyperliquidVaultClient extends BaseApiService {
     logDeduplicator.info('Starting vault polling');
     this.pollingInterval = startGuardedInterval(
       'Vault polling',
-      () => this.updateHlpTvl(),
+      () => (this.shouldRead() ? this.updateHlpTvl() : Promise.resolve()),
       HyperliquidVaultClient.UPDATE_INTERVAL
     );
   }

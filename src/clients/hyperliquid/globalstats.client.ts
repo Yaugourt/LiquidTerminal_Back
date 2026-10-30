@@ -5,6 +5,7 @@ import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { startGuardedInterval } from '../../utils/guardedInterval';
+import { adaptiveReadGate } from './fast-poll';
 
 interface RawGlobalStats {
   totalVolume: number;
@@ -23,7 +24,10 @@ export class HyperliquidGlobalStatsClient extends BaseApiService {
   private readonly UPDATE_CHANNEL = 'global:stats:updated';
   // 15 s (weight 20 → 80 a minute): the dashboard's live stats stay within
   // 15 s, and the weight saved goes to on-demand reads (token details).
-  private readonly UPDATE_INTERVAL = 15000;
+  /** Every 5 s while Hyperliquid weight has room, else every 15 s (as before 2026-10-30). */
+  private readonly UPDATE_INTERVAL = 5000;
+  private readonly SLOW_INTERVAL = 15000;
+  private readonly shouldRead = adaptiveReadGate(this.SLOW_INTERVAL);
   private lastUpdate: number = 0;
   private pollingInterval: NodeJS.Timeout | null = null;
 
@@ -87,7 +91,7 @@ export class HyperliquidGlobalStatsClient extends BaseApiService {
     logDeduplicator.info('Starting global stats polling');
     this.pollingInterval = startGuardedInterval(
       'Global stats polling',
-      () => this.updateGlobalStats(),
+      () => (this.shouldRead() ? this.updateGlobalStats() : Promise.resolve()),
       this.UPDATE_INTERVAL
     );
   }

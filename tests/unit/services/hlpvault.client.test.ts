@@ -2,7 +2,7 @@
  * HLP TVL poller: every tick reads Hyperliquid and rewrites `vault:hlp:tvl`
  * under a safety TTL. It used to read its own key first, so after the first
  * write it never called Hyperliquid again and the TVL stayed frozen.
- * - each 30 s poll replaces the value readers (perp globalstats, metrics) see;
+ * - each poll (10 s while Hyperliquid weight has room, 30 s otherwise) replaces the value readers (perp globalstats, metrics) see;
  * - a failed poll keeps the previous value until the safety TTL, never 0;
  * - the key carries a TTL, so a stopped poller cannot serve it forever.
  */
@@ -65,8 +65,8 @@ describe('HyperliquidVaultClient HLP TVL poller', () => {
     expect(mockRedis.ttls.get(KEY)).toBe(300);
     expect((await PerpGlobalStatsService.getInstance().getPerpGlobalStats()).hlpTvl).toBe(400000000.5);
 
-    // One poll later (30 s ± 10 % jitter) the value has been replaced.
-    await jest.advanceTimersByTimeAsync(33_000);
+    // One poll later (10 s ± 10 % jitter) the value has been replaced.
+    await jest.advanceTimersByTimeAsync(11_000);
     expect(upstream).toHaveBeenCalledTimes(2);
     expect(mockRedis.store.get(KEY)).toBe('412345678.25');
     expect(mockRedis.ttls.get(KEY)).toBe(300);
@@ -82,8 +82,8 @@ describe('HyperliquidVaultClient HLP TVL poller', () => {
 
     client.startPolling();
     await jest.advanceTimersByTimeAsync(0);
-    await jest.advanceTimersByTimeAsync(33_000);
-    await jest.advanceTimersByTimeAsync(33_000);
+    await jest.advanceTimersByTimeAsync(11_000);
+    await jest.advanceTimersByTimeAsync(11_000);
 
     expect(upstream).toHaveBeenCalledTimes(3);
     expect(mockRedis.store.get(KEY)).toBe('400000000');
