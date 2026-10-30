@@ -4,6 +4,7 @@ import {
   ReadListUpdateInput,
   ReadListSummaryResponse
 } from '../../types/readlist.types';
+import { XpTally, addXp } from '../../types/xp.types';
 import {
   ReadListNotFoundError,
   ReadListAlreadyExistsError,
@@ -240,27 +241,27 @@ export class ReadListService extends BaseService<
   /**
    * Override de la méthode create pour invalider les caches spécifiques et attribuer XP
    */
-  async create(data: ReadListCreateInput): Promise<ReadListResponse> {
+  async create(data: ReadListCreateInput, xp?: XpTally): Promise<ReadListResponse> {
     const result = await super.create(data);
     await this.invalidateReadListCache(result.id, data.userId);
 
     // Attribuer l'XP pour création de readlist
     try {
-      await xpService.grantXp({
+      addXp(xp, await xpService.grantXp({
         userId: data.userId,
         actionType: 'CREATE_READLIST',
         referenceId: `readlist-${result.id}`,
         description: `Created read list: ${data.name}`,
-      });
+      }));
 
       // Bonus pour liste publique
       if (data.isPublic) {
-        await xpService.grantXp({
+        addXp(xp, await xpService.grantXp({
           userId: data.userId,
           actionType: 'CREATE_PUBLIC_LIST_BONUS' as any,
           referenceId: `readlist-public-${result.id}`,
           description: `Public bonus for read list: ${data.name}`,
-        });
+        }));
       }
     } catch (error) {
       logDeduplicator.warn('Failed to grant XP for readlist creation', {
@@ -316,9 +317,10 @@ export class ReadListService extends BaseService<
    * Copie une read list publique dans les read lists de l'utilisateur
    * @param readListId ID de la read list à copier
    * @param userId ID de l'utilisateur qui copie
+   * @param xp Si fourni, reçoit l'XP réellement accordé (création + copie)
    * @returns La nouvelle read list copiée
    */
-  async copyReadList(readListId: number, userId: number): Promise<ReadListResponse> {
+  async copyReadList(readListId: number, userId: number, xp?: XpTally): Promise<ReadListResponse> {
     try {
       logDeduplicator.info('Copying read list', { readListId, userId });
 
@@ -349,7 +351,7 @@ export class ReadListService extends BaseService<
         description: newDescription,
         userId: userId,
         isPublic: false // Par défaut, la copie est privée
-      });
+      }, xp);
 
       // 5. Copier tous les items de la read list originale en batch (optimisé)
       // Les items dont la ressource a disparu (resource: null) ne sont pas copiés
@@ -385,12 +387,12 @@ export class ReadListService extends BaseService<
 
       // Attribuer l'XP pour copie de readlist publique
       try {
-        await xpService.grantXp({
+        addXp(xp, await xpService.grantXp({
           userId,
           actionType: 'COPY_PUBLIC_READLIST',
           referenceId: `copy-${readListId}-to-${newReadList.id}`,
           description: `Copied public read list: ${originalReadList.name}`,
-        });
+        }));
       } catch (xpError) {
         logDeduplicator.warn('Failed to grant XP for readlist copy', {
           userId,

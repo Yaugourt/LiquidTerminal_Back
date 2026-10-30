@@ -65,3 +65,15 @@ export interface XpTransactionHistoryResponse {
 
 
 
+
+/** Accumulates the XP a service call actually granted (grantXp returns 0 when capped or deduplicated). */
+export interface XpTally {
+  granted: number;
+}
+
+/** Adds an amount returned by grantXp to a tally (no-op without one; non-numeric counts as 0). */
+export function addXp(tally: XpTally | undefined, amount: number | undefined): void {
+  if (tally && typeof amount === 'number' && Number.isFinite(amount)) {
+    tally.granted += amount;
+  }
+}

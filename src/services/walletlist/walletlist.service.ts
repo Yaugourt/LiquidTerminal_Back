@@ -4,6 +4,7 @@ import {
   WalletListUpdateInput,
   WalletListSummaryResponse
 } from '../../types/walletlist.types';
+import { XpTally, addXp } from '../../types/xp.types';
 import {
   WalletListNotFoundError,
   WalletListAlreadyExistsError,
@@ -230,27 +231,27 @@ export class WalletListService extends BaseService<
   /**
    * Override de la méthode create pour invalider les caches spécifiques et attribuer XP
    */
-  async create(data: WalletListCreateInput): Promise<WalletListResponse> {
+  async create(data: WalletListCreateInput, xp?: XpTally): Promise<WalletListResponse> {
     const result = await super.create(data);
     await this.invalidateWalletListCache(result.id, data.userId);
 
     // Attribuer l'XP pour création de wallet list
     try {
-      await xpService.grantXp({
+      addXp(xp, await xpService.grantXp({
         userId: data.userId,
         actionType: 'CREATE_WALLETLIST',
         referenceId: `walletlist-${result.id}`,
         description: `Created wallet list: ${data.name}`,
-      });
+      }));
 
       // Bonus pour liste publique
       if (data.isPublic) {
-        await xpService.grantXp({
+        addXp(xp, await xpService.grantXp({
           userId: data.userId,
           actionType: 'CREATE_PUBLIC_LIST_BONUS' as any,
           referenceId: `walletlist-public-${result.id}`,
           description: `Public bonus for wallet list: ${data.name}`,
-        });
+        }));
       }
     } catch (error) {
       logDeduplicator.warn('Failed to grant XP for wallet list creation', {

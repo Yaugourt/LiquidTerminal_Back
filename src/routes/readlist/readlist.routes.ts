@@ -14,7 +14,7 @@ import { readListCreateSchema } from '../../schemas/readlist.schema';
 import { ReadListError } from '../../errors/readlist.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { prisma } from '../../core/prisma.service';
-import { XP_REWARDS } from '../../constants/xp.constants';
+import type { XpTally } from '../../types/xp.types';
 
 const router = express.Router();
 const readListService = new ReadListService();
@@ -43,12 +43,13 @@ router.post('/', validatePrivyToken, (async (req: Request, res: Response) => {
     const dataWithUserId = { ...req.body, userId: user.id };
     readListCreateSchema.parse(dataWithUserId);
 
-    const readList = await readListService.create(dataWithUserId);
+    const xp: XpTally = { granted: 0 };
+    const readList = await readListService.create(dataWithUserId, xp);
     res.status(201).json({ 
       success: true, 
       message: 'Read list created successfully', 
       data: readList,
-      xpGranted: XP_REWARDS.CREATE_READLIST
+      xpGranted: xp.granted // XP actually credited (0 when capped or the grant failed)
     });
   } catch (error) {
     logDeduplicator.error('Error creating read list:', { error: error instanceof Error ? error.message : String(error), body: req.body });
@@ -398,13 +399,14 @@ router.post('/copy/:id', validatePrivyToken, (async (req: Request, res: Response
     }
 
     // Copier la read list
-    const copiedReadList = await readListService.copyReadList(id, user.id);
+    const xp: XpTally = { granted: 0 };
+    const copiedReadList = await readListService.copyReadList(id, user.id, xp);
     
     res.json({ 
       success: true, 
       data: copiedReadList,
       message: 'Read list copied successfully',
-      xpGranted: XP_REWARDS.COPY_PUBLIC_READLIST + XP_REWARDS.CREATE_READLIST // Copie + création
+      xpGranted: xp.granted // XP actually credited: copy + creation, 0 when capped
     });
   } catch (error) {
     logDeduplicator.error('Error copying read list:', { error: error instanceof Error ? error.message : String(error), id: req.params.id, privyUserId: req.user?.sub });

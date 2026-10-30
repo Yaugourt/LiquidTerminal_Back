@@ -3,6 +3,7 @@ import {
   WalletListItemCreateInput, 
   WalletListItemUpdateInput
 } from '../../types/walletlist.types';
+import { XpTally, addXp } from '../../types/xp.types';
 import { 
   WalletListItemNotFoundError, 
   WalletListItemAlreadyExistsError,
@@ -113,7 +114,7 @@ export class WalletListItemService extends BaseService<
   /**
    * Override de la méthode create pour ajouter la validation, gérer l'ordre et attribuer XP
    */
-  async create(data: WalletListItemCreateInput): Promise<WalletListItemResponse> {
+  async create(data: WalletListItemCreateInput, xp?: XpTally): Promise<WalletListItemResponse> {
     try {
       // Validation des données
       await this.validateCreateData(data);
@@ -135,12 +136,12 @@ export class WalletListItemService extends BaseService<
         const walletList = await this.walletListRepository.findById(data.walletListId);
         if (walletList) {
           try {
-            await xpService.grantXp({
+            addXp(xp, await xpService.grantXp({
               userId: walletList.userId,
               actionType: 'ADD_WALLET_TO_LIST',
               referenceId: `walletlistitem-${result.id}`,
               description: 'Added wallet to list',
-            });
+            }));
             
             // Compléter la daily task ADD_WALLET
             await xpService.completeDailyTask(walletList.userId, 'ADD_WALLET');

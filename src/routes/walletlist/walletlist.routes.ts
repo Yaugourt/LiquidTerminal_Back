@@ -14,7 +14,7 @@ import { walletListCreateSchema } from '../../schemas/walletlist.schema';
 import { WalletListError } from '../../errors/walletlist.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { prisma } from '../../core/prisma.service';
-import { XP_REWARDS } from '../../constants/xp.constants';
+import type { XpTally } from '../../types/xp.types';
 import { z } from 'zod';
 import { WalletListAlertService } from '../../services/telegram/wallet-list-alert.service';
 import { TelegramError } from '../../errors/telegram.errors';
@@ -45,11 +45,12 @@ router.post('/', validatePrivyToken, (async (req: Request, res: Response) => {
     // Validation des données
     const validatedData = walletListCreateSchema.parse({ ...req.body, userId: user.id });
     
-    const walletList = await walletListService.create(validatedData);
+    const xp: XpTally = { granted: 0 };
+    const walletList = await walletListService.create(validatedData, xp);
     res.status(201).json({ 
       success: true, 
       data: walletList,
-      xpGranted: XP_REWARDS.CREATE_WALLETLIST
+      xpGranted: xp.granted // XP actually credited (0 when capped or the grant failed)
     });
   } catch (error) {
     logDeduplicator.error('Error creating wallet list:', { error: error instanceof Error ? error.message : String(error) });
@@ -404,15 +405,16 @@ router.post('/:id/items', validatePrivyToken, validateCreateWalletListItem, (asy
       return res.status(403).json({ success: false, error: 'Access denied', code: 'ACCESS_DENIED' });
     }
 
+    const xp: XpTally = { granted: 0 };
     const item = await walletListItemService.create({
       ...req.body,
       walletListId
-    });
+    }, xp);
 
     res.status(201).json({ 
       success: true, 
       data: item,
-      xpGranted: XP_REWARDS.ADD_WALLET_TO_LIST
+      xpGranted: xp.granted // XP actually credited (0 when capped or the grant failed)
     });
   } catch (error) {
     logDeduplicator.error('Error adding wallet to list:', { error: error instanceof Error ? error.message : String(error), walletListId: req.params.id });
