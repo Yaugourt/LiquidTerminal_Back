@@ -38,7 +38,8 @@ export const HYPEDEXER_LOCKS = {
 export const HYPEDEXER_TTL = {
   fillsCount:             30,   // existant
   overviewSlice:          55,   // existant
-  globalSnapshot:        300,   // daily-volume-10d
+  /** daily-volume-10d: its last bar is today's running total (~3 credits a read). */
+  globalSnapshot:         30,
   /** daily-pnl-10d: ~3 250 rows (~330 credits) of daily buckets per coin. */
   dailyPnl10d:          3600,
   globalRolling:          55,   // fenêtres glissantes 24h (predicted fundings: read every 5 min)
