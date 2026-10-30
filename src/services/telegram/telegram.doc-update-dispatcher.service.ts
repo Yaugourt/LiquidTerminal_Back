@@ -26,6 +26,13 @@ const SPACE_ROOT_MD_OVERRIDES: Record<string, string> = {
   '/hyperliquid-docs/support': `${BASE_URL}/support/read-me-support-guide.md`,
 };
 
+interface PendingCommit {
+  pageUrl: string;
+  relPath: string;
+  contentHash: string;
+  content: string;
+}
+
 interface CachedTelegramUser {
   id: string;
   telegramId: string;
@@ -117,6 +124,9 @@ export class TelegramDocUpdateDispatcherService {
     const pageMap = new Map(existingPages.map(p => [p.pageUrl, { hash: p.contentHash, content: p.content }]));
 
     const updatedPages: UpdatedPage[] = [];
+    // A changed page keeps its OLD stored hash until the alert was broadcast: a crash,
+    // a disconnected bot or a failed broadcast then re-detects it on the next poll.
+    const pendingCommits: PendingCommit[] = [];
 
     for (const url of urls) {
       if (this.isStopped) {
@@ -132,17 +142,21 @@ export class TelegramDocUpdateDispatcherService {
       let relPath: string;
       let newContent: string;
       let newHash: string;
+      const existing = pageMap.get(url);
 
       try {
         relPath = urlToRelPath(url);
         newContent = await fetchPageMarkdown(url);
         newHash = computeHash(newContent);
 
-        await prismaContent.hyperliquidDocPage.upsert({
-          where: { pageUrl: url },
-          create: { pageUrl: url, relPath, contentHash: newHash, content: newContent },
-          update: { relPath, contentHash: newHash, content: newContent },
-        });
+        // First-seen and unchanged pages are stored now; a changed one only after its broadcast.
+        if (existing === undefined || existing.hash === newHash) {
+          await prismaContent.hyperliquidDocPage.upsert({
+            where: { pageUrl: url },
+            create: { pageUrl: url, relPath, contentHash: newHash, content: newContent },
+            update: { relPath, contentHash: newHash, content: newContent },
+          });
+        }
       } catch (error) {
         logDeduplicator.warn('TelegramDocUpdateDispatcherService: Failed to process page, skipping', {
           url,
@@ -151,10 +165,9 @@ export class TelegramDocUpdateDispatcherService {
         continue;
       }
 
-      const existing = pageMap.get(url);
-
       if (existing !== undefined && existing.hash !== newHash) {
         updatedPages.push({ relPath, pageUrl: url, oldContent: existing.content, newContent });
+        pendingCommits.push({ pageUrl: url, relPath, contentHash: newHash, content: newContent });
         logDeduplicator.info('TelegramDocUpdateDispatcherService: Page changed', { url, relPath });
       }
     }
@@ -166,31 +179,60 @@ export class TelegramDocUpdateDispatcherService {
 
     if (updatedPages.length === 0) return;
 
-    await this.broadcastToAllUsers(updatedPages);
+    const delivered = await this.broadcastToAllUsers(updatedPages);
+    if (!delivered) {
+      logDeduplicator.warn('TelegramDocUpdateDispatcherService: Broadcast not delivered, changed pages kept for the next poll', {
+        changed: updatedPages.length,
+      });
+      return;
+    }
 
-    try {
-      await prismaContent.hyperliquidDocPage.updateMany({
-        where: { pageUrl: { in: updatedPages.map(p => p.pageUrl) } },
-        data: { lastBroadcastAt: new Date() },
-      });
-    } catch (error) {
-      // The alerts are already out and the new hashes are stored: only the timestamp is missing.
-      logDeduplicator.error('TelegramDocUpdateDispatcherService: Failed to record lastBroadcastAt', {
-        error: error instanceof Error ? error.message : String(error),
-      });
+    // The alerts are out: only now the new hash/content replace the old ones. A page whose
+    // write fails here is announced again next poll (at-least-once), the others are done.
+    const broadcastAt = new Date();
+    for (const page of pendingCommits) {
+      try {
+        await prismaContent.hyperliquidDocPage.upsert({
+          where: { pageUrl: page.pageUrl },
+          create: { ...page, lastBroadcastAt: broadcastAt },
+          update: { relPath: page.relPath, contentHash: page.contentHash, content: page.content, lastBroadcastAt: broadcastAt },
+        });
+      } catch (error) {
+        logDeduplicator.error('TelegramDocUpdateDispatcherService: Failed to store a broadcast page (it will be announced again)', {
+          url: page.pageUrl,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
-  private async broadcastToAllUsers(pages: UpdatedPage[]): Promise<void> {
-    await this.ensureUserCacheFresh();
-    if (this.userCache.length === 0) return;
+  /**
+   * @returns true when the alert is considered delivered (no user to tell, or at least one
+   * client received it); false when it must be retried next poll (user list unreadable,
+   * bot disconnected so nobody received it, interrupted by stop(), or any error).
+   */
+  private async broadcastToAllUsers(pages: UpdatedPage[]): Promise<boolean> {
+    try {
+      const usersLoaded = await this.ensureUserCacheFresh();
+      if (!usersLoaded) return false;
+      if (this.userCache.length === 0) return true;
+      return this.sendToCachedUsers(pages);
+    } catch (error) {
+      logDeduplicator.error('TelegramDocUpdateDispatcherService: Broadcast failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  private sendToCachedUsers(pages: UpdatedPage[]): boolean {
 
     const message = formatDocUpdateTelegramMessage(pages);
     const wsServer = InternalWebSocketServer.getInstance();
     let dispatched = 0;
 
     for (const user of this.userCache) {
-      if (this.isStopped) return;
+      if (this.isStopped) return false;
 
       const sent = wsServer.broadcastDocUpdateAlert(user.telegramId, message);
       if (sent > 0) dispatched++;
@@ -201,10 +243,12 @@ export class TelegramDocUpdateDispatcherService {
       userCount: this.userCache.length,
       dispatched,
     });
+    return dispatched > 0;
   }
 
-  private async ensureUserCacheFresh(): Promise<void> {
-    if (Date.now() - this.cacheLoadedAt < TelegramDocUpdateDispatcherService.CACHE_TTL_MS) return;
+  /** @returns false when the user list could not be read (and none is cached). */
+  private async ensureUserCacheFresh(): Promise<boolean> {
+    if (Date.now() - this.cacheLoadedAt < TelegramDocUpdateDispatcherService.CACHE_TTL_MS) return true;
 
     try {
       const users = await prismaTelegram.telegramUser.findMany({
@@ -219,10 +263,12 @@ export class TelegramDocUpdateDispatcherService {
       logDeduplicator.debug('TelegramDocUpdateDispatcherService: User cache refreshed', {
         count: this.userCache.length,
       });
+      return true;
     } catch (error) {
       logDeduplicator.error('TelegramDocUpdateDispatcherService: Failed to refresh user cache', {
         error: error instanceof Error ? error.message : String(error),
       });
+      return this.cacheLoadedAt > 0;
     }
   }
 }

@@ -66,7 +66,9 @@ describe('TelegramDocUpdateDispatcherService.runPoll', () => {
     jest.clearAllMocks();
     mockFetch();
     mockDb.broadcast.mockReturnValue(1);
-    mockDb.updateMany.mockResolvedValue({ count: 1 });
+    mockDb.upsert.mockReset();
+    mockDb.broadcast.mockReset();
+    mockDb.broadcast.mockReturnValue(1);
     mockDb.upsert.mockResolvedValue({});
     mockDb.findMany.mockResolvedValue([
       { pageUrl: 'https://hyperliquid.gitbook.io/hyperliquid-docs/a', contentHash: 'old', content: 'old' },
@@ -76,19 +78,60 @@ describe('TelegramDocUpdateDispatcherService.runPoll', () => {
 
   afterEach(() => jest.useRealTimers());
 
+  const A = 'https://hyperliquid.gitbook.io/hyperliquid-docs/a';
+  const B = 'https://hyperliquid.gitbook.io/hyperliquid-docs/b';
+  const stored = () => mockDb.upsert.mock.calls.map((c) => (c[0] as { where: { pageUrl: string } }).where.pageUrl);
+
   it('skips a malformed URL and keeps polling the other pages', async () => {
     await expect(poll()).resolves.toBeUndefined();
-    expect(mockDb.upsert).toHaveBeenCalledTimes(2);
-    expect(mockDb.updateMany).toHaveBeenCalledTimes(1);
+    expect(stored()).toEqual([A, B]);
   });
 
-  it('skips a page whose upsert rejects, without rejecting the poll', async () => {
+  it('stores a changed page only after its alert was broadcast', async () => {
+    const order: string[] = [];
+    mockDb.broadcast.mockImplementation(() => { order.push('broadcast'); return 1; });
+    mockDb.upsert.mockImplementation(async () => { order.push('upsert'); return {}; });
+    await poll();
+    expect(order[0]).toBe('broadcast');
+    expect(order.filter((o) => o === 'upsert')).toHaveLength(2);
+  });
+
+  it('keeps the old hash (stores nothing) when nobody received the alert, so the next poll retries', async () => {
+    mockDb.broadcast.mockReturnValue(0); // bot disconnected
+    await expect(poll()).resolves.toBeUndefined();
+    expect(mockDb.upsert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the old hash when the broadcast throws', async () => {
+    mockDb.broadcast.mockImplementation(() => { throw new Error('socket'); });
+    await expect(poll()).resolves.toBeUndefined();
+    expect(mockDb.upsert).not.toHaveBeenCalled();
+  });
+
+  it('stores a first-seen page immediately and announces nothing for it', async () => {
+    mockDb.findMany.mockResolvedValue([]);
+    await poll();
+    expect(stored()).toEqual([A, B]);
+    expect(mockDb.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('does not re-announce on the following poll once delivered', async () => {
+    await poll();
+    const hashes = mockDb.upsert.mock.calls.map((c) => (c[0] as { update: { contentHash: string } }).update.contentHash);
+    mockDb.broadcast.mockClear();
+    mockDb.findMany.mockResolvedValue([
+      { pageUrl: A, contentHash: hashes[0], content: 'x' },
+      { pageUrl: B, contentHash: hashes[1], content: 'x' },
+    ]);
+    await poll();
+    expect(mockDb.broadcast).not.toHaveBeenCalled();
+  });
+
+  it('skips a page whose commit rejects, without rejecting the poll', async () => {
     mockDb.upsert.mockRejectedValueOnce(new Error('Connection terminated'));
     await expect(poll()).resolves.toBeUndefined();
-    expect(mockDb.upsert).toHaveBeenCalledTimes(2);
-    expect(mockDb.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { pageUrl: { in: ['https://hyperliquid.gitbook.io/hyperliquid-docs/b'] } } }),
-    );
+    expect(stored()).toEqual([A, B]);
+    expect(logDeduplicator.error).toHaveBeenCalled();
   });
 
   it('logs and resolves when the page list cannot be read', async () => {
@@ -96,15 +139,5 @@ describe('TelegramDocUpdateDispatcherService.runPoll', () => {
     await expect(poll()).resolves.toBeUndefined();
     expect(logDeduplicator.error).toHaveBeenCalled();
     expect(mockDb.upsert).not.toHaveBeenCalled();
-  });
-
-  it('logs and resolves when the final updateMany rejects', async () => {
-    mockDb.updateMany.mockRejectedValueOnce(new Error('Connection terminated'));
-    await expect(poll()).resolves.toBeUndefined();
-    expect(mockDb.broadcast).toHaveBeenCalled();
-    expect(logDeduplicator.error).toHaveBeenCalledWith(
-      expect.stringContaining('lastBroadcastAt'),
-      expect.anything(),
-    );
   });
 });
