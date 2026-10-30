@@ -68,13 +68,12 @@ export class XpService {
 
       // Vérifier le cap hebdomadaire (lecture seule : avant le slot journalier,
       // pour qu'un refus ne le consomme pas)
+      // Lecture rapide pour refuser sans toucher au cap journalier ; la garantie
+      // réelle est l'insertion atomique sous verrou plus bas.
       const weeklyCap = WEEKLY_CAPS[actionType];
+      const oneWeekAgo = new Date();
+      oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
       if (weeklyCap !== undefined) {
-        // Logique simplifiée pour l'instant: on compte les transactions des 7 derniers jours
-        // TODO: Optimiser avec une table dédiée si nécessaire pour la performance
-        const oneWeekAgo = new Date();
-        oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-
         const weeklyCount = await xpRepository.countTransactions(userId, actionType, { since: oneWeekAgo });
 
         if (weeklyCount >= weeklyCap) {
@@ -111,13 +110,20 @@ export class XpService {
       // Prisma renvoie P2002 si un doublon existe, ce qui nous évite la
       // race check-then-insert précédente.
       try {
-        await xpRepository.createTransaction({
-          userId,
-          actionType,
-          xpAmount,
-          referenceId,
-          description,
-        });
+        const txData = { userId, actionType, xpAmount, referenceId, description };
+        if (weeklyCap !== undefined) {
+          // Comptage + insertion atomiques : null = cap atteint entre-temps.
+          const created = await xpRepository.createTransactionWithinWeeklyCap(txData, weeklyCap, oneWeekAgo);
+          if (!created) {
+            if (dailySlotDate) {
+              await xpRepository.releaseDailyActionCount(userId, actionType, dailySlotDate).catch(() => undefined);
+            }
+            logDeduplicator.info('Weekly cap reached for action (atomic)', { userId, actionType, cap: weeklyCap });
+            return 0;
+          }
+        } else {
+          await xpRepository.createTransaction(txData);
+        }
       } catch (err) {
         // Rien n'a été accordé : le slot journalier pris plus haut est rendu.
         if (dailySlotDate) {

@@ -12,6 +12,7 @@ const mockRepo = {
   tryIncrementDailyActionCount: jest.fn(),
   releaseDailyActionCount: jest.fn(),
   createTransaction: jest.fn(),
+  createTransactionWithinWeeklyCap: jest.fn(),
   incrementUserXp: jest.fn(),
   setUserLevel: jest.fn(),
   getOrCreateWeeklyChallenges: jest.fn(),
@@ -138,5 +139,30 @@ describe('paging bounds', () => {
   it('history clamps the same way', async () => {
     await xpService.getTransactionHistory(1, { page: -4, limit: -1 });
     expect(mockRepo.getTransactionHistory).toHaveBeenCalledWith(1, { skip: 0, take: 20, actionType: undefined });
+  });
+});
+
+describe('weekly cap', () => {
+  it('grants nothing and releases the daily slot when the atomic insert finds the cap reached', async () => {
+    // The read-only pre-check passed (count 0) but concurrent grants filled the cap before the insert
+    mockRepo.createTransactionWithinWeeklyCap.mockResolvedValue(null);
+
+    const granted = await xpService.grantXp({ userId: 1, actionType: 'ADD_EDUCATIONAL_RESOURCE', referenceId: 'r1' });
+
+    expect(granted).toBe(0);
+    expect(mockRepo.createTransactionWithinWeeklyCap).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 1, actionType: 'ADD_EDUCATIONAL_RESOURCE' }),
+      10,
+      expect.any(Date),
+    );
+    expect(mockRepo.createTransaction).not.toHaveBeenCalled();
+    expect(mockRepo.incrementUserXp).not.toHaveBeenCalled();
+  });
+
+  it('grants the XP when the atomic insert succeeds', async () => {
+    mockRepo.createTransactionWithinWeeklyCap.mockResolvedValue({});
+    mockRepo.incrementUserXp.mockResolvedValue({ totalXp: 50, level: 1 });
+    const granted = await xpService.grantXp({ userId: 1, actionType: 'ADD_EDUCATIONAL_RESOURCE', referenceId: 'r2' });
+    expect(granted).toBeGreaterThan(0);
   });
 });

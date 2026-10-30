@@ -28,6 +28,44 @@ export class XpRepository {
     }
 
     /**
+     * Crée une transaction XP seulement si le cap hebdomadaire n'est pas atteint.
+     * Le comptage et l'insertion se font dans une même transaction SQL, sérialisée
+     * par un verrou advisory par (userId, actionType) : des grants concurrents ne
+     * peuvent plus tous voir un compteur sous le cap avant que l'un d'eux n'écrive.
+     * @returns la transaction créée, ou null si le cap est atteint (rien n'est écrit)
+     */
+    async createTransactionWithinWeeklyCap(
+        data: {
+            userId: number;
+            actionType: XpActionType;
+            xpAmount: number;
+            referenceId?: string;
+            description?: string;
+        },
+        cap: number,
+        since: Date,
+    ): Promise<XpTransaction | null> {
+        return prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(${data.userId}::int, hashtext(${String(data.actionType)}::text))`;
+            const count = await tx.xpTransaction.count({
+                where: { userId: data.userId, actionType: data.actionType, createdAt: { gte: since } },
+            });
+            if (count >= cap) {
+                return null;
+            }
+            return tx.xpTransaction.create({
+                data: {
+                    userId: data.userId,
+                    actionType: data.actionType,
+                    xpAmount: data.xpAmount,
+                    referenceId: data.referenceId || null,
+                    description: data.description || null,
+                },
+            });
+        });
+    }
+
+    /**
      * Vérifie si une transaction existe déjà (pour éviter les doublons)
      */
     async transactionExists(
