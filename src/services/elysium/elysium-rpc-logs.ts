@@ -14,6 +14,12 @@ import { logDeduplicator } from '../../utils/logDeduplicator';
 const DEFAULT_RPC_URL = 'https://testnet-rpc.elysium.kinetiq.xyz';
 /** eth_getLogs answers 200k-block ranges in ~2.5 s (measured 2026-10-19); stay well under. */
 const LOGS_BLOCK_SPAN = 100_000;
+/**
+ * The public RPC refuses a range holding more than 10,000 logs (code -32005, measured
+ * 2026-11-01: one 100k-block window of V3 swaps already does). Such a range is split in two
+ * until it fits; below this span the refusal is real and is thrown.
+ */
+const LOGS_MIN_SPAN = 50;
 /** The public RPC refuses part of a burst: one call at a time, with a gap. */
 const MIN_CALL_GAP_MS = process.env.NODE_ENV === 'test' ? 0 : 250;
 const MAX_ATTEMPTS = 4;
@@ -28,6 +34,17 @@ const MEMO_MAX = 512;
  * gap (measured 2026-10-22); the chain makes ~8 blocks/s.
  */
 export const BLOCK_BATCH = 25;
+
+/** A deterministic refusal: retrying the same range cannot succeed, it has to be narrowed. */
+export class TooManyLogsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TooManyLogsError';
+  }
+}
+
+const isTooManyLogs = (code: number | undefined, message: string): boolean =>
+  code === -32005 || /limit exceeded|too many|narrow down|query returned more than/i.test(message);
 
 interface RpcLog {
   address: string;
@@ -109,11 +126,11 @@ export class ElysiumRpcLogs {
     const from = await this.blockAtOrBefore(start.getTime() / 1000);
     const to = (await this.blockAtOrBefore(end.getTime() / 1000)) + 1;
     const rows: UpstreamLogRow[] = [];
-    for (let lo = from; lo <= to; lo += LOGS_BLOCK_SPAN) {
-      const hi = Math.min(to, lo + LOGS_BLOCK_SPAN - 1);
-      const logs = await this.call<RpcLog[]>('eth_getLogs', [
-        { fromBlock: `0x${lo.toString(16)}`, toBlock: `0x${hi.toString(16)}`, topics: [topic0] },
-      ]);
+    let lo = from;
+    while (lo <= to) {
+      const hi = Math.min(to, lo + this.logSpan - 1);
+      const logs = await this.logsInRange(topic0, lo, hi);
+      lo = hi + 1;
       for (const l of logs) {
         const row = toUpstreamLog(l);
         if (!row) continue;
@@ -122,6 +139,27 @@ export class ElysiumRpcLogs {
       }
     }
     return rows;
+  }
+
+  /**
+   * Logs of one block range, split in halves while the RPC says the range holds too many.
+   * The span that worked is kept for the next windows, and grows back slowly when activity drops.
+   */
+  private async logsInRange(topic0: string, lo: number, hi: number): Promise<RpcLog[]> {
+    try {
+      const logs = await this.call<RpcLog[]>('eth_getLogs', [
+        { fromBlock: `0x${lo.toString(16)}`, toBlock: `0x${hi.toString(16)}`, topics: [topic0] },
+      ]);
+      if (hi - lo + 1 >= this.logSpan) this.logSpan = Math.min(LOGS_BLOCK_SPAN, Math.ceil(this.logSpan * 1.25));
+      return logs;
+    } catch (error) {
+      if (!(error instanceof TooManyLogsError) || hi - lo + 1 <= LOGS_MIN_SPAN) throw error;
+      const mid = lo + Math.floor((hi - lo) / 2);
+      this.logSpan = Math.max(LOGS_MIN_SPAN, mid - lo + 1);
+      const left = await this.logsInRange(topic0, lo, mid);
+      const right = await this.logsInRange(topic0, mid + 1, hi);
+      return left.concat(right);
+    }
   }
 
   /**
@@ -161,6 +199,8 @@ export class ElysiumRpcLogs {
   }
 
   private headCache: { at: number; block: number } | null = null;
+  /** Block span of the next eth_getLogs call, narrowed when the RPC refuses a range. */
+  private logSpan = LOGS_BLOCK_SPAN;
 
   /** Current head, read at most every few seconds. */
   public async headBlock(): Promise<number> {
@@ -219,10 +259,16 @@ export class ElysiumRpcLogs {
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const body = (await res.json()) as { result?: T; error?: { message?: string } };
-        if (body.error) throw new Error(body.error.message ?? 'RPC error');
+        const body = (await res.json()) as { result?: T; error?: { code?: number; message?: string } };
+        if (body.error) {
+          const message = body.error.message ?? 'RPC error';
+          if (isTooManyLogs(body.error.code, message)) throw new TooManyLogsError(message);
+          throw new Error(message);
+        }
         return body.result as T;
       } catch (error) {
+        // Asking again for the same range gets the same refusal: hand it back to be split.
+        if (error instanceof TooManyLogsError) throw error;
         lastError = error;
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
       }

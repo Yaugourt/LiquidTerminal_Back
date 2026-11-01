@@ -72,3 +72,47 @@ describe('elysium RPC block search', () => {
     }
   });
 });
+
+describe('elysium RPC logs over a busy range', () => {
+  /** One log every 10 blocks; the mock refuses any range holding more than 1,000 of them. */
+  const CAP = 1_000;
+  let calls = 0;
+
+  beforeEach(() => {
+    calls = 0;
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const { params } = JSON.parse(String((init as RequestInit).body)) as { params: [{ fromBlock: string; toBlock: string }] };
+      calls++;
+      const lo = parseInt(params[0].fromBlock, 16);
+      const hi = parseInt(params[0].toBlock, 16);
+      const blocks: number[] = [];
+      for (let b = Math.ceil(lo / 10) * 10; b <= hi; b += 10) blocks.push(b);
+      if (blocks.length > CAP) {
+        return new Response(
+          JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32005, message: 'logs count limit exceeded (10000) consider refine/narrow down your query' } })
+        );
+      }
+      const result = blocks.map((b) => ({
+        ...rpcLog,
+        blockNumber: `0x${b.toString(16)}`,
+        blockTimestamp: `0x${(1_760_000_000 + b).toString(16)}`,
+      }));
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }));
+    });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('splits a refused range until it fits, without losing or repeating a log', async () => {
+    const { ElysiumRpcLogs } = jest.requireActual<typeof import('../../../src/services/elysium/elysium-rpc-logs')>(
+      '../../../src/services/elysium/elysium-rpc-logs'
+    );
+    const rpc = new (ElysiumRpcLogs as unknown as new () => { logsInRange(t: string, lo: number, hi: number): Promise<{ blockNumber: string }[]> })();
+    const logs = await rpc.logsInRange(rpcLog.topics[0], 0, 99_999);
+    const blocks = logs.map((l) => parseInt(l.blockNumber, 16));
+    expect(blocks).toHaveLength(10_000);
+    expect(new Set(blocks).size).toBe(10_000);
+    expect(blocks).toEqual([...blocks].sort((a, b) => a - b));
+    // Refused once per level on the way down, never retried on the same range.
+    expect(calls).toBeLessThan(40);
+  });
+});
