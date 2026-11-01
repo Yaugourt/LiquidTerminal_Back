@@ -6,6 +6,7 @@ import { ExtractedPreviewData } from '../../types/linkPreview.types';
 import { LinkPreviewFetchError, LinkPreviewTimeoutError } from '../../errors/linkPreview.errors';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { resolveSafeAddress, SsrfBlockedError } from '../../utils/ssrf';
+import { isXHost, xPreviewText } from './xTitle';
 
 const gunzipAsync = promisify(gunzip);
 
@@ -339,18 +340,10 @@ export class LinkPreviewFetcherService {
         'meta[name="description"]'
       ]);
 
-      // Twitter/X met l'auteur (`<Name> (@<handle>) on X`) dans og:title et le
-      // texte effectif du tweet dans og:description, à l'envers de la convention.
-      // On swap pour que le card affiche le contenu du tweet en titre.
-      const isTwitter =
-        urlObj.hostname === 'x.com' ||
-        urlObj.hostname === 'twitter.com' ||
-        urlObj.hostname.endsWith('.x.com') ||
-        urlObj.hostname.endsWith('.twitter.com');
-      if (isTwitter && title && description) {
-        const tweetText = description;
-        description = title;
-        title = tweetText;
+      // X puts the author in og:title and the post body in og:description: the
+      // card title becomes the post's headline, the author line its description.
+      if (isXHost(urlObj.hostname)) {
+        ({ title, description } = xPreviewText(title, description));
       }
 
       let image = this.getMetaContent($, [
