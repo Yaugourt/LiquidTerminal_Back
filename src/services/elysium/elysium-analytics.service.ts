@@ -1103,7 +1103,7 @@ export class ElysiumAnalyticsService {
     const a = address.toLowerCase();
     return this.cachedFresh('contract', a, async () => {
       const since7d = new Date(Date.now() - 7 * DAY_MS);
-      const [dep, token, usage, allTime, methods, asPool, asFactory, inPools, names] = await Promise.all([
+      const [dep, token, usage, allTime, methods, asPool, asFactory, inPools, names, launch] = await Promise.all([
         prismaHistorical.$queryRaw<Array<{ deployer: string; deploy_tx: string; deployed_at: number; block_number: bigint }>>`
           SELECT deployer, deploy_tx, (extract(epoch FROM deployed_at) * 1000)::float8 AS deployed_at, block_number
           FROM elysium_contract WHERE address = ${a}`,
@@ -1129,6 +1129,13 @@ export class ElysiumAnalyticsService {
           SELECT pool, version, CASE WHEN token0 = ${a} THEN token1 ELSE token0 END AS other
           FROM elysium_dex_pool WHERE token0 = ${a} OR token1 = ${a} ORDER BY created_at DESC LIMIT 10`,
         this.methodNames(),
+        // Launchpad origin and holder spread, for tokens born on a launchpad we decode.
+        prismaHistorical.$queryRaw<
+          Array<{ launchpad: string; kind: string; creator: string | null; created_at: number; graduated: boolean; holders: number | null; top10_pct: number | null; dev_pct: number | null }>
+        >`
+          SELECT launchpad, kind, creator, (extract(epoch FROM created_at) * 1000)::float8 AS created_at,
+                 graduated_at IS NOT NULL AS graduated, holders, top10_pct, dev_pct
+          FROM elysium_launch WHERE token = ${a}`,
       ]);
 
       const d = dep[0];
@@ -1178,6 +1185,18 @@ export class ElysiumAnalyticsService {
           lastCall: iso(allTime[0]?.last ?? null),
           topMethods: methods.map((m) => ({ ...this.methodRef(m.method_id, names), txs: m.txs })),
         },
+        launch: launch[0]
+          ? {
+              launchpad: launch[0].launchpad,
+              kind: launch[0].kind,
+              creator: launch[0].creator,
+              at: iso(launch[0].created_at),
+              graduated: launch[0].graduated,
+              holders: launch[0].holders,
+              top10Pct: launch[0].top10_pct,
+              devPct: launch[0].dev_pct,
+            }
+          : null,
         dex: {
           pool: pool ? { factory: pool.factory, version: pool.version, token0: pool.token0, token1: pool.token1, fee: pool.fee } : null,
           factory: f && f.pools > 0 ? { pools: f.pools, version: f.version } : null,
