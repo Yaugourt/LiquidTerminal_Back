@@ -23,6 +23,13 @@ describe('X preview titles', () => {
     expect(h).not.toMatch(/\s…$/);
   });
 
+  it('skips thread markers and lone emoji, and extends a too-short first line', () => {
+    expect(xHeadline('1/\nWelcome to Hyperliquid, your new home')).toBe('Welcome to Hyperliquid, your new home');
+    expect(xHeadline('🦖\n\nThe HyperEVM is live')).toBe('The HyperEVM is live');
+    expect(xHeadline('HYPE.\nThe alignment vehicle explained')).toBe('HYPE. The alignment vehicle explained');
+    expect(xHeadline("What's HIP-3 and why it matters")).toBe("What's HIP-3 and why it matters");
+  });
+
   it('reads the author line and recognises X hosts', () => {
     expect(parseXAuthor('jeff.hl (@chameleon_jeff) on X')).toEqual({ name: 'jeff.hl', handle: 'chameleon_jeff' });
     expect(parseXAuthor('Just a title')).toBeNull();

@@ -11,6 +11,8 @@
  */
 
 const MAX_HEADLINE = 140;
+/** Shorter first lines take the next line along. */
+const MIN_HEADLINE = 20;
 
 /** True for x.com / twitter.com and their subdomains. */
 export function isXHost(hostname: string): boolean {
@@ -26,14 +28,27 @@ export function parseXAuthor(line: string | null | undefined): { name: string; h
   return m ? { name: m[1].trim(), handle: m[2] } : null;
 }
 
-/** First non-empty line of a post, without links, cut at a word boundary. */
+/** Lines of a post that carry no words: thread markers ("1/", "(1/6)"), lone emoji. */
+function isFiller(line: string): boolean {
+  return (line.match(/\p{L}/gu) ?? []).length < 3;
+}
+
+/**
+ * Headline of a post: its first line, URLs removed, cut at a word boundary.
+ * Marker-only lines are skipped, and a first line too short to say anything
+ * ("HYPE.", "🚨 New Video") takes the next line along.
+ */
 export function xHeadline(text: string | null | undefined): string | null {
   if (!text) return null;
-  const line = text
+  const lines = text
     .split('\n')
     .map((l) => l.replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim())
-    .find((l) => l.length > 0);
-  if (!line) return null;
+    .filter((l) => l.length > 0 && !isFiller(l));
+  if (lines.length === 0) return null;
+  let line = lines[0];
+  for (let i = 1; i < lines.length && line.length < MIN_HEADLINE; i++) {
+    line = `${line} ${lines[i]}`;
+  }
   if (line.length <= MAX_HEADLINE) return line;
   const cut = line.slice(0, MAX_HEADLINE);
   const space = cut.lastIndexOf(' ');
