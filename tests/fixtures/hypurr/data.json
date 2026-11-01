@@ -1,0 +1,121 @@
+{
+ "generated": "2026-10-26",
+ "projects": [
+  {
+   "slug": "0xarchive",
+   "name": "0xArchive",
+   "bio": "Access the most comprehensive perpetuals historical data. Order books, trades, candles, funding rates, and more from top decentralized exchanges. Self-serve API with transparent pricing.",
+   "about": "0xArchive provides access to the most comprehensive perpetuals historical data. Order books, trades, candles, funding rates, and more from Hyperliquid and Lighter.xyz.\nSelf-serve API with transparent pricing.\nDocs: https://www.0xarchive.io/docs",
+   "tags": [
+    "Infrastructure"
+   ],
+   "token": "No plans",
+   "ticker": "NA",
+   "stage": "Bootstrapped",
+   "platform": "Multichain",
+   "member": false,
+   "founder": "@zkmenace (TG)",
+   "founder_x": "",
+   "site": "https://www.0xarchive.io/",
+   "x": "https://x.com/0xArchiveIO",
+   "tg": "https://t.me/archivedotio",
+   "guide": true,
+   "updated": "2026-03-15",
+   "created": "2026-03-15",
+   "sprite": 0
+  },
+  {
+   "slug": "21shares",
+   "name": "21Shares",
+   "bio": "Crypto ETP issuer owned by FalconX, with HYPE funds in Europe (HYPE, SIX) and the US (THYP and 2x TXXH on Nasdaq).",
+   "about": "21Shares is a Zurich-based issuer of crypto exchange-traded products in Europe and the US. FalconX completed its acquisition of 21Shares on 20 Nov 2025; Russell Barlow stays CEO and the business runs independently.\nIts 21shares Hyperliquid Staking ETP (ticker HYPE, ISIN CH1471826029) listed on SIX Swiss Exchange on 28 Aug 2025 and added staking rewards in Apr 2026 (about $25.5M AUM). In the US, the 21shares Hyperliquid ETF (THYP) began trading on Nasdaq on 12 May 2026 at a 0.30% fee, held by Anchorage Digital and BitGo and staked through Figment (about $69M AUM on 29 Oct 2026). The 21shares 2x Long HYPE ETF (TXXH) launched the same day (about $4.5M AUM).",
+   "tags": [
+    "Institutions"
+   ],
+   "token": "No plans",
+   "ticker": "NA",
+   "stage": "NA",
+   "platform": "Multichain",
+   "member": false,
+   "founder": "Hany Rashwan, Ophelia Snyder (co-founders); Russell Barlow (CEO)",
+   "founder_x": "",
+   "site": "https://www.21shares.com",
+   "x": "https://x.com/21shares",
+   "tg": "",
+   "guide": false,
+   "updated": "2026-10-30",
+   "created": "2026-10-30",
+   "sprite": 1
+  },
+  {
+   "slug": "across-protocol",
+   "name": "Across Protocol",
+   "bio": "Across is an interoperability protocol powered by intents. It is the only cross-chain intents protocol in production today, enabling the fastest and lowest-cost way to transfer value without security tradeoffs vs. traditional bridges.",
+   "about": "Across is an interoperability protocol powered by intents. It is the only cross-chain intents protocol in production today, enabling the fastest and lowest-cost way to transfer value without security tradeoffs vs. traditional bridges. See the docs here: https://docs.across.to/user-docs",
+   "tags": [
+    "Bridge"
+   ],
+   "token": "Yes",
+   "ticker": "ACX",
+   "stage": "VC funded",
+   "platform": "Multichain",
+   "member": false,
+   "founder": "hal2001",
+   "founder_x": "https://x.com/hal2001",
+   "site": "https://across.to/",
+   "x": "https://x.com/AcrossProtocol/",
+   "tg": "http://discord.across.to",
+   "guide": true,
+   "updated": "2025-03-04",
+   "created": "2025-03-04",
+   "sprite": 2
+  },
+  {
+   "slug": "stable-jack",
+   "name": "StableJack",
+   "bio": "StableJack is an AI research, analysis & trading platform built on Hyperliquid.",
+   "about": "StableJack is an AI research, analysis & trading platform built on Hyperliquid. Users can analyze any asset (including stocks, crypto, forex, commodities, and pre-IPO), access AI Insights that provide a thesis on every asset, or they can use copilots and skills for specific use cases (generating investment memo, DCF valuation, pair trading, and etc). In addition to the tools, StableJack provides access to a trading terminal where users can get access to spot and perpetual markets for stocks, crypto, forex, and pre-IPOs.",
+   "tags": [
+    "Builder Codes",
+    "AI"
+   ],
+   "token": "Not yet",
+   "ticker": "NA",
+   "stage": "Seed Round",
+   "platform": "Only on Hyperliquid",
+   "member": false,
+   "founder": "CaesarJulius0",
+   "founder_x": "https://x.com/CaesarJulius0",
+   "site": "https://www.stablejack.xyz/",
+   "x": "https://x.com/StableJack_xyz",
+   "tg": "https://t.me/stablejack",
+   "guide": false,
+   "updated": "2026-06-29",
+   "created": "2024-12-27",
+   "sprite": 300
+  },
+  {
+   "slug": "staking-rewards",
+   "name": "Staking Rewards",
+   "bio": "Staking Rewards is the leading crypto staking platform, empowering 3 million individuals and enterprises to stake since 2018.",
+   "about": "Staking Rewards is the leading crypto staking platform, empowering 3 million individuals and enterprises to stake since 2018. They offer unbiased real-time staking market data and tools for both private and institutional investors. Major companies like Coinbase, Kraken, Grayscale, and 21Shares utilize their Staking Data API to power their staking and investment products.",
+   "tags": [
+    "Data Analytics"
+   ],
+   "token": "Not yet",
+   "ticker": "NA",
+   "stage": "Private/Seed Round",
+   "platform": "Multichain",
+   "member": false,
+   "founder": "berlincrypto",
+   "founder_x": "https://x.com/berlincrypto",
+   "site": "https://www.stakingrewards.com/asset/hyperliquid",
+   "x": "https://x.com/stakingrewards",
+   "tg": "",
+   "guide": false,
+   "updated": "2025-03-05",
+   "created": "2025-03-05",
+   "sprite": 301
+  }
+ ]
+}

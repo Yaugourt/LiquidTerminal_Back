@@ -23,6 +23,7 @@ import { MetricsSnapshotClient } from '../clients/metrics/metrics-snapshot.clien
 import { ElysiumIngestionService } from '../services/elysium/elysium-ingestion.service';
 import { BuilderGrowthService } from '../services/builders/builder-growth.service';
 import { PortfolioMarginService } from '../services/portfolio-margin/portfolio-margin.service';
+import { HypurrSyncService } from '../services/project/hypurr-sync/hypurr-sync.service';
 import { ElysiumAnalyticsService } from '../services/elysium/elysium-analytics.service';
 import { ElysiumEcosystemService } from '../services/elysium/elysium-ecosystem.service';
 import { HLIndexerActiveUsersClient } from '../clients/hypedexer/rest/activeusers/activeusers.client';
@@ -221,6 +222,10 @@ export class ClientInitializerService {
       // startPolling() is a no-op when PM_SCAN_ENABLED=false.
       this.clients.set('portfolioMargin', PortfolioMarginService.getInstance());
       logDeduplicator.info('Portfolio margin service initialized successfully');
+
+      // Hypurr Collective ecosystem directory sync (weekly, content DB projects).
+      // startPolling() is a no-op unless HYPURR_SYNC_ENABLED=true (off by default).
+      this.clients.set('hypurrSync', HypurrSyncService.getInstance());
 
       // Initialiser le service d'ingestion des liquidations (WebSocket → DB historique)
       const ingestionService = LiquidationsIngestionService.getInstance();
