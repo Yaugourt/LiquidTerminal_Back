@@ -6,6 +6,7 @@ import type {
   ElysiumBridgeRetryablesQuery,
   ElysiumBridgeTokensQuery,
   ElysiumBridgeTransfersQuery,
+  ElysiumNetworkQuery,
   ElysiumStatsDailyQuery,
   ElysiumTokensQuery,
   ElysiumTransactionsQuery,
@@ -53,8 +54,8 @@ export class IndexerElysiumService {
     return cacheService.getOrSet<unknown>(key, fetcher, ttl);
   }
 
-  public getStats(): Promise<unknown> {
-    return this.cached('stats', undefined, HYPEDEXER_TTL.elysiumStats, () => this.client.getStats());
+  public getStats(params?: ElysiumNetworkQuery): Promise<unknown> {
+    return this.cached('stats', params, HYPEDEXER_TTL.elysiumStats, () => this.client.getStats(params));
   }
 
   public getStatsDaily(params?: ElysiumStatsDailyQuery): Promise<unknown> {
@@ -119,10 +120,26 @@ export class IndexerElysiumService {
     return fetch();
   }
 
-  public getUserBalances(address: string): Promise<unknown> {
+  public getUserBalances(address: string, params?: ElysiumNetworkQuery): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.cached('user:balances', { address: a }, HYPEDEXER_TTL.elysiumUser, () =>
-      this.userLookup(() => this.client.getUserBalances(a))
+    return this.cached('user:balances', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, () =>
+      this.userLookup(() => this.client.getUserBalances(a, params))
+    );
+  }
+
+  /** One token's detail; same per-address budget, cached like the user lookups. */
+  public getToken(address: string, params?: ElysiumNetworkQuery): Promise<unknown> {
+    const a = address.toLowerCase();
+    return this.cached('token:detail', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, () =>
+      this.userLookup(() => this.client.getToken(a, params))
+    );
+  }
+
+  /** Largest holders of a token; same per-address budget, cached like the user lookups. */
+  public getTokenHolders(address: string, params?: ElysiumNetworkQuery & { limit?: number }): Promise<unknown> {
+    const a = address.toLowerCase();
+    return this.cached('token:holders', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, () =>
+      this.userLookup(() => this.client.getTokenHolders(a, params))
     );
   }
 

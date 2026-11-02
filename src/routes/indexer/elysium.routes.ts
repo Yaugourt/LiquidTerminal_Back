@@ -16,6 +16,8 @@ import {
   elysiumUserActivitySchema,
   elysiumUserBalancesSchema,
   elysiumUserBridgeSchema,
+  elysiumTokenHoldersSchema,
+  elysiumTokenDetailSchema,
 } from '../../schemas/indexer/elysium-indexer.schema';
 import { IndexerElysiumService } from '../../services/indexer/indexer-elysium.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -64,7 +66,7 @@ function register<S extends QuerySchema>(
   );
 }
 
-register('/stats', elysiumStatsQuerySchema, 'INDEXER_ELYSIUM_STATS_ERROR', () => service.getStats());
+register('/stats', elysiumStatsQuerySchema, 'INDEXER_ELYSIUM_STATS_ERROR', (q) => service.getStats(q));
 
 register('/stats/daily', elysiumStatsDailyQuerySchema, 'INDEXER_ELYSIUM_STATS_DAILY_ERROR', (q) =>
   service.getStatsDaily(q)
@@ -111,7 +113,7 @@ register(
   '/user/:address/balances',
   elysiumUserBalancesSchema,
   'INDEXER_ELYSIUM_USER_BALANCES_ERROR',
-  (_q, p) => service.getUserBalances(p.address),
+  (q, p) => service.getUserBalances(p.address, q),
   addressLookupRateLimiter
 );
 
@@ -128,6 +130,22 @@ register(
   elysiumUserBridgeSchema,
   'INDEXER_ELYSIUM_USER_BRIDGE_ERROR',
   (q, p) => service.getUserBridge(p.address, q),
+  addressLookupRateLimiter
+);
+
+register(
+  '/tokens/:address',
+  elysiumTokenDetailSchema,
+  'INDEXER_ELYSIUM_TOKEN_DETAIL_ERROR',
+  (q, p) => service.getToken(p.address, q),
+  addressLookupRateLimiter
+);
+
+register(
+  '/tokens/:address/holders',
+  elysiumTokenHoldersSchema,
+  'INDEXER_ELYSIUM_TOKEN_HOLDERS_ERROR',
+  (q, p) => service.getTokenHolders(p.address, q),
   addressLookupRateLimiter
 );
 

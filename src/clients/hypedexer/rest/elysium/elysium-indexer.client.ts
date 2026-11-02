@@ -15,8 +15,15 @@ function buildQuery(record: Record<string, QueryValue>): string {
   return s ? `?${s}` : '';
 }
 
-/** Upstream path prefix for the Elysium testnet API. */
+/** Upstream path prefix for the Elysium testnet API (the ingestion only reads testnet). */
 const ELYSIUM_PREFIX = '/elysium/testnet';
+
+export type ElysiumNetwork = 'testnet' | 'mainnet';
+
+/** Pass-through calls carry the chain to read; testnet when omitted. */
+export interface ElysiumNetworkQuery {
+  network?: ElysiumNetwork;
+}
 
 /** Paging + time-window params shared by the ingestion list calls. */
 export interface ElysiumIngestPageQuery {
@@ -31,25 +38,25 @@ export interface ElysiumIngestPageQuery {
 /** Upstream list paths the ingestion service pages through. */
 export type ElysiumIngestPath = '/transactions' | '/bridge/transfers' | '/tokens' | '/logs';
 
-export interface ElysiumStatsDailyQuery {
+export interface ElysiumStatsDailyQuery extends ElysiumNetworkQuery {
   days?: number;
 }
 
-export interface ElysiumBlocksQuery {
+export interface ElysiumBlocksQuery extends ElysiumNetworkQuery {
   limit?: number;
 }
 
-export interface ElysiumTransactionsQuery {
+export interface ElysiumTransactionsQuery extends ElysiumNetworkQuery {
   limit?: number;
   include_spam?: boolean;
   include_system?: boolean;
 }
 
-export interface ElysiumBatchesQuery {
+export interface ElysiumBatchesQuery extends ElysiumNetworkQuery {
   limit?: number;
 }
 
-export interface ElysiumBridgeTransfersQuery {
+export interface ElysiumBridgeTransfersQuery extends ElysiumNetworkQuery {
   limit?: number;
   direction?: 'deposit' | 'withdrawal';
   status?: 'initiated' | 'ticket_created' | 'redeem_failed' | 'expired' | 'completed' | 'executed';
@@ -57,33 +64,33 @@ export interface ElysiumBridgeTransfersQuery {
   asset?: 'native' | 'token' | 'message';
 }
 
-export interface ElysiumBridgeRetryablesQuery {
+export interface ElysiumBridgeRetryablesQuery extends ElysiumNetworkQuery {
   limit?: number;
   status?: 'pending' | 'failed' | 'expired' | 'redeemed';
 }
 
-export interface ElysiumBridgeReservesQuery {
+export interface ElysiumBridgeReservesQuery extends ElysiumNetworkQuery {
   route: 'native' | 'canonical' | 'mirror';
   only_unbacked?: boolean;
 }
 
-export interface ElysiumBridgeTokensQuery {
+export interface ElysiumBridgeTokensQuery extends ElysiumNetworkQuery {
   limit?: number;
   route?: 'canonical' | 'mirror';
 }
 
-export interface ElysiumTokensQuery {
+export interface ElysiumTokensQuery extends ElysiumNetworkQuery {
   limit?: number;
   standard?: 'erc20' | 'erc721' | 'erc1155';
   origin?: 'native' | 'canonical';
 }
 
-export interface ElysiumUserActivityQuery {
+export interface ElysiumUserActivityQuery extends ElysiumNetworkQuery {
   limit?: number;
   offset?: number;
 }
 
-export interface ElysiumUserBridgeQuery {
+export interface ElysiumUserBridgeQuery extends ElysiumNetworkQuery {
   limit?: number;
   direction?: 'deposit' | 'withdrawal';
 }
@@ -127,15 +134,17 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
     return this.rateLimiter.checkRateLimit(ip);
   }
 
+  /** `network` picks the upstream prefix and is never forwarded as a query param. */
   private fetchElysium(path: string, params?: object): Promise<unknown> {
     return this.circuitBreaker.execute(async () => {
-      const qs = params ? buildQuery(params as Record<string, QueryValue>) : '';
-      return this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}${path}${qs}`);
+      const { network, ...rest } = (params ?? {}) as Record<string, QueryValue>;
+      const prefix = network === 'mainnet' ? '/elysium/mainnet' : ELYSIUM_PREFIX;
+      return this.getUnwrapped<unknown>(`${prefix}${path}${buildQuery(rest)}`);
     });
   }
 
-  public getStats(): Promise<unknown> {
-    return this.fetchElysium('/stats');
+  public getStats(params?: ElysiumNetworkQuery): Promise<unknown> {
+    return this.fetchElysium('/stats', params);
   }
 
   public getStatsDaily(params?: ElysiumStatsDailyQuery): Promise<unknown> {
@@ -174,8 +183,18 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
     return this.fetchElysium('/tokens', params);
   }
 
-  public getUserBalances(address: string): Promise<unknown> {
-    return this.fetchElysium(`/user/${address}/balances`);
+  public getUserBalances(address: string, params?: ElysiumNetworkQuery): Promise<unknown> {
+    return this.fetchElysium(`/user/${address}/balances`, params);
+  }
+
+  /** One token: metadata, supply, holder and transfer counts (user-facing, either network). */
+  public getToken(address: string, params?: ElysiumNetworkQuery): Promise<unknown> {
+    return this.fetchElysium(`/tokens/${address}`, params);
+  }
+
+  /** Largest holders of a token with their share of supply (user-facing, either network). */
+  public getTokenHolders(address: string, params?: ElysiumNetworkQuery & { limit?: number }): Promise<unknown> {
+    return this.fetchElysium(`/tokens/${address}/holders`, params);
   }
 
   public getUserActivity(address: string, params?: ElysiumUserActivityQuery): Promise<unknown> {
