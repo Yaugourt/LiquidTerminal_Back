@@ -6,6 +6,7 @@ import { prismaHistorical } from '../core/prisma.historical.service';
 import { redisService } from '../core/redis.service';
 import { ClientInitializerService } from '../core/client.initializer.service';
 import { hyperliquidWeightMeter, WeightMinute } from '../utils/hyperliquid-weight-meter';
+import { isReady } from './health.readiness';
 
 const router = Router();
 const clientInitializer = ClientInitializerService.getInstance();
@@ -107,14 +108,14 @@ router.get('/live', (_req, res) => {
 router.get('/ready', async (_req, res) => {
   const checks = await getDependencyChecks();
   const startupStatus = clientInitializer.getStartupStatus();
-  // /ready gates traffic on Core DB + Redis; Content/Telegram/Historical surface
-  // in /health for granular observability but don't block readiness because
-  // the app can serve large parts of its surface even if one of them is briefly down.
-  const dependenciesHealthy = checks.database.status === 'up' && checks.redis.status === 'up';
-  const isReady = startupStatus === 'ready' && dependenciesHealthy;
+  // /ready gates traffic on Core DB only. Redis and the Content/Telegram/
+  // Historical DBs surface in /health for granular observability but don't
+  // block readiness: the app serves large parts of its surface without them,
+  // and Redis in particular falls back to in-memory on every path (see isReady).
+  const ready = isReady(startupStatus, checks);
 
-  res.status(isReady ? 200 : 503).json({
-    status: isReady ? 'healthy' : startupStatus === 'booting' ? 'degraded' : 'unhealthy',
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'healthy' : startupStatus === 'booting' ? 'degraded' : 'unhealthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     startup: {
