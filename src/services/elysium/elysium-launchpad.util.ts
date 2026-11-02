@@ -1,5 +1,6 @@
 /**
- * Pure decoders for the Elysium launchpads (Chainzy, CorePad, Signal, Neuriio), read
+ * Pure decoders for the Elysium launchpads (Chainzy, CorePad, Signal, Neuriio, aka.fun,
+ * BunnyPad, Kiln), read
  * from /logs by topic0. No I/O so they stay unit-testable.
  *
  * Event layouts were matched against real logs and cross-checked with the
@@ -36,6 +37,22 @@ export const LAUNCHPAD_TOPICS = {
   neuriioFtfLaunch: '0xc654e8d698fc1aaf01d3e71758d7ce066f2303167c977fc9b8626ee1422b8745',
   /** Neuriio Graduated(token, pair | quote, tokens, liquidityBurned), emitted by the pad. */
   neuriioGraduated: '0x487dc7f66c623fb0ff13f9024a3ff9675453d069e075eceb12d9f8d7870e2374',
+  /**
+   * aka.fun: its V4 hook registers each launch with (token, poolId) as topics. Used as the launch
+   * event because the factory's own event does not carry the poolId; the creator comes from the
+   * tx sender and the symbol from the token table.
+   */
+  akaPoolRegistered: '0x72db6526c14c88d08586af95f46d477c4a8a8809e3d6fa31eac4f7bffb8f3597',
+  /** BunnyPad launch: topic1 token, topic2 creator | name, symbol, ..., w6 virtual HYPE reserve. */
+  bunnyLaunch: '0x00aa4e081030a9d4e5022596b3e7554c97456e4d5a055b8ea86d09950d365467',
+  /** Kiln TokenLaunched(token, curve, creator | name, symbol, uri, graduationTarget). */
+  kilnLaunch: '0x63398f645c29c31459939d96b0065e3ae45b5bf5be0a42a4b304fe822a0c500e',
+  /** Kiln CurveBuy(buyer, recipient | hypeIn, tokensOut, fee, fee), emitted by the token's curve. */
+  kilnBuy: '0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455',
+  /** Kiln CurveSell(seller, recipient | tokensIn, hypeOut, fee, fee), emitted by the token's curve. */
+  kilnSell: '0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df',
+  /** Kiln LaunchGraduated(token | hype, tokens), emitted by the factory. */
+  kilnGraduated: '0x0695bc30069617ee2f9f54b5477dfe10d9771150bdbffbae196d7d8a0b18b97f',
   /** Uniswap V2 Swap (Signal and Neuriio pairs after graduation). */
   v2Swap: '0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822',
   /** Uniswap V3 Swap (Chainzy pools). */
@@ -57,7 +74,13 @@ const EMITTERS = {
   signalCurve: new Set(['0xe7d6263e09a4691d58dca528043efdfeec4db2c0', '0x06c87c903241a7bbf82676a3df97e2bd61228a38']),
   signalV4: new Set(['0x89593cf10d68a0d7d0c2bba3ced12f55fad0adeb']),
   signalRouter: new Set(['0x75d98c98f92d1f5d65ca6a962f36476be34c64ae', '0xbdfc5a7b1dc9b821f26c525c815338f4eec4cf8c']),
-  v4PoolManager: new Set(['0x889a96eedb1df35a012d7e48baf7f9c780f1243b']),
+  /** Signal's PoolManager, and aka.fun's own deployment. */
+  v4PoolManager: new Set(['0x889a96eedb1df35a012d7e48baf7f9c780f1243b', '0x0088bea218c283a939c93d7db8353cd87cdcf647']),
+  /** The V4 hook every aka.fun pool uses (native HYPE / token, fee 0, tick spacing 1). */
+  akaHook: new Set(['0xd492b95e2ecf74db6c5493e7c32f6816248484cc']),
+  /** BunnyPad: one contract holds every token and its HYPE, no pool and no graduation. */
+  bunnyPad: new Set(['0x3c4f47959101557eed9bc4ae8d8d986ae8d3e5b1']),
+  kilnFactory: new Set(['0x18defd8b02b9cea88a5d5c031ee29573aa78c63a']),
 } as const;
 
 /** Wrapped HYPE of Neuriio's own Uniswap V2 fork (pairs of the HYPE-priced pads). */
@@ -102,6 +125,13 @@ export function quoteDecimals(quote: string): number {
   return USD_QUOTES.includes(quote) ? 6 : 18;
 }
 
+/**
+ * BunnyPad prices on a constant product over a virtual HYPE reserve plus the real one: 37.4844
+ * HYPE on every launch since the first (launch w6, read 2026-11-02). Checked: x*y holds across
+ * trades within fees, and the first dev buy gives exactly 1e9 * 0.0294 / (37.4844 + 0.0294).
+ */
+export const BUNNY_VIRTUAL_HYPE = 37_484_400_000_000_000_000n;
+
 /** Every launchpad token has 1B supply and 18 decimals. */
 export const LAUNCH_TOTAL_SUPPLY = 1e9;
 /** Tokens a curve sells before it graduates (raw, 18 decimals). */
@@ -114,7 +144,7 @@ export const CURVE_SALE_SUPPLY: Partial<Record<Launchpad, bigint>> = {
 /** Wallets that hold supply on the creator's behalf: kept out of the top-10 share. */
 export const CHAINZY_CREATOR_LOCKER = '0x9c820a975526915c579a3c582a0c8bad32148888';
 
-export type Launchpad = 'Chainzy' | 'CorePad' | 'Signal' | 'Neuriio';
+export type Launchpad = 'Chainzy' | 'CorePad' | 'Signal' | 'Neuriio' | 'aka.fun' | 'BunnyPad' | 'Kiln';
 export type LaunchKind = 'curve' | 'v3' | 'v4';
 export type TradeVenue = 'curve' | 'v2' | 'v3' | 'v4';
 
@@ -339,6 +369,47 @@ export function decodeLaunch(raw: unknown): LaunchRow | null {
     if (!poolId || !HEX32.test(poolId) || !token || !quote) return null;
     return { ...common, token, launchpad: 'Signal', kind: 'v4', creator, curve: null, pool: poolId, quote, name: null, symbol: null };
   }
+  if (b.topic0 === LAUNCHPAD_TOPICS.akaPoolRegistered && EMITTERS.akaHook.has(b.address)) {
+    const token = topicAddress(b.l.topic1);
+    const poolId = lower(b.l.topic2);
+    if (!token || !poolId || !HEX32.test(poolId)) return null;
+    // Every aka.fun pool pairs the token with native HYPE: no curve, no graduation.
+    return { ...common, token, launchpad: 'aka.fun', kind: 'v4', creator: null, curve: null, pool: poolId, quote: NATIVE_HYPE, name: null, symbol: null };
+  }
+  if (b.topic0 === LAUNCHPAD_TOPICS.bunnyLaunch && EMITTERS.bunnyPad.has(b.address)) {
+    const token = topicAddress(b.l.topic1);
+    if (!token) return null;
+    return {
+      ...common,
+      token,
+      launchpad: 'BunnyPad',
+      kind: 'curve',
+      creator: topicAddress(b.l.topic2),
+      // The market lives inside the pad: BunnyPad markets are keyed by the token (see launchMarketKeys).
+      curve: null,
+      pool: null,
+      quote: NATIVE_HYPE,
+      name: wordString(b.data, 0),
+      symbol: wordString(b.data, 1),
+    };
+  }
+  if (b.topic0 === LAUNCHPAD_TOPICS.kilnLaunch && EMITTERS.kilnFactory.has(b.address)) {
+    const token = topicAddress(b.l.topic1);
+    const curve = topicAddress(b.l.topic2);
+    if (!token || !curve) return null;
+    return {
+      ...common,
+      token,
+      launchpad: 'Kiln',
+      kind: 'curve',
+      creator: topicAddress(b.l.topic3),
+      curve,
+      pool: null,
+      quote: NATIVE_HYPE,
+      name: wordString(b.data, 0),
+      symbol: wordString(b.data, 1),
+    };
+  }
   return null;
 }
 
@@ -347,6 +418,12 @@ export function decodeGraduation(raw: unknown): GraduationRow | null {
   const b = base(raw);
   if (!b) return null;
   const graduated_at = b.time.toISOString();
+  if (b.topic0 === LAUNCHPAD_TOPICS.kilnGraduated) {
+    // Graduation locks the liquidity: Kiln tokens do not trade on a pool afterwards.
+    const token = topicAddress(b.l.topic1);
+    if (!EMITTERS.kilnFactory.has(b.address) || !token) return null;
+    return { curve: null, token, pool: null, graduated_at };
+  }
   if (b.topic0 === LAUNCHPAD_TOPICS.neuriioGraduated) {
     const token = topicAddress(b.l.topic1);
     if (!NEURIIO_PADS.has(b.address) || !token) return null;
@@ -365,6 +442,49 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
   const b = base(raw);
   if (!b) return null;
   const common = { tx_hash: b.txHash, log_index: b.logIndex, block_time: b.time.toISOString(), block_number: b.block };
+
+  if (b.topic0 === LAUNCHPAD_TOPICS.corepadTrade && EMITTERS.bunnyPad.has(b.address)) {
+    // CorePad's Trade topic with the token in topic1; w4/w5 are the REAL reserves after the trade.
+    const token = topicAddress(b.l.topic1);
+    const m = token ? markets.get(token) : undefined;
+    const w = [0, 1, 2, 4, 5].map((i) => word(b.data, i));
+    if (!m || m.launchpad !== 'BunnyPad' || w.some((x) => x === null)) return null;
+    const [isBuy, hype, tokens, hypeReserve, tokenReserve] = w.map((x) => wordUint(x as string));
+    if (tokens === 0n || tokenReserve === 0n) return null;
+    return {
+      ...common,
+      token: m.token,
+      venue: 'curve',
+      // The pad's own buyback-and-burn shows up with the pad as trader.
+      trader: topicAddress(b.l.topic2),
+      is_buy: isBuy === 1n,
+      quote_amount: hype.toString(),
+      token_amount: tokens.toString(),
+      price: toUnits(BUNNY_VIRTUAL_HYPE + hypeReserve) / toUnits(tokenReserve),
+    };
+  }
+
+  if (b.topic0 === LAUNCHPAD_TOPICS.kilnBuy || b.topic0 === LAUNCHPAD_TOPICS.kilnSell) {
+    // Emitted by the token's curve. No reserves in the event: the price is the trade's average.
+    const m = markets.get(b.address);
+    const w = [0, 1].map((i) => word(b.data, i));
+    if (!m || m.launchpad !== 'Kiln' || w.some((x) => x === null)) return null;
+    const isBuy = b.topic0 === LAUNCHPAD_TOPICS.kilnBuy;
+    const [a, c] = w.map((x) => wordUint(x as string));
+    const hype = isBuy ? a : c;
+    const tokens = isBuy ? c : a;
+    if (tokens === 0n) return null;
+    return {
+      ...common,
+      token: m.token,
+      venue: 'curve',
+      trader: topicAddress(b.l.topic1),
+      is_buy: isBuy,
+      quote_amount: hype.toString(),
+      token_amount: tokens.toString(),
+      price: toUnits(hype) / toUnits(tokens),
+    };
+  }
 
   if (b.topic0 === LAUNCHPAD_TOPICS.corepadTrade && NEURIIO_PADS.has(b.address)) {
     // Same layout as CorePad, with the token in topic1; amounts exclude the fee.
@@ -506,7 +626,7 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
 /** Market keys a launch is traded under. */
 export function launchMarketKeys(l: Pick<LaunchRow, 'token' | 'curve' | 'pool'> & { launchpad: string }): string[] {
   // A curve launch trades on its curve (on Neuriio: the token, inside the pad), then on its V2 pair once graduated.
-  const curve = l.launchpad === 'Neuriio' ? l.token : l.curve;
+  const curve = l.launchpad === 'Neuriio' || l.launchpad === 'BunnyPad' ? l.token : l.curve;
   return [curve, l.pool].filter((k): k is string => k !== null);
 }
 
@@ -518,11 +638,15 @@ export const LAUNCH_TOPIC_ORDER = [
   LAUNCHPAD_TOPICS.signalV4Launch,
   LAUNCHPAD_TOPICS.neuriioLaunch,
   LAUNCHPAD_TOPICS.neuriioFtfLaunch,
+  LAUNCHPAD_TOPICS.akaPoolRegistered,
+  LAUNCHPAD_TOPICS.bunnyLaunch,
+  LAUNCHPAD_TOPICS.kilnLaunch,
 ] as const;
 export const GRADUATION_TOPICS = [
   LAUNCHPAD_TOPICS.corepadGraduated,
   LAUNCHPAD_TOPICS.signalGraduated,
   LAUNCHPAD_TOPICS.neuriioGraduated,
+  LAUNCHPAD_TOPICS.kilnGraduated,
 ] as const;
 export const TRADE_TOPICS = [
   LAUNCHPAD_TOPICS.corepadTrade,
@@ -530,4 +654,6 @@ export const TRADE_TOPICS = [
   LAUNCHPAD_TOPICS.v2Swap,
   LAUNCHPAD_TOPICS.v3Swap,
   LAUNCHPAD_TOPICS.v4Swap,
+  LAUNCHPAD_TOPICS.kilnBuy,
+  LAUNCHPAD_TOPICS.kilnSell,
 ] as const;
