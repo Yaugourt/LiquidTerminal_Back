@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { logDeduplicator } from './utils/logDeduplicator';
+import { RejectionGuard } from './utils/rejectionGuard';
 import 'dotenv/config';
 import { createServer } from 'http';
 import { sanitizeInput } from './middleware/validation';
@@ -83,6 +84,11 @@ const app = express();
 const server = createServer(app);
 let isShuttingDown = false;
 let forceExitTimer: NodeJS.Timeout | null = null;
+
+// A rejection storm (more than this many unhandled rejections in the window)
+// restarts the process; isolated rejections are logged and tolerated.
+const UNHANDLED_REJECTION_MAX_PER_WINDOW = 25;
+const UNHANDLED_REJECTION_WINDOW_MS = 60_000;
 
 // Désactiver l'en-tête X-Powered-By pour des raisons de sécurité
 app.disable('x-powered-by');
@@ -305,13 +311,25 @@ process.on('SIGTERM', () => {
   void gracefulShutdown('SIGTERM');
 });
 
+// A single stray promise rejection must not take the whole process down: on one
+// instance that turns any reliably-reachable rejection into a one-request
+// outage (a DoS). Log it and keep serving; only a sustained storm, which points
+// to a corrupted or looping state, restarts. An uncaughtException still exits
+// below (Node guidance: the process may be in an undefined state).
+const rejectionStorm = new RejectionGuard(UNHANDLED_REJECTION_MAX_PER_WINDOW, UNHANDLED_REJECTION_WINDOW_MS);
 process.on('unhandledRejection', (reason) => {
   void logDeduplicator.error('Unhandled promise rejection', {
     reason: reason instanceof Error ? reason.message : String(reason),
     stack: reason instanceof Error ? reason.stack : undefined,
   });
-  forceExit('UNHANDLED_REJECTION');
-  void gracefulShutdown('UNHANDLED_REJECTION', 1);
+  if (rejectionStorm.record(Date.now())) {
+    void logDeduplicator.error('Unhandled rejection storm, restarting', {
+      threshold: UNHANDLED_REJECTION_MAX_PER_WINDOW,
+      windowMs: UNHANDLED_REJECTION_WINDOW_MS,
+    });
+    forceExit('UNHANDLED_REJECTION_STORM');
+    void gracefulShutdown('UNHANDLED_REJECTION_STORM', 1);
+  }
 });
 
 process.on('uncaughtException', (error) => {
