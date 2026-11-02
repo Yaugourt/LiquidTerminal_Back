@@ -68,6 +68,15 @@ export function parseRetryAfterMs(value: string | undefined | null): number | un
  * and a poller simply skips that tick and retries — the freeze is bounded by
  * the burst, never permanent.
  */
+/**
+ * Ceiling on an upstream response body, from its Content-Length. Legit
+ * responses here top out around a couple of MB (bounded by the limit/offset
+ * caps on every passthrough); this only catches a pathological or hostile body
+ * before it is buffered into memory. A chunked response without the header is
+ * not covered, so it is a safety ceiling, not the primary bound.
+ */
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
 const MAX_CONCURRENT_OUTBOUND_REQUESTS = 50;
 const OUTBOUND_ACQUIRE_TIMEOUT_MS = 15_000;
 const OUTBOUND_QUEUE_MAX = 250;
@@ -222,6 +231,18 @@ export abstract class BaseApiService {
           response.headers.get('x-credit-cost'),
           response.headers.get('x-credit-balance')
         );
+
+        // Refuse an oversized body before buffering it into memory (defence in
+        // depth: the param caps already bound every legit response).
+        const contentLength = Number(response.headers.get('content-length'));
+        if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
+          throw new HttpApiError(
+            `Upstream response too large (${contentLength} bytes) ${safeUrl}`,
+            502,
+            '',
+            undefined
+          );
+        }
 
         const parsed = response.json();
         if (hyperliquidType === undefined) return parsed;

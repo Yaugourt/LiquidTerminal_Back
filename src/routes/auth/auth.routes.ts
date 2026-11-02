@@ -19,7 +19,7 @@ const telegramService = TelegramService.getInstance();
 router.use(marketRateLimiter, accountRateLimiter);
 
 // Route de connexion
-router.post("/login", validatePrivyToken, validateLogin, (req: Request, res: Response): void => {
+router.post("/login", validatePrivyToken, validateLogin, async (req: Request, res: Response): Promise<void> => {
   logDeduplicator.info('POST /auth/login called', { 
     method: req.method,
     origin: req.headers.origin,
@@ -65,55 +65,54 @@ router.post("/login", validatePrivyToken, validateLogin, (req: Request, res: Res
     return;
   }
 
-  authService.findOrCreateUser(req.user, name, referrerName)
-    .then(async user => {
-      // The client keeps this object as its session user: carry the Telegram
-      // link state so the UI shows it on every load.
-      const telegram = await telegramService.getLinkedTelegram(user.id);
-      logDeduplicator.info('User authenticated successfully', { 
-        userId: user.id,
-        userRole: user.role
-      });
-      
-      res.status(200).json({ 
-        success: true,
-        message: "User authenticated successfully", 
-        user: { ...user, telegramLinked: telegram.linked, telegramUsername: telegram.username }
-      });
-    })
-    .catch(error => {
-      logDeduplicator.error("Authentication error", { 
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
-        privyUserId, 
-        name,
-        path: req.path 
-      });
-      
-      if (error instanceof UserNotFoundError) {
-        res.status(error.statusCode).json({ 
-          success: false,
-          message: error.message,
-          code: error.code
-        });
-        return;
-      }
-      
-      res.status(500).json({ 
-        success: false,
-        message: "Internal server error",
-        code: "INTERNAL_SERVER_ERROR"
-      });
+  try {
+    const user = await authService.findOrCreateUser(req.user, name, referrerName);
+    // The client keeps this object as its session user: carry the Telegram
+    // link state so the UI shows it on every load.
+    const telegram = await telegramService.getLinkedTelegram(user.id);
+    logDeduplicator.info('User authenticated successfully', {
+      userId: user.id,
+      userRole: user.role
     });
+
+    res.status(200).json({
+      success: true,
+      message: "User authenticated successfully",
+      user: { ...user, telegramLinked: telegram.linked, telegramUsername: telegram.username }
+    });
+  } catch (error) {
+    logDeduplicator.error("Authentication error", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      privyUserId,
+      name,
+      path: req.path
+    });
+
+    if (error instanceof UserNotFoundError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+        code: error.code
+      });
+      return;
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      code: "INTERNAL_SERVER_ERROR"
+    });
+  }
 });
 
 // ✅ Handler pour les mauvaises méthodes sur /login (déplacé à la fin)
 
 // Route pour récupérer les infos de l'utilisateur connecté
-router.get("/me", validatePrivyToken, (req: Request, res: Response): void => {
+router.get("/me", validatePrivyToken, async (req: Request, res: Response): Promise<void> => {
   try {
     const privyUserId = req.user?.sub;
-    
+
     if (!privyUserId) {
       logDeduplicator.warn('Me request without authentication', { path: req.path });
       res.status(401).json({
@@ -124,66 +123,51 @@ router.get("/me", validatePrivyToken, (req: Request, res: Response): void => {
       return;
     }
 
-    userRepository.findByPrivyUserId(privyUserId)
-      .then(async user => {
-        if (!user) {
-          logDeduplicator.warn('User not found in /me', { privyUserId, path: req.path });
-          res.status(404).json({
-            success: false,
-            message: 'User not found',
-            code: 'USER_NOT_FOUND'
-          });
-          return;
-        }
-
-        logDeduplicator.info('User info retrieved successfully', { 
-          userId: user.id,
-          role: user.role,
-          path: req.path 
-        });
-        
-        const telegram = await telegramService.getLinkedTelegram(user.id);
-
-        res.status(200).json({
-          success: true,
-          message: 'User info retrieved successfully',
-          data: {
-            user: {
-              telegramLinked: telegram.linked,
-              telegramUsername: telegram.username,
-              id: user.id,
-              name: user.name,
-              email: user.email,
-              role: user.role,
-              privyUserId: user.privyUserId,
-              createdAt: user.createdAt,
-              verified: user.verified,
-              referralCount: user.referralCount,
-              referredBy: user.referredBy
-            }
-          }
-        });
-      })
-      .catch(error => {
-        logDeduplicator.error("Error retrieving user info", { 
-          error: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-          path: req.path 
-        });
-        
-        res.status(500).json({
-          success: false,
-          message: 'Internal server error',
-          code: 'INTERNAL_SERVER_ERROR'
-        });
+    const user = await userRepository.findByPrivyUserId(privyUserId);
+    if (!user) {
+      logDeduplicator.warn('User not found in /me', { privyUserId, path: req.path });
+      res.status(404).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND'
       });
+      return;
+    }
+
+    logDeduplicator.info('User info retrieved successfully', {
+      userId: user.id,
+      role: user.role,
+      path: req.path
+    });
+
+    const telegram = await telegramService.getLinkedTelegram(user.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'User info retrieved successfully',
+      data: {
+        user: {
+          telegramLinked: telegram.linked,
+          telegramUsername: telegram.username,
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          privyUserId: user.privyUserId,
+          createdAt: user.createdAt,
+          verified: user.verified,
+          referralCount: user.referralCount,
+          referredBy: user.referredBy
+        }
+      }
+    });
   } catch (error) {
-    logDeduplicator.error("Unexpected error in /me", { 
+    logDeduplicator.error("Error retrieving user info", {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
-      path: req.path 
+      path: req.path
     });
-    
+
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -193,15 +177,15 @@ router.get("/me", validatePrivyToken, (req: Request, res: Response): void => {
 });
 
 // Route pour récupérer les informations d'un utilisateur
-router.get("/user/:privyUserId", validatePrivyToken, validateUserParams, (req: Request, res: Response): void => {
+router.get("/user/:privyUserId", validatePrivyToken, validateUserParams, async (req: Request, res: Response): Promise<void> => {
   if (req.user?.sub !== req.params.privyUserId) {
-    logDeduplicator.warn('Unauthorized access attempt', { 
-      hasTokenSub: !!req.user?.sub, 
+    logDeduplicator.warn('Unauthorized access attempt', {
+      hasTokenSub: !!req.user?.sub,
       hasRequestedSub: !!req.params.privyUserId,
-      path: req.path 
+      path: req.path
     });
-    
-    res.status(403).json({ 
+
+    res.status(403).json({
       success: false,
       message: "Unauthorized access",
       code: "UNAUTHORIZED_ACCESS"
@@ -209,53 +193,52 @@ router.get("/user/:privyUserId", validatePrivyToken, validateUserParams, (req: R
     return;
   }
 
-  userRepository.findByPrivyUserId(req.params.privyUserId)
-    .then(async user => {
-      if (!user) {
-        logDeduplicator.warn('User not found in /user/:id', { privyUserId: req.params.privyUserId, path: req.path });
-        res.status(404).json({
-          success: false,
-          message: 'User not found',
-          code: 'USER_NOT_FOUND'
-        });
-        return;
-      }
-
-      logDeduplicator.info('User retrieved successfully', { 
-        userId: user.id,
-        userRole: user.role,
-        path: req.path 
-      });
-      
-      const telegram = await telegramService.getLinkedTelegram(user.id);
-      res.status(200).json({ 
-        success: true,
-        message: "User retrieved successfully",
-        user: { ...user, telegramLinked: telegram.linked, telegramUsername: telegram.username }
-      });
-    })
-    .catch(error => {
-      logDeduplicator.error("Error retrieving user", { 
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
-        path: req.path 
-      });
-      
-      if (error instanceof UserNotFoundError) {
-        res.status(error.statusCode).json({ 
-          success: false,
-          message: error.message,
-          code: error.code
-        });
-        return;
-      }
-      
-      res.status(500).json({ 
+  try {
+    const user = await userRepository.findByPrivyUserId(req.params.privyUserId);
+    if (!user) {
+      logDeduplicator.warn('User not found in /user/:id', { privyUserId: req.params.privyUserId, path: req.path });
+      res.status(404).json({
         success: false,
-        message: "Internal server error",
-        code: "INTERNAL_SERVER_ERROR"
+        message: 'User not found',
+        code: 'USER_NOT_FOUND'
       });
+      return;
+    }
+
+    logDeduplicator.info('User retrieved successfully', {
+      userId: user.id,
+      userRole: user.role,
+      path: req.path
     });
+
+    const telegram = await telegramService.getLinkedTelegram(user.id);
+    res.status(200).json({
+      success: true,
+      message: "User retrieved successfully",
+      user: { ...user, telegramLinked: telegram.linked, telegramUsername: telegram.username }
+    });
+  } catch (error) {
+    logDeduplicator.error("Error retrieving user", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      path: req.path
+    });
+
+    if (error instanceof UserNotFoundError) {
+      res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+        code: error.code
+      });
+      return;
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      code: "INTERNAL_SERVER_ERROR"
+    });
+  }
 });
 
 // ==================== TELEGRAM DEEP LINK SYSTEM ====================
