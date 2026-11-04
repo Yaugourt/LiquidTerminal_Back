@@ -42,6 +42,14 @@ export abstract class BaseWebSocketService {
   }
 
   /**
+   * Prefix of this socket's log lines. The class name by default; a client
+   * running several sockets of one class names each of them.
+   */
+  protected get logName(): string {
+    return this.constructor.name;
+  }
+
+  /**
    * Get current connection state
    */
   public getState(): WSConnectionState {
@@ -60,7 +68,7 @@ export abstract class BaseWebSocketService {
    */
   public connect(): void {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-      logDeduplicator.warn(`${this.constructor.name}: Already connected or connecting`);
+      logDeduplicator.warn(`${this.logName}: Already connected or connecting`);
       return;
     }
 
@@ -68,7 +76,7 @@ export abstract class BaseWebSocketService {
     this.setState('connecting');
 
     try {
-      logDeduplicator.info(`${this.constructor.name}: Connecting to ${this.config.url}`);
+      logDeduplicator.info(`${this.logName}: Connecting to ${this.config.url}`);
 
       this.ws = new WebSocket(this.config.url, {
         headers: this.config.headers,
@@ -76,7 +84,7 @@ export abstract class BaseWebSocketService {
 
       this.setupEventHandlers();
     } catch (error) {
-      logDeduplicator.error(`${this.constructor.name}: Connection error`, {
+      logDeduplicator.error(`${this.logName}: Connection error`, {
         error: error instanceof Error ? error.message : String(error),
       });
       this.setState('error');
@@ -99,7 +107,7 @@ export abstract class BaseWebSocketService {
     }
 
     this.setState('disconnected');
-    logDeduplicator.info(`${this.constructor.name}: Disconnected`);
+    logDeduplicator.info(`${this.logName}: Disconnected`);
   }
 
   /**
@@ -107,7 +115,7 @@ export abstract class BaseWebSocketService {
    */
   public send(data: unknown): boolean {
     if (!this.isConnected()) {
-      logDeduplicator.warn(`${this.constructor.name}: Cannot send - not connected`);
+      logDeduplicator.warn(`${this.logName}: Cannot send - not connected`);
       return false;
     }
 
@@ -116,7 +124,7 @@ export abstract class BaseWebSocketService {
       this.ws!.send(message);
       return true;
     } catch (error) {
-      logDeduplicator.error(`${this.constructor.name}: Send error`, {
+      logDeduplicator.error(`${this.logName}: Send error`, {
         error: error instanceof Error ? error.message : String(error),
       });
       return false;
@@ -140,7 +148,7 @@ export abstract class BaseWebSocketService {
    * Handle WebSocket open event
    */
   private handleOpen(): void {
-    logDeduplicator.info(`${this.constructor.name}: Connected`);
+    logDeduplicator.info(`${this.logName}: Connected`);
     this.setState('connected');
     this.reconnectAttempts = 0;
 
@@ -159,7 +167,9 @@ export abstract class BaseWebSocketService {
    * Handle WebSocket close event
    */
   private handleClose(code: number, reason: string): void {
-    logDeduplicator.info(`${this.constructor.name}: Connection closed`, { code, reason });
+    // The code (and the server's reason, cut short) in the line itself: collapsed log viewers hide the metadata.
+    const shownReason = reason ? `, ${reason.slice(0, 60)}` : '';
+    logDeduplicator.info(`${this.logName}: Connection closed (${code}${shownReason})`, { code, reason });
 
     this.cleanup();
     this.events.onClose?.(code, reason);
@@ -175,7 +185,7 @@ export abstract class BaseWebSocketService {
    * Handle WebSocket error event
    */
   private handleError(error: Error): void {
-    logDeduplicator.error(`${this.constructor.name}: WebSocket error`, {
+    logDeduplicator.error(`${this.logName}: WebSocket error`, {
       error: error.message,
     });
 
@@ -190,7 +200,7 @@ export abstract class BaseWebSocketService {
     try {
       message = data.toString();
     } catch (error) {
-      logDeduplicator.warn(`${this.constructor.name}: non-decodable ws frame dropped`, {
+      logDeduplicator.warn(`${this.logName}: non-decodable ws frame dropped`, {
         error: error instanceof Error ? error.message : String(error),
       });
       return;
@@ -198,7 +208,7 @@ export abstract class BaseWebSocketService {
 
     // Check buffer size limit
     if (message.length > this.config.maxBufferSize) {
-      logDeduplicator.warn(`${this.constructor.name}: Message too large, ignoring`, {
+      logDeduplicator.warn(`${this.logName}: Message too large, ignoring`, {
         size: message.length,
         maxSize: this.config.maxBufferSize,
       });
@@ -211,7 +221,7 @@ export abstract class BaseWebSocketService {
     try {
       parsed = JSON.parse(message);
     } catch (error) {
-      logDeduplicator.warn(`${this.constructor.name}: non-JSON ws message dropped`, {
+      logDeduplicator.warn(`${this.logName}: non-JSON ws message dropped`, {
         error: error instanceof Error ? error.message : String(error),
         preview: message.slice(0, 120),
       });
@@ -220,7 +230,7 @@ export abstract class BaseWebSocketService {
 
     // Guard: ensure parsed payload is a non-null object before dispatching to handlers.
     if (typeof parsed !== 'object' || parsed === null) {
-      logDeduplicator.warn(`${this.constructor.name}: non-object ws message dropped`, {
+      logDeduplicator.warn(`${this.logName}: non-object ws message dropped`, {
         type: typeof parsed,
       });
       return;
@@ -230,7 +240,7 @@ export abstract class BaseWebSocketService {
     try {
       this.onMessage(parsed);
     } catch (error) {
-      logDeduplicator.error(`${this.constructor.name}: onMessage handler threw`, {
+      logDeduplicator.error(`${this.logName}: onMessage handler threw`, {
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -238,7 +248,7 @@ export abstract class BaseWebSocketService {
     try {
       this.events.onMessage?.(parsed);
     } catch (error) {
-      logDeduplicator.error(`${this.constructor.name}: events.onMessage threw`, {
+      logDeduplicator.error(`${this.logName}: events.onMessage threw`, {
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -266,7 +276,7 @@ export abstract class BaseWebSocketService {
 
         // Set pong timeout
         this.pongTimer = setTimeout(() => {
-          logDeduplicator.warn(`${this.constructor.name}: Pong timeout, reconnecting`);
+          logDeduplicator.warn(`${this.logName}: Pong timeout, reconnecting`);
           this.ws?.terminate();
         }, this.config.pingTimeout);
       }
@@ -296,7 +306,7 @@ export abstract class BaseWebSocketService {
     }
 
     if (this.config.reconnectMaxAttempts > 0 && this.reconnectAttempts >= this.config.reconnectMaxAttempts) {
-      logDeduplicator.error(`${this.constructor.name}: Max reconnect attempts reached`);
+      logDeduplicator.error(`${this.logName}: Max reconnect attempts reached`);
       this.setState('error');
       return;
     }
@@ -310,7 +320,7 @@ export abstract class BaseWebSocketService {
       this.config.reconnectMaxInterval
     );
 
-    logDeduplicator.info(`${this.constructor.name}: Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    logDeduplicator.info(`${this.logName}: Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
