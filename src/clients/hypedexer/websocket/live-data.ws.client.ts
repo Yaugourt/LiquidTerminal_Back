@@ -1,12 +1,9 @@
-import { BaseWebSocketService } from '../../../core/base.websocket.service';
 import { logDeduplicator } from '../../../utils/logDeduplicator';
+import { RecentKeys } from '../../../utils/recent-keys';
 import { WSConnectionState } from '../../../types/websocket.types';
-import {
-  HypeDexerFill,
-  HypeDexerAllFillsEvent,
-  NormalizedFill,
-} from '../../../types/fill-alerts.types';
-import { HypeDexerTwapStatusEvent, TwapStatusEvent } from '../../../types/twap-live.types';
+import { NormalizedFill } from '../../../types/fill-alerts.types';
+import { TwapStatusEvent } from '../../../types/twap-live.types';
+import { HypeDexerLiveDataSocket, LiveDataSocketListener } from './live-data.socket';
 
 /**
  * Callback type for normalized fill events (perp and spot)
@@ -20,41 +17,105 @@ export type FillCallback = (fills: NormalizedFill[]) => void;
 export type TwapStatusCallback = (events: TwapStatusEvent[]) => void;
 
 /**
- * Callback type for the upstream connection: `connected` once the socket is
- * open and both subscriptions are sent, false as soon as it closes, errors or
- * starts reconnecting. `at` is when it changed (epoch ms).
+ * Callback type for the upstream connection: `connected` while a socket is
+ * open with both subscriptions sent and the stream has no known gap, false
+ * when that ends. `at` is when it changed (epoch ms).
  */
 export type ConnectionCallback = (connected: boolean, at: number) => void;
 
+/** What the client needs from one socket (tests pass fakes). */
+export interface LiveDataSocketHandle {
+  start(): void;
+  stop(): void;
+  getState(): WSConnectionState;
+}
+
+/** Production code uses getInstance(); the constructor takes these for tests. */
+export interface LiveDataClientDeps {
+  /** Sockets run side by side. */
+  sockets: number;
+  createSocket(slot: number, listener: LiveDataSocketListener): LiveDataSocketHandle;
+  now(): number;
+}
+
+interface Slot {
+  slot: number;
+  socket: LiveDataSocketHandle;
+  /** False once the client let go of this socket: whatever it still reports is ignored. */
+  active: boolean;
+  ready: boolean;
+  /** When this connection's first fills arrived (epoch ms); null until then. */
+  firstFrameAt: number | null;
+  /** When this connection's latest fills arrived. */
+  lastFrameAt: number | null;
+}
+
+const DEFAULT_SOCKETS = 2;
+const MAX_SOCKETS = 3;
 /**
- * HypeDexer Live-Data WebSocket Client
- *
- * Connects to the live-data (mirror) endpoint wss://api.hypedexer.com/ws?mode=mirror
- * and subscribes to the `allFills` channel (and `allTwapStatusUpdates`, see
- * below): every fill, market-wide — native
- * perps ("BTC"), HIP-3 perps ("xyz:GOLD"), HIP-4 outcomes ("#123") and spot
- * ("@107"). HypeDexer dropped its separate `fills_spot` channel (2026-09), so
- * spot fills are told apart here and normalized with `source: 'spot'`.
- *
- * Unlike the multiplex endpoint, live-data messages are discriminated by `channel`
- * (NOT `type`). Heartbeat still uses `{type:'ping'}` / `{type:'pong'}`.
- *
- * `allTwapStatusUpdates` rides the same socket: TWAP status events (activated /
- * finished / terminated, ~20 a minute), a snapshot of the latest 200 on
- * subscribe and live frames after. It never reports failed TWAPs.
- *
- * 1 shared connection — consumed by the Fill Alert dispatcher (fills) and the
- * live TWAP book (fills, status events, connection state). start()/stop() are
- * reference-counted: each consumer releases only its own callbacks, and the
- * socket closes with the last one.
+ * Both sockets carry the same frames, the second copy of a fill 27 ms after
+ * the first at the median and 263 ms at worst (measured 2026-11-04 over
+ * 67,774 fills). Fill ids are kept at least 60 s: a socket can stall up to
+ * ~40 s before its ping times out (a ping every 30 s, 10 s to answer), then
+ * deliver its backlog.
  */
-export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
+const FILL_KEY_PERIOD_MS = 60_000;
+/** Memory guard: a generation rotates early past this many fills (~400 fills/s measured, ~25k a minute). */
+const FILL_KEY_MAX = 200_000;
+/** Each subscribe replays the latest 200 status events (~10 min): their keys are kept at least 30 min. */
+const STATUS_KEY_PERIOD_MS = 30 * 60_000;
+const STATUS_KEY_MAX = 20_000;
+/**
+ * A socket covers another's drop when it was receiving from at least this long
+ * before the dropped one's last fills ...
+ */
+const COVER_MARGIN_MS = 2_000;
+/** ... and still received at most this long before them (a silent stall is no cover). */
+const COVER_STALE_MS = 5_000;
+
+/** Sockets to run, from HYPEDEXER_LIVEDATA_SOCKETS: an integer from 1 to 3, else 2. */
+export function liveDataSocketCount(raw: string | undefined): number {
+  const n = Number(raw);
+  if (raw === undefined || raw.trim() === '' || !Number.isInteger(n) || n < 1) return DEFAULT_SOCKETS;
+  return Math.min(n, MAX_SOCKETS);
+}
+
+/** One fill, whichever socket brought it: a trade id and side never came up for two wallets (measured). */
+function fillKey(fill: NormalizedFill): string {
+  return typeof fill.tid === 'number' && Number.isFinite(fill.tid)
+    ? `${fill.tid}:${fill.side}:${fill.wallet}`
+    : `${fill.hash}:${String(fill.time)}:${fill.side}:${fill.wallet}:${fill.sz}`;
+}
+
+/**
+ * HypeDexer live-data feed: every fill, market-wide (`allFills`), and every
+ * TWAP status event (`allTwapStatusUpdates`); see HypeDexerLiveDataSocket.
+ *
+ * Two sockets run side by side (HYPEDEXER_LIVEDATA_SOCKETS, 1 to 3) and their
+ * streams are merged: each fill and status event is handed over once, from
+ * whichever socket brings it first. The prod backend's sockets drop a few
+ * times an hour, each at its own time (Railway logs, 2026-11-03/04): one
+ * socket going down is no gap while the other one keeps streaming.
+ *
+ * Connected while a socket is ready. A drop ends the connection when no other
+ * socket is ready, or when none of the ones left was receiving both before
+ * and around the dropped one's last fills (a possible gap): the connection
+ * then starts over at once from the socket still up.
+ *
+ * Consumers: the Fill Alert dispatcher (fills) and the live TWAP book (fills,
+ * status events, connection state). start()/stop() are reference-counted:
+ * each consumer releases only its own callbacks, and the sockets close with
+ * the last one.
+ */
+export class HypeDexerLiveDataWSClient {
   private static instance: HypeDexerLiveDataWSClient;
 
   // Configuration
   private static readonly WS_URL =
     process.env.HYPEDEXER_LIVEDATA_WS_URL || 'wss://api.hypedexer.com/ws?mode=mirror';
   private static readonly API_KEY = process.env.HL_INDEXER_API_KEY || '';
+
+  private readonly deps: LiveDataClientDeps;
 
   // Callbacks
   private fillCallbacks: Set<FillCallback> = new Set();
@@ -63,43 +124,35 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
 
   /** Consumers that called start() and not stop() yet. */
   private consumers = 0;
-  /** True once the socket is open and both subscriptions are sent. */
+  private slots: Slot[] = [];
   private upstreamConnected = false;
   private upstreamSince: number | null = null;
 
-  private constructor() {
-    super(
-      {
-        url: HypeDexerLiveDataWSClient.WS_URL,
-        headers: {
-          'X-API-Key': HypeDexerLiveDataWSClient.API_KEY,
-        },
-        reconnect: true,
-        reconnectInterval: 5000,
-        reconnectMaxInterval: 60000,
-        // 0 = infinite reconnect attempts; exponential backoff capped at reconnectMaxInterval (60s).
-        reconnectMaxAttempts: 0,
-        pingInterval: 30000,
-        pingTimeout: 10000,
-        // A frame is one block of fills: ~64 KB at normal load, and the default
-        // 100 KB cap would drop a whole block (so its alerts) under heavy load.
-        maxBufferSize: 1024 * 1024,
-      },
-      {
-        onStateChange: (state: WSConnectionState) => this.handleStateChange(state),
-        onError: () => this.setUpstreamConnected(false),
-        onReconnect: (attempt: number) => {
-          // Emit one degraded-signal error log when consecutive failures cross 10.
-          if (attempt === 10) {
-            logDeduplicator.error('HypeDexerLiveDataWSClient: degraded — 10 consecutive reconnect attempts; continuing with exponential backoff');
-          }
-        },
-      }
-    );
+  /** Fills and status events already handed over (only with more than one socket). */
+  private readonly fillKeys: RecentKeys;
+  private readonly statusKeys: RecentKeys;
+  private readonly counters = { duplicateFills: 0, duplicateStatuses: 0, handovers: 0, gaps: 0 };
+
+  public constructor(overrides: Partial<LiveDataClientDeps> = {}) {
+    this.deps = {
+      sockets: overrides.sockets ?? liveDataSocketCount(process.env.HYPEDEXER_LIVEDATA_SOCKETS),
+      createSocket:
+        overrides.createSocket ??
+        ((slot, listener) =>
+          new HypeDexerLiveDataSocket(slot, listener, {
+            url: HypeDexerLiveDataWSClient.WS_URL,
+            apiKey: HypeDexerLiveDataWSClient.API_KEY,
+          })),
+      now: overrides.now ?? Date.now,
+    };
+    const now = this.deps.now();
+    this.fillKeys = new RecentKeys(FILL_KEY_PERIOD_MS, FILL_KEY_MAX, now);
+    this.statusKeys = new RecentKeys(STATUS_KEY_PERIOD_MS, STATUS_KEY_MAX, now);
 
     logDeduplicator.info('HypeDexerLiveDataWSClient: Initialized', {
       url: HypeDexerLiveDataWSClient.WS_URL,
       hasApiKey: !!HypeDexerLiveDataWSClient.API_KEY,
+      sockets: this.deps.sockets,
     });
   }
 
@@ -114,18 +167,21 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   }
 
   /**
-   * Start the WebSocket connection and subscribe to allFills and
-   * allTwapStatusUpdates. Reference-counted: every consumer calls start() once
-   * and stop() once.
+   * Open the sockets (each subscribes to allFills and allTwapStatusUpdates).
+   * Reference-counted: every consumer calls start() once and stop() once.
    */
   public start(): void {
     this.consumers++;
-    // A later consumer joins the open (or reconnecting) socket.
-    if (this.consumers === 1) this.connect();
+    // A later consumer joins the open (or reconnecting) sockets.
+    if (this.consumers !== 1) return;
+
+    this.slots = [];
+    for (let slot = 1; slot <= this.deps.sockets; slot++) this.slots.push(this.createSlot(slot));
+    for (const entry of this.slots) entry.socket.start();
   }
 
   /**
-   * Release one consumer. The socket closes (and every callback is dropped)
+   * Release one consumer. The sockets close (and every callback is dropped)
    * with the last one; a consumer's own callbacks go through the unsubscribe
    * functions of onFill / onTwapStatus / onConnectionChange.
    */
@@ -133,15 +189,30 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
     this.consumers = Math.max(0, this.consumers - 1);
     if (this.consumers > 0) return;
 
-    this.disconnect();
-    this.setUpstreamConnected(false);
+    const slots = this.slots;
+    this.slots = [];
+    for (const entry of slots) {
+      entry.active = false;
+      try {
+        entry.socket.stop();
+      } catch (error) {
+        logDeduplicator.error('HypeDexerLiveDataWSClient: Socket stop error', {
+          slot: entry.slot,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    const now = this.deps.now();
+    this.setUpstreamConnected(false, now);
     this.fillCallbacks.clear();
     this.twapStatusCallbacks.clear();
     this.connectionCallbacks.clear();
+    this.fillKeys.clear(now);
+    this.statusKeys.clear(now);
   }
 
   /**
-   * Register a callback for normalized perp fill events
+   * Register a callback for normalized fill events
    * Returns an unsubscribe function
    */
   public onFill(callback: FillCallback): () => void {
@@ -174,8 +245,9 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
   }
 
   /**
-   * Current upstream state: `at` is when the current connection became ready
-   * (null while disconnected).
+   * Current upstream state: `at` is when the current connection started
+   * (null while disconnected). A socket dropping while another one covers
+   * it does not move it.
    */
   public getConnection(): { connected: boolean; at: number | null } {
     return { connected: this.upstreamConnected, at: this.upstreamSince };
@@ -188,113 +260,73 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
     state: WSConnectionState;
     fillCallbackCount: number;
     twapStatusCallbackCount: number;
+    sockets: Array<{ slot: number; state: WSConnectionState; ready: boolean }>;
+    duplicateFills: number;
+    duplicateStatuses: number;
+    handovers: number;
+    gaps: number;
   } {
+    const sockets = this.slots.map((entry) => ({ slot: entry.slot, state: entry.socket.getState(), ready: entry.ready }));
     return {
-      state: this.getState(),
+      state: HypeDexerLiveDataWSClient.overallState(sockets.map((s) => s.state)),
       fillCallbackCount: this.fillCallbacks.size,
       twapStatusCallbackCount: this.twapStatusCallbacks.size,
+      sockets,
+      ...this.counters,
     };
-  }
-
-  // ============================================================================
-  // PROTECTED METHODS - Override from BaseWebSocketService
-  // ============================================================================
-
-  /**
-   * Called when connection is established — subscribe to allFills and allTwapStatusUpdates
-   */
-  protected onOpen(): void {
-    logDeduplicator.info('HypeDexerLiveDataWSClient: Connection opened');
-    const fillsSent = this.send({ method: 'subscribe', subscription: { type: 'allFills' } });
-    const twapsSent = this.send({ method: 'subscribe', subscription: { type: 'allTwapStatusUpdates' } });
-    logDeduplicator.info('HypeDexerLiveDataWSClient: Subscriptions sent (allFills, allTwapStatusUpdates)');
-    this.setUpstreamConnected(fillsSent && twapsSent);
-  }
-
-  /**
-   * Called when a message is received
-   */
-  protected onMessage(data: unknown): void {
-    // Defensive guard: base service should already filter non-object payloads,
-    // but Hypedexer occasionally emits non-JSON / malformed frames (known upstream bug).
-    if (typeof data !== 'object' || data === null) {
-      logDeduplicator.warn('HypeDexerLiveDataWSClient: non-object ws message dropped', {
-        type: typeof data,
-      });
-      return;
-    }
-
-    try {
-      const event = data as { channel?: string; type?: string };
-
-      // Heartbeat uses `type` (same as multiplex endpoint)
-      if (event.type === 'ping') {
-        this.send({ type: 'pong', ts: (event as { ts?: number }).ts ?? Date.now() });
-        return;
-      }
-
-      // Live-data channels are discriminated by `channel`
-      switch (event.channel) {
-        case 'allFills':
-          this.handleAllFillsEvent(event as HypeDexerAllFillsEvent);
-          break;
-
-        case 'allTwapStatusUpdates':
-          this.handleTwapStatusEvent(event as HypeDexerTwapStatusEvent);
-          break;
-
-        case 'subscriptionResponse':
-          logDeduplicator.info('HypeDexerLiveDataWSClient: Subscription acknowledged');
-          break;
-
-        case 'error':
-          logDeduplicator.error('HypeDexerLiveDataWSClient: Server error', {
-            message: (event as { message?: string }).message,
-          });
-          break;
-
-        default:
-          if (event.channel === undefined && event.type === undefined) {
-            logDeduplicator.warn('HypeDexerLiveDataWSClient: message without channel/type dropped');
-          } else {
-            logDeduplicator.warn('HypeDexerLiveDataWSClient: Unknown channel', {
-              channel: event.channel,
-              type: event.type,
-            });
-          }
-      }
-    } catch (error) {
-      logDeduplicator.error('HypeDexerLiveDataWSClient: Message handling error', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   // ============================================================================
   // PRIVATE METHODS
   // ============================================================================
 
-  /**
-   * Handle `allFills` channel event — normalize and dispatch
-   */
-  private handleAllFillsEvent(event: HypeDexerAllFillsEvent): void {
-    const data = event.data;
-    if (!data || !Array.isArray(data.fills) || data.fills.length === 0) return;
+  /** The best state among the sockets: connected when one is. */
+  private static overallState(states: WSConnectionState[]): WSConnectionState {
+    for (const state of ['connected', 'connecting', 'reconnecting', 'error'] as const) {
+      if (states.includes(state)) return state;
+    }
+    return 'disconnected';
+  }
 
-    // Skip the one-shot historical snapshot replayed on (re)subscribe — those
-    // fills are old and must not be broadcast as fresh alerts.
-    if (data.isSnapshot === true) {
-      logDeduplicator.info('HypeDexerLiveDataWSClient: allFills snapshot skipped', {
-        count: data.fills.length,
-      });
-      return;
+  private createSlot(slot: number): Slot {
+    const listener: LiveDataSocketListener = {
+      onFills: (fills) => this.handleFills(entry, fills),
+      onTwapStatuses: (events) => this.handleStatuses(entry, events),
+      onReadyChange: (ready, at) => this.handleReady(entry, ready, at),
+    };
+    const entry: Slot = {
+      slot,
+      socket: this.deps.createSocket(slot, listener),
+      active: true,
+      ready: false,
+      firstFrameAt: null,
+      lastFrameAt: null,
+    };
+    return entry;
+  }
+
+  /** Hand over the fills no other socket brought already. */
+  private handleFills(entry: Slot, fills: NormalizedFill[]): void {
+    if (!entry.active || fills.length === 0) return;
+    const now = this.deps.now();
+    if (entry.ready) {
+      if (entry.firstFrameAt === null) entry.firstFrameAt = now;
+      entry.lastFrameAt = now;
     }
 
-    const normalized = data.fills.map((entry) => this.normalizeFill(entry.address, entry.fill));
+    let fresh = fills;
+    if (this.deps.sockets > 1) {
+      fresh = [];
+      for (const fill of fills) {
+        if (this.fillKeys.add(fillKey(fill), now)) fresh.push(fill);
+      }
+      this.counters.duplicateFills += fills.length - fresh.length;
+      if (fresh.length === 0) return;
+    }
 
     for (const callback of this.fillCallbacks) {
       try {
-        callback(normalized);
+        callback(fresh);
       } catch (error) {
         logDeduplicator.error('HypeDexerLiveDataWSClient: Fill callback error', {
           error: error instanceof Error ? error.message : String(error),
@@ -303,39 +335,21 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
     }
   }
 
-  /**
-   * Handle `allTwapStatusUpdates` channel event — parse both frame shapes
-   * (snapshot object, live array) and dispatch the valid events.
-   */
-  private handleTwapStatusEvent(event: HypeDexerTwapStatusEvent): void {
-    const data: unknown = event.data;
-    let rawEvents: unknown;
-    let isSnapshot = false;
-    if (Array.isArray(data)) {
-      rawEvents = data;
-    } else if (typeof data === 'object' && data !== null) {
-      rawEvents = (data as { events?: unknown }).events;
-      isSnapshot = (data as { isSnapshot?: unknown }).isSnapshot === true;
-    }
-    if (!Array.isArray(rawEvents) || rawEvents.length === 0) return;
+  /** Hand over the status events no other socket brought already (each subscribe replays the latest 200). */
+  private handleStatuses(entry: Slot, events: TwapStatusEvent[]): void {
+    if (!entry.active || events.length === 0) return;
 
-    const events: TwapStatusEvent[] = [];
-    let malformed = 0;
-    for (const raw of rawEvents) {
-      const parsed = HypeDexerLiveDataWSClient.parseTwapStatus(raw, isSnapshot);
-      if (parsed) events.push(parsed);
-      else malformed++;
+    let fresh = events;
+    if (this.deps.sockets > 1) {
+      const now = this.deps.now();
+      fresh = events.filter((event) => this.statusKeys.add(`${event.twapId}:${event.status}:${event.time}`, now));
+      this.counters.duplicateStatuses += events.length - fresh.length;
+      if (fresh.length === 0) return;
     }
-    if (malformed > 0) {
-      logDeduplicator.warn('HypeDexerLiveDataWSClient: malformed allTwapStatusUpdates event dropped', {
-        count: malformed,
-      });
-    }
-    if (events.length === 0) return;
 
     for (const callback of this.twapStatusCallbacks) {
       try {
-        callback(events);
+        callback(fresh);
       } catch (error) {
         logDeduplicator.error('HypeDexerLiveDataWSClient: TWAP status callback error', {
           error: error instanceof Error ? error.message : String(error),
@@ -344,117 +358,59 @@ export class HypeDexerLiveDataWSClient extends BaseWebSocketService {
     }
   }
 
-  /** A finite number from a JSON number or numeric string, else null. */
-  private static toNumber(value: unknown): number | null {
-    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
-    return Number.isFinite(n) ? n : null;
-  }
+  /**
+   * A socket became ready or dropped. The first ready socket starts the
+   * connection; a drop ends it only when no socket left covers the dropped
+   * one's last fills.
+   */
+  private handleReady(entry: Slot, ready: boolean, at: number): void {
+    if (!entry.active || entry.ready === ready) return;
+    entry.ready = ready;
+    const lastFrameAt = entry.lastFrameAt;
+    entry.firstFrameAt = null;
+    entry.lastFrameAt = null;
 
-  /** Validate one status event; null when a field the book relies on is missing or malformed. */
-  private static parseTwapStatus(raw: unknown, isSnapshot: boolean): TwapStatusEvent | null {
-    if (typeof raw !== 'object' || raw === null) return null;
-    const e = raw as { twapId?: unknown; status?: unknown; time?: unknown; state?: unknown };
-    const state = e.state;
-    if (typeof state !== 'object' || state === null) return null;
-    const s = state as Record<string, unknown>;
-
-    const twapId = HypeDexerLiveDataWSClient.toNumber(e.twapId);
-    const time = HypeDexerLiveDataWSClient.toNumber(e.time);
-    const sz = HypeDexerLiveDataWSClient.toNumber(s.sz);
-    const executedSz = HypeDexerLiveDataWSClient.toNumber(s.executedSz);
-    const executedNtl = HypeDexerLiveDataWSClient.toNumber(s.executedNtl);
-    const minutes = HypeDexerLiveDataWSClient.toNumber(s.minutes);
-    const startTime = HypeDexerLiveDataWSClient.toNumber(s.timestamp);
-    if (
-      twapId === null ||
-      time === null ||
-      sz === null ||
-      executedSz === null ||
-      executedNtl === null ||
-      minutes === null ||
-      startTime === null
-    ) {
-      return null;
+    if (ready) {
+      if (!this.upstreamConnected) this.setUpstreamConnected(true, at);
+      else logDeduplicator.info(`HypeDexerLiveDataWSClient: socket #${entry.slot} back alongside the others`);
+      return;
     }
-    if (typeof e.status !== 'string' || e.status === '') return null;
-    if (typeof s.coin !== 'string' || s.coin === '') return null;
-    if (typeof s.user !== 'string' || s.user === '') return null;
-    if (s.side !== 'A' && s.side !== 'B') return null;
+    if (!this.upstreamConnected) return;
 
-    return {
-      twapId,
-      status: e.status,
-      time,
-      coin: s.coin,
-      user: s.user.toLowerCase(),
-      side: s.side,
-      sz,
-      executedSz,
-      executedNtl,
-      minutes,
-      reduceOnly: s.reduceOnly === true,
-      randomize: s.randomize === true,
-      startTime,
-      isSnapshot,
-    };
-  }
-
-  /**
-   * Spot pairs are "@<pair index>" plus the legacy "PURR/USDC"; every other
-   * coin on allFills is a perp-like market (native, HIP-3 "dex:COIN", HIP-4 "#N").
-   */
-  private static isSpotCoin(coin: string): boolean {
-    return coin.startsWith('@') || coin.includes('/');
-  }
-
-  /**
-   * Normalize a HypeDexer fill to the unified NormalizedFill shape.
-   * px/sz are strings — parsed to numbers. Spot fills keep their pair id as
-   * `coin` ("@107"); display names are resolved by the consumer.
-   */
-  private normalizeFill(address: string, raw: HypeDexerFill): NormalizedFill {
-    const px = parseFloat(raw.px);
-    const sz = parseFloat(raw.sz);
-    const fill = {
-      oid: raw.oid,
-      tid: raw.tid,
-      wallet: address.toLowerCase(),
-      coin: raw.coin,
-      px,
-      sz,
-      notionalUsd: px * sz,
-      side: raw.side,
-      time: raw.time,
-      hash: raw.hash,
-      twapId: raw.twapId ?? null,
-    };
-
-    // Spot fills also carry a `dir` ("Buy"/"Sell") and a closedPnl, but alerts
-    // show direction and realized PnL for perps only, as the former `fills_spot` feed did.
-    if (HypeDexerLiveDataWSClient.isSpotCoin(raw.coin)) {
-      return { source: 'spot', ...fill };
+    const others = this.slots.filter((other) => other !== entry && other.active && other.ready);
+    if (others.length === 0) {
+      this.counters.gaps++;
+      this.setUpstreamConnected(false, at);
+      return;
+    }
+    // A socket that dropped before its first fills carried nothing the others lack.
+    const cover =
+      lastFrameAt === null
+        ? others[0]
+        : others.find(
+            (other) =>
+              other.firstFrameAt !== null &&
+              other.lastFrameAt !== null &&
+              other.firstFrameAt + COVER_MARGIN_MS <= lastFrameAt &&
+              other.lastFrameAt + COVER_STALE_MS >= lastFrameAt,
+          );
+    if (cover) {
+      this.counters.handovers++;
+      logDeduplicator.info(`HypeDexerLiveDataWSClient: socket #${entry.slot} down, #${cover.slot} still streaming (no gap)`);
+      return;
     }
 
-    // closedPnl is a string in the HypeDexer schema; default to 0 if it parses to NaN.
-    const closedPnlParsed = parseFloat(raw.closedPnl);
-    const closedPnl = Number.isFinite(closedPnlParsed) ? closedPnlParsed : 0;
-    return { source: 'perp', ...fill, dir: raw.dir, closedPnl };
-  }
-
-  /**
-   * Handle connection state changes
-   */
-  private handleStateChange(state: WSConnectionState): void {
-    logDeduplicator.info('HypeDexerLiveDataWSClient: State changed', { state });
-    // 'connected' alone is not "ready": onOpen decides once both subscriptions are sent.
-    if (state !== 'connected') this.setUpstreamConnected(false);
+    // The sockets left started after the dropped one's last fills, or stalled before them: some may be missing.
+    this.counters.gaps++;
+    logDeduplicator.warn(`HypeDexerLiveDataWSClient: socket #${entry.slot} down and no other socket covers its last fills, restarting the connection`);
+    this.setUpstreamConnected(false, at);
+    this.setUpstreamConnected(true, at);
   }
 
   /** Record the upstream state and tell the listeners when it changed. */
-  private setUpstreamConnected(connected: boolean): void {
+  private setUpstreamConnected(connected: boolean, at: number): void {
     if (this.upstreamConnected === connected) return;
 
-    const at = Date.now();
     this.upstreamConnected = connected;
     this.upstreamSince = connected ? at : null;
     for (const callback of this.connectionCallbacks) {
