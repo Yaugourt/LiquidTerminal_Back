@@ -73,7 +73,7 @@ export class SpotUSDCClient extends BaseApiService {
         return;
       }
 
-      await redisService.set(this.CACHE_KEY_RAW, JSON.stringify(series));
+      await redisService.setIfChanged(this.CACHE_KEY_RAW, JSON.stringify(series));
       await redisService.publish(this.UPDATE_CHANNEL, JSON.stringify({
         type: 'DATA_UPDATED',
         timestamp: Date.now()

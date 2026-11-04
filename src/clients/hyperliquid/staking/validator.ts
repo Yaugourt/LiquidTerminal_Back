@@ -73,7 +73,7 @@ export class ValidatorClient extends BaseApiService {
         })
       );
       
-      await redisService.set(this.CACHE_KEY, JSON.stringify(data));
+      await redisService.setIfChanged(this.CACHE_KEY, JSON.stringify(data));
       const now = Date.now();
       await redisService.publish(this.UPDATE_CHANNEL, JSON.stringify({
         type: 'DATA_UPDATED',

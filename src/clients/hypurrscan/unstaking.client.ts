@@ -66,7 +66,7 @@ export class HypurrscanUnstakingClient extends BaseApiService {
         this.get<UnstakingQueueRawData[]>('/unstakingQueue')
       );
       
-      await redisService.set(HypurrscanUnstakingClient.CACHE_KEY, JSON.stringify(data));
+      await redisService.setIfChanged(HypurrscanUnstakingClient.CACHE_KEY, JSON.stringify(data));
       const now = Date.now();
       await redisService.publish(HypurrscanUnstakingClient.UPDATE_CHANNEL, JSON.stringify({
         type: 'DATA_UPDATED',

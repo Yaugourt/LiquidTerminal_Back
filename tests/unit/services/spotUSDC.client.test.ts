@@ -6,7 +6,7 @@
  * array.
  */
 const mockRedis = {
-  set: jest.fn<Promise<unknown>, [string, string]>(),
+  setIfChanged: jest.fn<Promise<boolean>, [string, string]>(),
   publish: jest.fn<Promise<unknown>, [string, string]>(),
 };
 const mockLog = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
@@ -29,7 +29,7 @@ describe('SpotUSDCClient poll', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockRedis.set.mockResolvedValue('OK');
+    mockRedis.setIfChanged.mockResolvedValue(true);
     mockRedis.publish.mockResolvedValue(1);
   });
 
@@ -38,8 +38,8 @@ describe('SpotUSDCClient poll', () => {
     await poll();
 
     expect(getSpy).toHaveBeenCalledWith('/spotUSDC');
-    expect(mockRedis.set).toHaveBeenCalledTimes(1);
-    const [key, value] = mockRedis.set.mock.calls[0];
+    expect(mockRedis.setIfChanged).toHaveBeenCalledTimes(1);
+    const [key, value] = mockRedis.setIfChanged.mock.calls[0];
     expect(key).toBe('spotUSDC:raw_data');
     expect(JSON.parse(value)).toEqual(SERIES);
     expect(mockRedis.publish).toHaveBeenCalledWith('spotUSDC:data:updated', expect.stringContaining('"DATA_UPDATED"'));
@@ -64,7 +64,7 @@ describe('SpotUSDCClient poll', () => {
     getSpy.mockResolvedValue(payload);
     await poll();
 
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.setIfChanged).not.toHaveBeenCalled();
     expect(mockRedis.publish).not.toHaveBeenCalled();
     expect(mockLog.warn).toHaveBeenCalledWith('SpotUSDC: unexpected payload, cache left as is', { type });
   });
@@ -73,7 +73,7 @@ describe('SpotUSDCClient poll', () => {
     getSpy.mockRejectedValue(new Error('socket hang up'));
     await poll();
 
-    expect(mockRedis.set).not.toHaveBeenCalled();
+    expect(mockRedis.setIfChanged).not.toHaveBeenCalled();
     expect(mockLog.error).toHaveBeenCalledWith('Failed to update SpotUSDC data:', { error: 'socket hang up' });
   });
 });

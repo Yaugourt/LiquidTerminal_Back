@@ -73,7 +73,7 @@ export class HypurrscanFeesClient extends BaseApiService {
     try {
       const feesData = await this.getFeesDataRaw();
       
-      await redisService.set(
+      await redisService.setIfChanged(
         HypurrscanFeesClient.CACHE_KEY,
         JSON.stringify(feesData)
       );

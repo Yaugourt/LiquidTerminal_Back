@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import Redis from 'ioredis';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
@@ -172,6 +173,124 @@ function forceRedisReconnect(): void {
   }, 100);
 }
 
+/**
+ * Keys written through setIfChanged: the hash of the last value written and when.
+ * Cleared whenever the command connection becomes ready, since Redis may have
+ * restarted (and reloaded older data) or been flushed in between.
+ */
+const lastWritten = new Map<string, { hash: string; at: number }>();
+/** An unchanged value is written again after this long anyway (bounds any Redis-side rollback). */
+const UNCHANGED_REWRITE_MS = 10 * 60_000;
+
+/**
+ * Redis is a cache here: everything in it is rebuilt by the pollers or held
+ * with a TTL, apart from a few small cursors. Its AOF made Redis rewrite the
+ * file every ~2 min under ~40 MB/min of cache writes, and each rewrite on
+ * Railway's slow volume froze it ~2 s, past our 3 s command timeout (prod
+ * logs, 2026-11-04). The Railway image writes `appendonly yes` into its config
+ * on every start and ignores REDIS_AOF_ENABLED, so the backend turns the AOF off
+ * whenever it connects (REDIS_AOF_OFF: unset = in production only, true or
+ * false to force). RDB snapshots stay as they are.
+ *
+ * With the AOF off, the file on disk stops at that moment, and Redis reloads it
+ * (not the newer RDB) when the image starts it again with `appendonly yes`:
+ * BGREWRITEAOF, which still works with the AOF off, refreshes it 2 min after the
+ * connection and every 30 min, so a restart reloads data at most that old.
+ */
+const AOF_FIRST_REFRESH_MS = 2 * 60_000;
+const AOF_REFRESH_MS = 30 * 60_000;
+/** A refresh due while the circuit is open is tried again this soon. */
+const AOF_RETRY_MS = 60_000;
+let aofGuardOff = false;
+let aofRefreshTimer: NodeJS.Timeout | null = null;
+
+function aofGuardWanted(): boolean {
+  const raw = (process.env.REDIS_AOF_OFF ?? '').trim().toLowerCase();
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return process.env.NODE_ENV === 'production';
+}
+
+/** CONFIG or BGREWRITEAOF refused for good (renamed or not allowed): stop trying in this process. */
+function isPermanentRefusal(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /unknown command|NOPERM|no permissions/i.test(message);
+}
+
+function stopAofGuard(error: unknown): void {
+  aofGuardOff = true;
+  if (aofRefreshTimer) clearTimeout(aofRefreshTimer);
+  aofRefreshTimer = null;
+  logDeduplicator.warn('Redis AOF guard stopped: CONFIG not allowed on this server', {
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
+/** Turn the AOF off when it is on. True when the AOF is off afterwards. */
+async function turnAofOff(): Promise<boolean> {
+  const reply = (await redisNormal.config('GET', 'appendonly')) as unknown;
+  const value = Array.isArray(reply) ? reply[1] : undefined;
+  if (value !== 'yes') return value === 'no';
+  await redisNormal.config('SET', 'appendonly', 'no');
+  logDeduplicator.warn('Redis AOF was on: turned it off (cache only; REDIS_AOF_OFF=false keeps it)');
+  return true;
+}
+
+function scheduleAofRefresh(delayMs: number): void {
+  if (aofRefreshTimer) clearTimeout(aofRefreshTimer);
+  aofRefreshTimer = setTimeout(() => void refreshAof(), delayMs);
+  aofRefreshTimer.unref?.();
+}
+
+/** Rewrite the (unused) AOF from the current data, so a restart with the image's `appendonly yes` reloads recent data. */
+async function refreshAof(): Promise<void> {
+  aofRefreshTimer = null;
+  if (aofGuardOff) return;
+  if (!redisAvailable()) {
+    scheduleAofRefresh(AOF_RETRY_MS);
+    return;
+  }
+  try {
+    if (await turnAofOff()) {
+      await redisNormal.bgrewriteaof();
+      logDeduplicator.info('Redis AOF file refreshed (BGREWRITEAOF), the AOF stays off');
+    }
+  } catch (error) {
+    if (isPermanentRefusal(error)) {
+      stopAofGuard(error);
+      return;
+    }
+    // "rewriting already in progress", a timeout during a stall: the next round tries again.
+    logDeduplicator.warn('Redis AOF refresh failed, retrying later', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  scheduleAofRefresh(AOF_REFRESH_MS);
+}
+
+/** On every (re)connection: Redis may have been restarted with the image's `appendonly yes`. */
+async function enforceAofOff(): Promise<void> {
+  if (aofGuardOff || !aofGuardWanted()) return;
+  try {
+    await turnAofOff();
+  } catch (error) {
+    if (isPermanentRefusal(error)) {
+      stopAofGuard(error);
+      return;
+    }
+    logDeduplicator.warn('Redis AOF check failed, retrying with the next refresh', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  // A refresh already planned keeps its time: frequent reconnects must not postpone it forever.
+  if (!aofRefreshTimer) scheduleAofRefresh(AOF_FIRST_REFRESH_MS);
+}
+
+redisNormal.on('ready', () => {
+  lastWritten.clear();
+  void enforceAofOff();
+});
+
 // Service wrapper simple
 export class RedisService {
   public static getInstance(): RedisService {
@@ -308,6 +427,46 @@ export class RedisService {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
       });
+    }
+  }
+
+  /**
+   * set() for a value a poller rewrites on a timer and that often comes back
+   * the same (vault lists, Hypurrscan feeds...): an unchanged value is not
+   * written again, which keeps it out of Redis's traffic and persistence. When
+   * it is unchanged, the key only gets checked: still there (EXISTS), or its
+   * TTL renewed (EXPIRE); a missing key is written. The value is written
+   * anyway every 10 min and after each reconnection. Resolves true when it wrote.
+   */
+  public async setIfChanged(key: string, value: string, ttl?: number): Promise<boolean> {
+    if (!redisAvailable()) return false; // circuit open — skip write, no wait
+    const hash = createHash('sha1').update(value).digest('base64');
+    const previous = lastWritten.get(key);
+    const now = Date.now();
+    try {
+      if (previous && previous.hash === hash && now - previous.at < UNCHANGED_REWRITE_MS) {
+        const kept = ttl ? await redisNormal.expire(key, ttl) : await redisNormal.exists(key);
+        if (kept === 1) {
+          recordRedisSuccess();
+          return false;
+        }
+      }
+      if (ttl) {
+        await redisNormal.set(key, value, 'EX', ttl);
+      } else {
+        await redisNormal.set(key, value);
+      }
+      recordRedisSuccess();
+      lastWritten.set(key, { hash, at: now });
+      return true;
+    } catch (error) {
+      recordRedisFailure();
+      lastWritten.delete(key);
+      logDeduplicator.error('Redis set error', {
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
     }
   }
 

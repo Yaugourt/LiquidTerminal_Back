@@ -64,7 +64,7 @@ export class HypurrscanClient extends BaseApiService {
         this.get<AuctionInfo[]>('/pastAuctions')
       );
       
-      await redisService.set(HypurrscanClient.CACHE_KEY, JSON.stringify(data));
+      await redisService.setIfChanged(HypurrscanClient.CACHE_KEY, JSON.stringify(data));
       const now = Date.now();
       await redisService.publish(HypurrscanClient.UPDATE_CHANNEL, JSON.stringify({
         type: 'DATA_UPDATED',

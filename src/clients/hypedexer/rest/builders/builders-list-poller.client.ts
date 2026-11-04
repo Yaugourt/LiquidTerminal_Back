@@ -96,7 +96,7 @@ export class HLIndexerBuildersClient extends HypeDexerBaseClient {
     const executed = await withDistributedLock('poll:builders', 90, async () => {
       try {
         const response = await this.fetchAllBuilders();
-        await redisService.set(CACHE_KEY, JSON.stringify(response), CACHE_TTL);
+        await redisService.setIfChanged(CACHE_KEY, JSON.stringify(response), CACHE_TTL);
         await redisService.publish(UPDATE_CHANNEL, JSON.stringify({ type: 'DATA_UPDATED', timestamp: Date.now() }));
       } catch (error) {
         fetchError = error;

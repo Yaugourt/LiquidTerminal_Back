@@ -170,11 +170,11 @@ export class HyperliquidVaultsClient extends BaseApiService {
 
       // Sauvegarder les deux listes
       await Promise.all([
-        redisService.set(
+        redisService.setIfChanged(
           HyperliquidVaultsClient.FILTERED_CACHE_KEY,
           JSON.stringify(vaults)
         ),
-        redisService.set(
+        redisService.setIfChanged(
           HyperliquidVaultsClient.ALL_CACHE_KEY,
           JSON.stringify(vaultsWithClosed)
         )

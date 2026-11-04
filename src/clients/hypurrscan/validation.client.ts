@@ -66,7 +66,7 @@ export class HypurrscanValidationClient extends BaseApiService {
         this.get<ValidationRawData[]>('/validating')
       );
       
-      await redisService.set(HypurrscanValidationClient.CACHE_KEY, JSON.stringify(data));
+      await redisService.setIfChanged(HypurrscanValidationClient.CACHE_KEY, JSON.stringify(data));
       const now = Date.now();
       await redisService.publish(HypurrscanValidationClient.UPDATE_CHANNEL, JSON.stringify({
         type: 'DATA_UPDATED',
