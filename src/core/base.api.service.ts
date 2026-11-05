@@ -69,11 +69,13 @@ export function parseRetryAfterMs(value: string | undefined | null): number | un
  * the burst, never permanent.
  */
 /**
- * Ceiling on an upstream response body, from its Content-Length. Legit
- * responses here top out around a couple of MB (bounded by the limit/offset
- * caps on every passthrough); this only catches a pathological or hostile body
- * before it is buffered into memory. A chunked response without the header is
- * not covered, so it is a safety ceiling, not the primary bound.
+ * Default ceiling on an upstream response body, from its Content-Length.
+ * Responses here top out around a couple of MB (bounded by the limit/offset
+ * caps on every passthrough), except the stats-data leaderboard file, whose
+ * client sets its own (`maxResponseBytes`). This only catches a pathological
+ * or hostile body before it is buffered into memory. A chunked response
+ * without the header is not covered, so it is a safety ceiling, not the
+ * primary bound.
  */
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 
@@ -154,6 +156,8 @@ export abstract class BaseApiService {
     private readonly MAX_RETRIES = 3;
     private readonly RETRY_DELAY = 1000; // 1 seconde
     private readonly MAX_RETRY_DELAY_MS = 30_000; // absolute cap per retry
+    /** Ceiling on a response body: MAX_RESPONSE_BYTES unless a client raises it. */
+    protected readonly maxResponseBytes: number = MAX_RESPONSE_BYTES;
     /**
      * Whether a 429 is retried. Not on Hyperliquid /info: its 1,200 weight a
      * minute is one budget per IP for the whole backend, so a 429 means the
@@ -235,7 +239,9 @@ export abstract class BaseApiService {
         // Refuse an oversized body before buffering it into memory (defence in
         // depth: the param caps already bound every legit response).
         const contentLength = Number(response.headers.get('content-length'));
-        if (Number.isFinite(contentLength) && contentLength > MAX_RESPONSE_BYTES) {
+        if (Number.isFinite(contentLength) && contentLength > this.maxResponseBytes) {
+          // Free the connection rather than leave the unread body on it.
+          void response.body?.cancel().catch(() => undefined);
           throw new HttpApiError(
             `Upstream response too large (${contentLength} bytes) ${safeUrl}`,
             502,

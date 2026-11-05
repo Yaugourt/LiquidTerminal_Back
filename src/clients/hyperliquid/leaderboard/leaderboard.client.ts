@@ -30,6 +30,14 @@ export class HyperliquidLeaderboardClient extends BaseApiService {
    */
   private static readonly MAX_STALE_MS = 5 * 60_000;
 
+  /**
+   * The file is ~40 MB (39,993,291 bytes on 2026-11-05, about the same since
+   * September), over the 32 MB default ceiling, which refused it from
+   * 2026-11-02: empty `/leaderboard`, no portfolio margin candidates. Room for
+   * it to more than double.
+   */
+  protected override readonly maxResponseBytes: number = 96 * 1024 * 1024;
+
   private snapshot: LeaderboardSnapshot | null = null;
   private inflight: Promise<LeaderboardSnapshot | null> | null = null;
   private evictionTimer: NodeJS.Timeout | null = null;

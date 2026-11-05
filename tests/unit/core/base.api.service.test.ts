@@ -8,6 +8,7 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 }));
 
 import { BaseApiService, HttpApiError, isHyperliquidInfoUrl } from '../../../src/core/base.api.service';
+import { HyperliquidLeaderboardClient } from '../../../src/clients/hyperliquid/leaderboard/leaderboard.client';
 
 class Client extends BaseApiService {}
 
@@ -64,5 +65,70 @@ describe('BaseApiService retries', () => {
     const client = new Client('https://api.hyperliquid.xyz/info');
     const error = await client.post('', {}).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(HttpApiError);
+  });
+});
+
+/**
+ * Response ceiling: a body over 32 MB (from its Content-Length) is refused
+ * before it is read, except where a client raises its own ceiling. The
+ * stats-data leaderboard file is ~40 MB: refused from 2026-11-02 to 11-05.
+ */
+describe('BaseApiService response ceiling', () => {
+  const realFetch = global.fetch;
+  let fetchMock: jest.Mock;
+  /** Size of the stats-data leaderboard file on 2026-11-05. */
+  const LEADERBOARD_BYTES = 39_993_291;
+
+  class SingleAttemptClient extends BaseApiService {
+    once<T>(endpoint: string): Promise<T> {
+      return this.getSingleAttempt<T>(endpoint);
+    }
+  }
+
+  /** A 200 whose Content-Length says `bytes` (the body itself stays small). */
+  const sized = (bytes: number, body: unknown): Response =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'content-length': String(bytes) },
+    });
+
+  beforeEach(() => {
+    fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterAll(() => {
+    global.fetch = realFetch;
+  });
+
+  it('refuses a body over 32 MB and cancels it unread', async () => {
+    const response = sized(LEADERBOARD_BYTES, { ok: true });
+    const body = response.body;
+    if (!body) throw new Error('the test response has no body');
+    const cancel = jest.spyOn(body, 'cancel');
+    fetchMock.mockResolvedValue(response);
+
+    const client = new SingleAttemptClient('https://api.hypurrscan.io');
+    await expect(client.once('/x')).rejects.toMatchObject({
+      statusCode: 502,
+      message: expect.stringContaining('Upstream response too large (39993291 bytes)'),
+    });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads a body up to 32 MB', async () => {
+    fetchMock.mockResolvedValue(sized(32 * 1024 * 1024, { ok: true }));
+    const client = new SingleAttemptClient('https://api.hypurrscan.io');
+    await expect(client.once('/x')).resolves.toEqual({ ok: true });
+  });
+
+  it('the leaderboard client reads the ~40 MB file', async () => {
+    fetchMock.mockResolvedValue(sized(LEADERBOARD_BYTES, { leaderboardRows: [{ ethAddress: '0xabc' }] }));
+    const data = await HyperliquidLeaderboardClient.getInstance().getLeaderboardData();
+    expect(data?.leaderboardRows).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://stats-data.hyperliquid.xyz/Mainnet/leaderboard',
+      expect.anything()
+    );
   });
 });
