@@ -364,9 +364,14 @@ async function initializeLogger() {
     rotationTimer.unref();
 
   } catch (err) {
-    console.error('Failed to initialize pino logger:', err);
-    infoWarnLogger = pino({ level: process.env.NODE_ENV === 'production' ? 'info' : 'debug' });
-    errorDebugLogger = pino({ level: process.env.NODE_ENV === 'production' ? 'info' : 'debug' }); 
+    // Production lands here: the image runs as `node` and cannot create
+    // /app/logs. Keep the base config (the redaction backstop above included)
+    // on the standard streams, which Railway keeps; without it, bodies, emails
+    // and Privy ids reached the Railway logs in clear.
+    console.error('Logger setup failed, logging to stdout/stderr only:', err instanceof Error ? err.message : err);
+    const level = process.env.NODE_ENV === 'production' ? 'info' : 'debug';
+    infoWarnLogger = pino({ ...baseConfig, level }, process.stdout);
+    errorDebugLogger = pino({ ...baseConfig, level }, process.stderr);
   }
 }
 
