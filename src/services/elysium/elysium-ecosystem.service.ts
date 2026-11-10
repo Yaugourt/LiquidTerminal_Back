@@ -1,4 +1,4 @@
-import { prismaHistorical } from '../../core/prisma.historical.service';
+import { prismaHistoricalRead } from '../../core/prisma.historical.service';
 import { cacheService } from '../../core/cache.service';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -118,7 +118,7 @@ export class ElysiumEcosystemService {
   private async computeAllTime(): Promise<AllTimeRow[]> {
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
     const cursor = (await this.readTxCursor())?.toISOString() ?? null;
-    return prismaHistorical.$queryRaw<AllTimeRow[]>`
+    return prismaHistoricalRead.$queryRaw<AllTimeRow[]>`
       WITH reg AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
       ),
@@ -203,7 +203,7 @@ export class ElysiumEcosystemService {
 
   /** The provider's tx cursor: elysium_tx is complete up to it, elysium_tx_live takes over after. */
   private async readTxCursor(): Promise<Date | null> {
-    const rows = await prismaHistorical.$queryRaw<Array<{ cursor: Date | null }>>`
+    const rows = await prismaHistoricalRead.$queryRaw<Array<{ cursor: Date | null }>>`
       SELECT cursor FROM elysium_ingest_state WHERE stream = 'tx'`;
     return rows[0]?.cursor ?? null;
   }
@@ -223,7 +223,7 @@ export class ElysiumEcosystemService {
     const cursorIso = txCursor?.toISOString() ?? null;
 
     const [activity, daily, pads, padVolumes, hypeUsd, allTime, verified] = await Promise.all([
-      prismaHistorical.$queryRaw<ActivityRow[]>`
+      prismaHistoricalRead.$queryRaw<ActivityRow[]>`
         WITH reg AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
         )
@@ -245,7 +245,7 @@ export class ElysiumEcosystemService {
         ) t ON t.to_addr = reg.addr
         GROUP BY reg.slug`,
       // Bucket 0 is the last 24h; buckets are rolling so the latest one is never a partial day.
-      prismaHistorical.$queryRaw<Array<{ slug: string; bucket: number; users: number }>>`
+      prismaHistoricalRead.$queryRaw<Array<{ slug: string; bucket: number; users: number }>>`
         WITH reg AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
         )
@@ -262,12 +262,12 @@ export class ElysiumEcosystemService {
             AND block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
         ) t ON t.to_addr = reg.addr
         GROUP BY 1, 2`,
-      prismaHistorical.$queryRaw<Array<{ launchpad: string; launches: number }>>`
+      prismaHistoricalRead.$queryRaw<Array<{ launchpad: string; launches: number }>>`
         SELECT l.launchpad, count(*) FILTER (WHERE l.created_at >= ${since7}::timestamptz)::int AS launches
         FROM elysium_launch l
         GROUP BY l.launchpad`,
       // Per quote, since a launchpad can price tokens in HYPE and in test USDC (Neuriio).
-      prismaHistorical.$queryRaw<Array<{ launchpad: string; quote: string; volume: string | null }>>`
+      prismaHistoricalRead.$queryRaw<Array<{ launchpad: string; quote: string; volume: string | null }>>`
         SELECT l.launchpad, l.quote, sum(tr.quote_amount)::text AS volume
         FROM elysium_launch_trade tr
         JOIN elysium_launch l ON l.token = tr.token
@@ -327,7 +327,7 @@ export class ElysiumEcosystemService {
   /** The window with no activity data: from the provider's tx cursor to where the live fallback began. */
   private async readActivityGap(txCursor: Date | null, now: Date): Promise<ElysiumActivityGap | null> {
     if (!txCursor || now.getTime() - txCursor.getTime() < GAP_MIN_MS) return null;
-    const rows = await prismaHistorical.$queryRaw<Array<{ start: Date | null }>>`
+    const rows = await prismaHistoricalRead.$queryRaw<Array<{ start: Date | null }>>`
       SELECT min(block_time) AS start FROM elysium_tx_live WHERE block_time > ${txCursor.toISOString()}::timestamptz`;
     const start = rows[0]?.start ?? null;
     return { from: txCursor.toISOString(), to: start ? start.toISOString() : null };

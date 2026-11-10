@@ -3,7 +3,20 @@ import type { Launchpad } from '../services/elysium/elysium-launchpad.util';
 
 const noParams = z.object({});
 
-const days = z.coerce.number().int().min(1).max(60).default(14);
+/**
+ * The windows the daily analytics are computed over. Each value is a cache entry of its own, kept
+ * warm for as long as it is asked for, and each recomputation reads the transaction table over
+ * that many days: with any value from 1 to 60 accepted, six routes made 360 such entries that
+ * one client could keep alive at once. The pages and the share tiles ask for 14.
+ */
+export const ELYSIUM_ANALYTICS_DAYS = [7, 14, 30, 60] as const;
+const days = z.coerce
+  .number()
+  .int()
+  .refine((n) => (ELYSIUM_ANALYTICS_DAYS as readonly number[]).includes(n), {
+    message: `days must be one of ${ELYSIUM_ANALYTICS_DAYS.join(', ')}`,
+  })
+  .default(14);
 
 /** GET /elysium/analytics/status */
 export const elysiumAnalyticsStatusSchema = z.object({
@@ -11,7 +24,7 @@ export const elysiumAnalyticsStatusSchema = z.object({
   params: noParams,
 });
 
-/** GET /elysium/analytics/{deployments,users,bridge,economics}?days=1..60 (default 14) */
+/** GET /elysium/analytics/{deployments,users,bridge,economics,dex,tokens}?days=7|14|30|60 (default 14) */
 export const elysiumAnalyticsDaysSchema = z.object({
   query: z.object({ days }),
   params: noParams,

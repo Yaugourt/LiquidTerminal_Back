@@ -81,7 +81,7 @@ describe('Elysium analytics GET validation smoke', () => {
     '/elysium/analytics/deployments?days=60',
     '/elysium/analytics/contracts',
     '/elysium/analytics/contracts?window=7d',
-    '/elysium/analytics/users?days=1',
+    '/elysium/analytics/users?days=7',
     '/elysium/analytics/bridge?days=14',
     '/elysium/analytics/economics?days=30',
     '/elysium/analytics/methods',
@@ -129,6 +129,9 @@ describe('Elysium analytics query validation', () => {
   const invalid: string[] = [
     '/elysium/analytics/deployments?days=0',
     '/elysium/analytics/deployments?days=61',
+    '/elysium/analytics/users?days=1',
+    '/elysium/analytics/dex?days=15',
+    '/elysium/analytics/economics?days=59',
     '/elysium/analytics/users?days=abc',
     '/elysium/analytics/bridge?days=1.5',
     '/elysium/analytics/economics?days=-1',

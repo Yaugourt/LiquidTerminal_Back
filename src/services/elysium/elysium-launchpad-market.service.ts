@@ -1,5 +1,5 @@
 import { Prisma } from '../../../prisma-historical/generated/client';
-import { prismaHistorical } from '../../core/prisma.historical.service';
+import { prismaHistoricalRead } from '../../core/prisma.historical.service';
 import { redisService } from '../../core/redis.service';
 import type { LaunchpadSort } from '../../schemas/elysium-analytics.schema';
 import { logDeduplicator } from '../../utils/logDeduplicator';
@@ -255,7 +255,7 @@ export class ElysiumLaunchpadMarketService {
   /** One statement on its own connection with a time limit: a slow plan ends instead of holding the pool. */
   private timed<T>(ms: number, query: Prisma.Sql): Promise<T[]> {
     // Prisma's own transaction limit (5 s by default) is set just past the statement's.
-    return prismaHistorical.$transaction(
+    return prismaHistoricalRead.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${Math.trunc(ms)}`);
         return tx.$queryRaw<T[]>(query);

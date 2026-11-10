@@ -1,4 +1,4 @@
-import { prismaHistorical } from '../../core/prisma.historical.service';
+import { prismaHistoricalRead } from '../../core/prisma.historical.service';
 import { cacheService } from '../../core/cache.service';
 import { ELYSIUM_STATE_MARKERS, ElysiumIngestRepository } from '../../repositories/prisma/prisma.elysium.repository';
 import {
@@ -134,19 +134,19 @@ export class ElysiumAnalyticsService {
       const since24h = new Date(now.getTime() - DAY_MS);
 
       const [daily, top, trending] = await Promise.all([
-        prismaHistorical.$queryRaw<Array<{ day: string; deployments: number; deployers: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; deployments: number; deployers: number }>>`
           SELECT (deployed_at AT TIME ZONE 'UTC')::date::text AS day,
                  count(*)::int AS deployments, count(DISTINCT deployer)::int AS deployers
           FROM elysium_contract WHERE deployed_at >= ${ts(start)}::timestamptz
           GROUP BY 1`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ address: string; deployments: number; first_deploy: number; last_deploy: number }>
         >`
           SELECT deployer AS address, count(*)::int AS deployments,
                  (extract(epoch FROM min(deployed_at)) * 1000)::float8 AS first_deploy, (extract(epoch FROM max(deployed_at)) * 1000)::float8 AS last_deploy
           FROM elysium_contract WHERE deployed_at >= ${ts(since7d)}::timestamptz
           GROUP BY deployer ORDER BY deployments DESC, address LIMIT 15`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{
             address: string;
             deployer: string;
@@ -209,7 +209,7 @@ export class ElysiumAnalyticsService {
       const curStart = new Date(now.getTime() - spanMs);
       const prevStart = new Date(now.getTime() - 2 * spanMs);
 
-      const rows = await prismaHistorical.$queryRaw<
+      const rows = await prismaHistoricalRead.$queryRaw<
         Array<{
           address: string;
           txs: number;
@@ -256,7 +256,7 @@ export class ElysiumAnalyticsService {
       const addrs = rows.map((r) => r.address);
       const [methodRows, names] = await Promise.all([
         addrs.length
-          ? prismaHistorical.$queryRaw<Array<{ address: string; method_id: string | null; txs: number }>>`
+          ? prismaHistoricalRead.$queryRaw<Array<{ address: string; method_id: string | null; txs: number }>>`
               SELECT address, method_id, txs FROM (
                 SELECT t.to_addr AS address, t.method_id, count(*)::int AS txs,
                        row_number() OVER (PARTITION BY t.to_addr ORDER BY count(*) DESC, t.method_id) AS rk
@@ -316,13 +316,13 @@ export class ElysiumAnalyticsService {
       const since24h = new Date(now.getTime() - DAY_MS);
 
       const [active, fresh, cohorts, senders] = await Promise.all([
-        prismaHistorical.$queryRaw<Array<{ day: string; n: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; n: number }>>`
           SELECT day::text AS day, count(*)::int AS n FROM elysium_address_day
           WHERE day >= ${startDay}::date GROUP BY day`,
-        prismaHistorical.$queryRaw<Array<{ day: string; n: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; n: number }>>`
           SELECT first_day::text AS day, count(*)::int AS n FROM elysium_address
           WHERE first_day >= ${startDay}::date GROUP BY first_day`,
-        prismaHistorical.$queryRaw<Array<{ day: string; size: number; d1: number; d7: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; size: number; d1: number; d7: number }>>`
           SELECT a.first_day::text AS day, count(*)::int AS size,
                  count(d1.address)::int AS d1, count(d7.address)::int AS d7
           FROM elysium_address a
@@ -330,7 +330,7 @@ export class ElysiumAnalyticsService {
           LEFT JOIN elysium_address_day d7 ON d7.address = a.address AND d7.day = a.first_day + 7
           WHERE a.first_day >= ${startDay}::date
           GROUP BY a.first_day`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ address: string; txs: number; targets: number; senders: number; total: number }>
         >`
           WITH s AS (
@@ -400,7 +400,7 @@ export class ElysiumAnalyticsService {
       const { keys, start } = this.rangeStart(now, days);
 
       const [daily, tokens, finality, bridgers] = await Promise.all([
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ day: string; deposits: number; withdrawals: number; hype_in: number; hype_out: number }>
         >`
           SELECT (initiated_at AT TIME ZONE 'UTC')::date::text AS day,
@@ -410,7 +410,7 @@ export class ElysiumAnalyticsService {
                  COALESCE(sum(amount) FILTER (WHERE direction = 'withdrawal' AND symbol = 'HYPE' AND route = 'native'), 0)::float8 AS hype_out
           FROM elysium_bridge_transfer WHERE initiated_at >= ${ts(start)}::timestamptz
           GROUP BY 1`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{
             symbol: string | null;
             route: string;
@@ -428,7 +428,7 @@ export class ElysiumAnalyticsService {
           FROM elysium_bridge_transfer WHERE initiated_at >= ${ts(start)}::timestamptz
           GROUP BY symbol, route
           ORDER BY count(*) DESC, symbol LIMIT 25`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ direction: string; completed: number; median_s: number | null; p90_s: number | null }>
         >`
           SELECT direction, count(*)::int AS completed,
@@ -437,7 +437,7 @@ export class ElysiumAnalyticsService {
           FROM elysium_bridge_transfer
           WHERE initiated_at >= ${ts(start)}::timestamptz AND completed_at IS NOT NULL AND duration_s IS NOT NULL
           GROUP BY direction ORDER BY direction`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ address: string; transfers: number; hype_in: number; hype_out: number }>
         >`
           SELECT from_addr AS address, count(*)::int AS transfers,
@@ -513,7 +513,7 @@ export class ElysiumAnalyticsService {
         const start = new Date(now.getTime() - spanMs);
         const prevStart = new Date(now.getTime() - 2 * spanMs);
 
-        const rows = await prismaHistorical.$queryRaw<
+        const rows = await prismaHistoricalRead.$queryRaw<
           Array<{ kind: string; key: string | null; fees: number; txs: number; gas: string | null; n: number }>
         >`
           WITH f AS (
@@ -553,19 +553,19 @@ export class ElysiumAnalyticsService {
 
         const [meta, prev, callers] = addrs.length
           ? await Promise.all([
-              prismaHistorical.$queryRaw<
+              prismaHistoricalRead.$queryRaw<
                 Array<{ address: string; deployer: string | null; name: string | null; symbol: string | null; is_token: boolean }>
               >`
                 SELECT a.address, c.deployer, tk.name, tk.symbol, (tk.address IS NOT NULL) AS is_token
                 FROM unnest(${addrs}::text[]) AS a(address)
                 LEFT JOIN elysium_contract c ON c.address = a.address
                 LEFT JOIN elysium_token tk ON tk.address = a.address`,
-              prismaHistorical.$queryRaw<Array<{ address: string; fees: number }>>`
+              prismaHistoricalRead.$queryRaw<Array<{ address: string; fees: number }>>`
                 SELECT to_addr AS address, (sum(fee_wei) / 1e18)::float8 AS fees FROM elysium_tx
                 WHERE to_addr = ANY(${addrs}::text[]) AND NOT is_spam
                   AND block_time >= ${ts(prevStart)}::timestamptz AND block_time < ${ts(start)}::timestamptz
                 GROUP BY to_addr`,
-              prismaHistorical.$queryRaw<Array<{ address: string; callers: number }>>`
+              prismaHistoricalRead.$queryRaw<Array<{ address: string; callers: number }>>`
                 SELECT to_addr AS address, count(DISTINCT from_addr)::int AS callers FROM elysium_tx
                 WHERE to_addr = ANY(${addrs}::text[]) AND NOT is_spam
                   AND block_time >= ${ts(start)}::timestamptz AND block_time < ${ts(now)}::timestamptz
@@ -648,7 +648,7 @@ export class ElysiumAnalyticsService {
       const now = new Date();
       const { keys, start } = this.rangeStart(now, days);
 
-      const rows = await prismaHistorical.$queryRaw<
+      const rows = await prismaHistoricalRead.$queryRaw<
         Array<{ day: string; txs: number; spam: number; failed: number; bridge: number; fees: number }>
       >`
         SELECT (block_time AT TIME ZONE 'UTC')::date::text AS day,
@@ -702,7 +702,7 @@ export class ElysiumAnalyticsService {
     return cacheService.getOrSet<Record<string, string>>(
       `${CACHE_PREFIX}:method-names:v1`,
       async () => {
-        const rows = await prismaHistorical.$queryRaw<Array<{ method_id: string; signature: string }>>`
+        const rows = await prismaHistoricalRead.$queryRaw<Array<{ method_id: string; signature: string }>>`
           SELECT method_id, signature FROM elysium_method_sig WHERE signature IS NOT NULL`;
         return Object.fromEntries(rows.map((r) => [r.method_id, r.signature]));
       },
@@ -730,7 +730,7 @@ export class ElysiumAnalyticsService {
       const [rows, totals, names, resolved] = await Promise.all([
         // Top selectors first, then distinct senders / contracts via two-level
         // hash aggregates (count(DISTINCT) per group sorts and takes ~40s here).
-        prismaHistorical.$queryRaw<Array<{ method_id: string; txs: number; senders: number; contracts: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ method_id: string; txs: number; senders: number; contracts: number }>>`
           WITH base AS (
             SELECT method_id, from_addr, to_addr FROM elysium_tx
             WHERE block_time >= ${ts(start)}::timestamptz AND block_time < ${ts(now)}::timestamptz
@@ -748,14 +748,14 @@ export class ElysiumAnalyticsService {
           SELECT top.method_id, top.txs, COALESCE(s.n, 0) AS senders, COALESCE(c.n, 0) AS contracts
           FROM top LEFT JOIN s USING (method_id) LEFT JOIN c USING (method_id)
           ORDER BY top.txs DESC, top.method_id`,
-        prismaHistorical.$queryRaw<Array<{ calls: number; transfers: number; creations: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ calls: number; transfers: number; creations: number }>>`
           SELECT count(*) FILTER (WHERE to_addr IS NOT NULL AND method_id IS NOT NULL)::int AS calls,
                  count(*) FILTER (WHERE to_addr IS NOT NULL AND method_id IS NULL)::int AS transfers,
                  count(*) FILTER (WHERE to_addr IS NULL)::int AS creations
           FROM elysium_tx
           WHERE block_time >= ${ts(start)}::timestamptz AND block_time < ${ts(now)}::timestamptz AND NOT is_spam`,
         this.methodNames(),
-        prismaHistorical.$queryRaw<Array<{ looked_up: number; found: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ looked_up: number; found: number }>>`
           SELECT count(*)::int AS looked_up, count(signature)::int AS found FROM elysium_method_sig`,
       ]);
       const t = totals[0] ?? { calls: 0, transfers: 0, creations: 0 };
@@ -792,14 +792,14 @@ export class ElysiumAnalyticsService {
       const since24h = new Date(now.getTime() - DAY_MS);
 
       const [pools, swaps, factories, top, fresh, totals] = await Promise.all([
-        prismaHistorical.$queryRaw<Array<{ day: string; n: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; n: number }>>`
           SELECT (created_at AT TIME ZONE 'UTC')::date::text AS day, count(*)::int AS n
           FROM elysium_dex_pool WHERE created_at >= ${ts(start)}::timestamptz GROUP BY 1`,
-        prismaHistorical.$queryRaw<Array<{ day: string; swaps: number; active: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; swaps: number; active: number }>>`
           SELECT (block_time AT TIME ZONE 'UTC')::date::text AS day, count(*)::int AS swaps,
                  count(DISTINCT pool)::int AS active
           FROM elysium_dex_swap WHERE block_time >= ${ts(start)}::timestamptz GROUP BY 1`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ address: string; versions: string; pools: number; swaps24h: number; last_pool: number }>
         >`
           SELECT p.factory AS address, string_agg(DISTINCT p.version, ',') AS versions,
@@ -808,7 +808,7 @@ export class ElysiumAnalyticsService {
                    WHERE q.factory = p.factory AND s.block_time >= ${ts(since24h)}::timestamptz)::int AS swaps24h,
                  (extract(epoch FROM max(p.created_at)) * 1000)::float8 AS last_pool
           FROM elysium_dex_pool p GROUP BY p.factory ORDER BY pools DESC, address LIMIT 15`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{
             pool: string;
             version: string;
@@ -831,7 +831,7 @@ export class ElysiumAnalyticsService {
           WHERE s.block_time >= ${ts(since24h)}::timestamptz
           GROUP BY s.pool, s.version, p.fee, p.token0, p.token1, k0.symbol, k1.symbol
           ORDER BY swaps DESC, s.pool LIMIT 15`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{
             pool: string;
             factory: string;
@@ -853,7 +853,7 @@ export class ElysiumAnalyticsService {
           LEFT JOIN elysium_token k0 ON k0.address = p.token0
           LEFT JOIN elysium_token k1 ON k1.address = p.token1
           ORDER BY p.created_at DESC, p.pool LIMIT 30`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ pools: number; swaps: number; swaps24h: number; traders24h: number; pools24h: number }>
         >`
           SELECT (SELECT count(*) FROM elysium_dex_pool)::int AS pools,
@@ -946,25 +946,25 @@ export class ElysiumAnalyticsService {
       };
 
       const [daily, fresh, top, totals] = await Promise.all([
-        prismaHistorical.$queryRaw<Array<{ day: string; launched: number; named: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; launched: number; named: number }>>`
           SELECT (first_seen AT TIME ZONE 'UTC')::date::text AS day, count(*)::int AS launched,
                  count(*) FILTER (WHERE symbol IS NOT NULL)::int AS named
           FROM elysium_token WHERE standard = 'erc20' AND first_seen >= ${ts(start)}::timestamptz GROUP BY 1`,
-        prismaHistorical.$queryRaw<TokenOut[]>`
+        prismaHistoricalRead.$queryRaw<TokenOut[]>`
           SELECT k.address, k.name, k.symbol, k.decimals, k.origin,
                  (extract(epoch FROM k.first_seen) * 1000)::float8 AS first_seen, k.transfer_count::text AS transfers,
                  s.holders, (extract(epoch FROM s.fetched_at) * 1000)::float8 AS holders_at
           FROM elysium_token k LEFT JOIN elysium_token_stat s ON s.address = k.address
           WHERE k.standard = 'erc20' AND k.symbol IS NOT NULL AND k.first_seen >= ${ts(since24h)}::timestamptz
           ORDER BY k.transfer_count DESC, k.address LIMIT 25`,
-        prismaHistorical.$queryRaw<TokenOut[]>`
+        prismaHistoricalRead.$queryRaw<TokenOut[]>`
           SELECT k.address, k.name, k.symbol, k.decimals, k.origin,
                  (extract(epoch FROM k.first_seen) * 1000)::float8 AS first_seen, k.transfer_count::text AS transfers,
                  s.holders, (extract(epoch FROM s.fetched_at) * 1000)::float8 AS holders_at
           FROM elysium_token k LEFT JOIN elysium_token_stat s ON s.address = k.address
           WHERE k.standard = 'erc20' AND k.symbol IS NOT NULL
           ORDER BY k.transfer_count DESC, k.address LIMIT 25`,
-        prismaHistorical.$queryRaw<Array<{ tokens: number; named: number; launched24h: number; named24h: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ tokens: number; named: number; launched24h: number; named24h: number }>>`
           SELECT count(*)::int AS tokens, count(*) FILTER (WHERE symbol IS NOT NULL)::int AS named,
                  count(*) FILTER (WHERE first_seen >= ${ts(since24h)}::timestamptz)::int AS launched24h,
                  count(*) FILTER (WHERE first_seen >= ${ts(since24h)}::timestamptz AND symbol IS NOT NULL)::int AS named24h
@@ -1010,7 +1010,7 @@ export class ElysiumAnalyticsService {
   private networkTxs24h(): Promise<number> {
     return this.cached('network-txs-24h', 'v1', async () => {
       const since24h = new Date(Date.now() - DAY_MS);
-      const rows = await prismaHistorical.$queryRaw<Array<{ total: number }>>`
+      const rows = await prismaHistoricalRead.$queryRaw<Array<{ total: number }>>`
         SELECT count(*)::int AS total FROM elysium_tx WHERE block_time >= ${ts(since24h)}::timestamptz
           AND NOT is_spam AND COALESCE(tx_type, '') NOT IN ('0x64', '0x68', '0x69')`;
       return rows[0]?.total ?? 0;
@@ -1024,22 +1024,22 @@ export class ElysiumAnalyticsService {
       const now = new Date();
       const since24h = new Date(now.getTime() - DAY_MS);
       const [seen, act, net, deploys, dex, bridge, methods, names] = await Promise.all([
-        prismaHistorical.$queryRaw<Array<{ first_seen: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ first_seen: number }>>`
           SELECT (extract(epoch FROM first_seen) * 1000)::float8 AS first_seen FROM elysium_address WHERE address = ${a}`,
-        prismaHistorical.$queryRaw<Array<{ txs: number; days: number; txs24h: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ txs: number; days: number; txs24h: number }>>`
           SELECT COALESCE(sum(tx_count), 0)::int AS txs, count(*)::int AS days,
                  (SELECT count(*) FROM elysium_tx WHERE from_addr = ${a} AND block_time >= ${ts(since24h)}::timestamptz
                    AND NOT is_spam AND COALESCE(tx_type, '') NOT IN ('0x64', '0x68', '0x69'))::int AS txs24h
           FROM elysium_address_day WHERE address = ${a}`,
         this.networkTxs24h(),
-        prismaHistorical.$queryRaw<Array<{ n: number; last: number | null }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ n: number; last: number | null }>>`
           SELECT count(*)::int AS n, (extract(epoch FROM max(deployed_at)) * 1000)::float8 AS last
           FROM elysium_contract WHERE deployer = ${a}`,
-        prismaHistorical.$queryRaw<Array<{ swaps: number; pools: number; swaps24h: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ swaps: number; pools: number; swaps24h: number }>>`
           SELECT count(*)::int AS swaps, count(DISTINCT s.pool)::int AS pools,
                  count(*) FILTER (WHERE s.block_time >= ${ts(since24h)}::timestamptz)::int AS swaps24h
           FROM elysium_dex_swap s JOIN elysium_tx t ON t.tx_hash = s.tx_hash WHERE t.from_addr = ${a}`,
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ deposits: number; withdrawals: number; hype_in: number; hype_out: number }>
         >`
           SELECT count(*) FILTER (WHERE direction = 'deposit')::int AS deposits,
@@ -1047,7 +1047,7 @@ export class ElysiumAnalyticsService {
                  COALESCE(sum(amount) FILTER (WHERE direction = 'deposit' AND symbol = 'HYPE' AND route = 'native'), 0)::float8 AS hype_in,
                  COALESCE(sum(amount) FILTER (WHERE direction = 'withdrawal' AND symbol = 'HYPE' AND route = 'native'), 0)::float8 AS hype_out
           FROM elysium_bridge_transfer WHERE from_addr = ${a} OR to_addr = ${a}`,
-        prismaHistorical.$queryRaw<Array<{ method_id: string | null; to_null: boolean; txs: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ method_id: string | null; to_null: boolean; txs: number }>>`
           SELECT CASE WHEN to_addr IS NULL THEN NULL ELSE method_id END AS method_id,
                  (to_addr IS NULL) AS to_null, count(*)::int AS txs
           FROM elysium_tx WHERE from_addr = ${a} AND NOT is_spam
@@ -1105,33 +1105,33 @@ export class ElysiumAnalyticsService {
     return this.cachedFresh('contract', a, async () => {
       const since7d = new Date(Date.now() - 7 * DAY_MS);
       const [dep, token, usage, allTime, methods, asPool, asFactory, inPools, names, launch] = await Promise.all([
-        prismaHistorical.$queryRaw<Array<{ deployer: string; deploy_tx: string; deployed_at: number; block_number: bigint }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ deployer: string; deploy_tx: string; deployed_at: number; block_number: bigint }>>`
           SELECT deployer, deploy_tx, (extract(epoch FROM deployed_at) * 1000)::float8 AS deployed_at, block_number
           FROM elysium_contract WHERE address = ${a}`,
-        prismaHistorical.$queryRaw<Array<{ standard: string; name: string | null; symbol: string | null; decimals: number | null; origin: string | null; transfer_count: bigint }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ standard: string; name: string | null; symbol: string | null; decimals: number | null; origin: string | null; transfer_count: bigint }>>`
           SELECT standard, name, symbol, decimals, origin, transfer_count FROM elysium_token WHERE address = ${a}`,
-        prismaHistorical.$queryRaw<Array<{ txs: number; callers: number; failed: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ txs: number; callers: number; failed: number }>>`
           SELECT count(*)::int AS txs, count(DISTINCT from_addr)::int AS callers,
                  count(*) FILTER (WHERE NOT success)::int AS failed
           FROM elysium_tx WHERE to_addr = ${a} AND block_time >= ${ts(since7d)}::timestamptz AND NOT is_spam`,
         // First and last call through the (to_addr, block_time) index: an all-time count is too slow on busy contracts.
-        prismaHistorical.$queryRaw<Array<{ first: number | null; last: number | null }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ first: number | null; last: number | null }>>`
           SELECT (SELECT (extract(epoch FROM block_time) * 1000)::float8 FROM elysium_tx WHERE to_addr = ${a} ORDER BY block_time ASC LIMIT 1) AS first,
                  (SELECT (extract(epoch FROM block_time) * 1000)::float8 FROM elysium_tx WHERE to_addr = ${a} ORDER BY block_time DESC LIMIT 1) AS last`,
-        prismaHistorical.$queryRaw<Array<{ method_id: string | null; txs: number }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ method_id: string | null; txs: number }>>`
           SELECT method_id, count(*)::int AS txs FROM elysium_tx
           WHERE to_addr = ${a} AND block_time >= ${ts(since7d)}::timestamptz AND NOT is_spam
           GROUP BY 1 ORDER BY txs DESC LIMIT 8`,
-        prismaHistorical.$queryRaw<Array<{ factory: string; version: string; token0: string; token1: string; fee: number | null }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ factory: string; version: string; token0: string; token1: string; fee: number | null }>>`
           SELECT factory, version, token0, token1, fee FROM elysium_dex_pool WHERE pool = ${a}`,
-        prismaHistorical.$queryRaw<Array<{ pools: number; version: string | null }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ pools: number; version: string | null }>>`
           SELECT count(*)::int AS pools, max(version) AS version FROM elysium_dex_pool WHERE factory = ${a}`,
-        prismaHistorical.$queryRaw<Array<{ pool: string; version: string; other: string }>>`
+        prismaHistoricalRead.$queryRaw<Array<{ pool: string; version: string; other: string }>>`
           SELECT pool, version, CASE WHEN token0 = ${a} THEN token1 ELSE token0 END AS other
           FROM elysium_dex_pool WHERE token0 = ${a} OR token1 = ${a} ORDER BY created_at DESC LIMIT 10`,
         this.methodNames(),
         // Launchpad origin and holder spread, for tokens born on a launchpad we decode.
-        prismaHistorical.$queryRaw<
+        prismaHistoricalRead.$queryRaw<
           Array<{ launchpad: string; kind: string; creator: string | null; created_at: number; graduated: boolean; holders: number | null; top10_pct: number | null; dev_pct: number | null }>
         >`
           SELECT launchpad, kind, creator, (extract(epoch FROM created_at) * 1000)::float8 AS created_at,
@@ -1143,10 +1143,10 @@ export class ElysiumAnalyticsService {
       let deployer: unknown = null;
       if (d) {
         const [count, siblings] = await Promise.all([
-          prismaHistorical.$queryRaw<Array<{ n: number; first: number | null }>>`
+          prismaHistoricalRead.$queryRaw<Array<{ n: number; first: number | null }>>`
             SELECT count(*)::int AS n, (extract(epoch FROM min(deployed_at)) * 1000)::float8 AS first
             FROM elysium_contract WHERE deployer = ${d.deployer}`,
-          prismaHistorical.$queryRaw<Array<{ address: string; deployed_at: number; name: string | null; symbol: string | null; standard: string | null }>>`
+          prismaHistoricalRead.$queryRaw<Array<{ address: string; deployed_at: number; name: string | null; symbol: string | null; standard: string | null }>>`
             SELECT c.address, (extract(epoch FROM c.deployed_at) * 1000)::float8 AS deployed_at, t.name, t.symbol, t.standard
             FROM elysium_contract c LEFT JOIN elysium_token t ON t.address = c.address
             WHERE c.deployer = ${d.deployer} AND c.address <> ${a}
