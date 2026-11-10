@@ -324,6 +324,76 @@ model ElysiumLaunchTrade {
   @@map("elysium_launch_trade")
 }
 
+/// One row per UTC day of elysium_tx: whether the day's rollups are complete
+/// (`builtAt` set and not `dirty`) and the day's totals. Readers use a rollup
+/// day only then; any other day is read from elysium_tx.
+model ElysiumDayRollup {
+  day          DateTime  @id @db.Date
+  builtAt      DateTime? @map("built_at") @db.Timestamptz(3)
+  /// A transaction of this past day arrived after the build: rebuilt on the next pass.
+  dirty        Boolean   @default(false)
+  /// The build that last started on this day: only that one may declare it built.
+  buildToken   String?   @map("build_token") @db.VarChar(36)
+  callersBuilt Boolean   @default(false) @map("callers_built")
+  sendersBuilt Boolean   @default(false) @map("senders_built")
+  txs          Int       @default(0)
+  failedTxs    Int       @default(0) @map("failed_txs")
+  bridgeTxs    Int       @default(0) @map("bridge_txs")
+  calls        Int       @default(0)
+  transfers    Int       @default(0)
+  creations    Int       @default(0)
+  spamTxs      Int       @default(0) @map("spam_txs")
+  /// Fees of every transaction of the day, spam included (wei).
+  feeWei       Decimal   @default(0) @map("fee_wei") @db.Decimal(60, 0)
+
+  @@map("elysium_day_rollup")
+}
+
+/// Non-spam transactions sent to an address, per day, target and selector ('' = no calldata).
+model ElysiumCallDay {
+  day      DateTime @db.Date
+  toAddr   String   @map("to_addr") @db.VarChar(42)
+  methodId String   @default("") @map("method_id") @db.VarChar(10)
+  txs      Int
+  failed   Int
+  feeWei   Decimal  @map("fee_wei") @db.Decimal(60, 0)
+  gasUsed  BigInt   @map("gas_used")
+
+  @@id([day, toAddr, methodId])
+  @@index([day])
+  @@map("elysium_call_day")
+}
+
+/// Targets whose callers of the day are listed in elysium_caller_day (the busy ones).
+model ElysiumCallerSet {
+  day     DateTime @db.Date
+  toAddr  String   @map("to_addr") @db.VarChar(42)
+  callers Int
+
+  @@id([day, toAddr])
+  @@map("elysium_caller_set")
+}
+
+/// Distinct senders of the day's non-spam transactions to a busy target.
+model ElysiumCallerDay {
+  day      DateTime @db.Date
+  toAddr   String   @map("to_addr") @db.VarChar(42)
+  fromAddr String   @map("from_addr") @db.VarChar(42)
+
+  @@id([day, toAddr, fromAddr])
+  @@map("elysium_caller_day")
+}
+
+/// Distinct senders of the day's non-spam calls, per selector.
+model ElysiumMethodSenderDay {
+  day      DateTime @db.Date
+  methodId String   @map("method_id") @db.VarChar(10)
+  fromAddr String   @map("from_addr") @db.VarChar(42)
+
+  @@id([day, methodId, fromAddr])
+  @@map("elysium_method_sender_day")
+}
+
 /// Watermark per ingestion stream (tx, bridge, tokens) for resume + monitoring.
 /// Calls to the ecosystem project contracts read from the public RPC while the
 /// provider's indexer lags (no gas, status or spam flag in that view).

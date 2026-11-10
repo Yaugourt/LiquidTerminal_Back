@@ -30,10 +30,12 @@ export type ElysiumStream =
   /** Not a stream of its own: the marker of the one-time rebuild of the launch market state. */
   | 'launchstate'
   /** Not a stream of its own: where the walk through the tail of the token listing stands (`rows` = next page). */
-  | 'tokenstail';
+  | 'tokenstail'
+  /** Not a stream of its own: the builder of the day rollups (only its last error is kept here). */
+  | 'rollup';
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
-export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'tokenstail']);
+export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'tokenstail', 'rollup']);
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -79,7 +81,8 @@ export class ElysiumIngestRepository {
    * addresses and per-address daily counts (user txs only: non-spam and not a
    * bridge-driven tx type) from the rows that were actually
    * inserted (RETURNING). A replayed row conflicts, is not returned, and so is
-   * never counted twice; a crash rolls back the whole statement.
+   * never counted twice; a crash rolls back the whole statement. A row of a
+   * past UTC day also marks that day's rollups as to be rebuilt.
    */
   public async insertTxs(rows: TxRow[]): Promise<{ inserted: number; contracts: number }> {
     if (rows.length === 0) return { inserted: 0, contracts: 0 };
@@ -125,11 +128,22 @@ export class ElysiumIngestRepository {
         ON CONFLICT (address, day) DO UPDATE
           SET tx_count = elysium_address_day.tx_count + EXCLUDED.tx_count
         RETURNING 1
+      ),
+      r AS (
+        -- A transaction of a day that is over: that day's rollups are rebuilt (see
+        -- ElysiumRollupRepository.buildDay for why this lives in the insert's own statement).
+        INSERT INTO elysium_day_rollup (day, dirty)
+        SELECT DISTINCT (block_time AT TIME ZONE 'UTC')::date, true
+        FROM ins
+        WHERE (block_time AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date
+        ON CONFLICT (day) DO UPDATE SET dirty = true WHERE NOT elysium_day_rollup.dirty
+        RETURNING 1
       )
       SELECT (SELECT count(*) FROM ins)::int AS inserted,
              (SELECT count(*) FROM c)::int AS contracts,
              (SELECT count(*) FROM a)::int AS addresses,
-             (SELECT count(*) FROM d)::int AS address_days
+             (SELECT count(*) FROM d)::int AS address_days,
+             (SELECT count(*) FROM r)::int AS rollup_days
       `,
       JSON.stringify(rows)
     );
@@ -307,13 +321,36 @@ export class ElysiumIngestRepository {
    * The `limit` most frequent called selectors (contract creations and plain
    * transfers excluded) that were never looked up, or whose last lookup found
    * nothing and is older than `retryAfterS`.
+   *
+   * Frequency is counted over the last 30 built rollup days plus every
+   * transaction after the last built day. It used to be a count over the whole
+   * transaction table every 30 minutes; the ranking only picks which selectors
+   * are worth a lookup, and a selector named once stays named. With no rollup
+   * day built yet, the raw part covers everything, as before.
    */
   public async listUnresolvedMethods(limit: number, retryAfterS: number): Promise<string[]> {
     const rows = await prismaHistorical.$queryRawUnsafe<Array<{ method_id: string }>>(
       `
-      WITH top AS (
-        SELECT method_id, count(*) AS n FROM elysium_tx
-        WHERE method_id ~ '^0x[0-9a-f]{8}$' AND to_addr IS NOT NULL
+      WITH built AS (
+        SELECT day FROM elysium_day_rollup WHERE built_at IS NOT NULL AND NOT dirty
+      ),
+      top AS (
+        SELECT method_id, sum(n) AS n FROM (
+          SELECT d.method_id, sum(d.txs)::bigint AS n
+          FROM elysium_call_day d
+          WHERE d.day IN (SELECT day FROM built)
+            AND d.day >= (SELECT max(day) FROM built) - 29
+            AND d.method_id ~ '^0x[0-9a-f]{8}$'
+          GROUP BY d.method_id
+          UNION ALL
+          SELECT t.method_id, count(*)::bigint
+          FROM elysium_tx t
+          WHERE t.block_time >= COALESCE(
+                  (SELECT ((max(day) + 1)::timestamp AT TIME ZONE 'UTC') FROM built),
+                  '-infinity'::timestamptz)
+            AND t.method_id ~ '^0x[0-9a-f]{8}$' AND t.to_addr IS NOT NULL
+          GROUP BY t.method_id
+        ) u
         GROUP BY method_id ORDER BY n DESC, method_id LIMIT $1::int
       )
       SELECT top.method_id FROM top

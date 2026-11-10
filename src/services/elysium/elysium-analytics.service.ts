@@ -1,3 +1,4 @@
+import { Prisma } from '../../../prisma-historical/generated/client';
 import { prismaHistoricalRead } from '../../core/prisma.historical.service';
 import { cacheService } from '../../core/cache.service';
 import { ELYSIUM_STATE_MARKERS, ElysiumIngestRepository } from '../../repositories/prisma/prisma.elysium.repository';
@@ -11,7 +12,10 @@ import {
   toDayKey,
 } from './elysium-analytics.util';
 import { methodName } from './elysium-dex.util';
+import { distinctCallers, planRollupWindow, rawRanges, readRollupCoverage, rollupDays } from './elysium-rollup.reader';
 import { errorCategory } from './elysium-analytics.util';
+import { ELYSIUM_GENESIS } from './elysium-ingest.util';
+import { closedRollupDays, firstKeptDay, rollupKeepDays } from './elysium-rollup.util';
 
 const CACHE_TTL_S = 60;
 /** How long a computed value is kept to be served while it refreshes. */
@@ -43,6 +47,11 @@ export interface MethodRef {
  * Elysium analytics computed in SQL over the ingested tables (historical DB).
  * Spam txs are excluded unless a metric says otherwise. Days are UTC and the
  * current day is flagged `partial: true`. Each result is cached 60s in Redis.
+ *
+ * The windows wider than a day read the whole UTC days that are built from the
+ * day rollups and the rest of the window (its partial first day, today, a day
+ * not built yet) from elysium_tx: see elysium-rollup.util. The split changes
+ * how much is read, never a figure.
  */
 export class ElysiumAnalyticsService {
   private static instance: ElysiumAnalyticsService;
@@ -104,11 +113,37 @@ export class ElysiumAnalyticsService {
   // 1. status
   // ---------------------------------------------------------------------------
 
-  public getStatus(): Promise<{ streams: Array<Record<string, unknown>> }> {
-    return this.cachedFresh('status', 'v1', async () => {
+  /**
+   * The ingestion streams, and where the day rollups stand: how many days are
+   * built, the span they cover, how many wait for a (re)build, the builder's
+   * last error, and what the rollup tables and the transaction table weigh on
+   * disk (indexes included). The only view of the rollups from outside the
+   * database.
+   */
+  public getStatus(): Promise<{ streams: Array<Record<string, unknown>>; rollups: Record<string, unknown> }> {
+    return this.cachedFresh('status', 'v2', async () => {
+      const [all, days, sizes] = await Promise.all([
+        ElysiumIngestRepository.getInstance().listStates(),
+        prismaHistoricalRead.$queryRaw<Array<{ day: string; built_ms: number | null }>>`
+          SELECT day::text AS day, (extract(epoch FROM built_at) * 1000)::float8 AS built_ms
+          FROM elysium_day_rollup
+          WHERE built_at IS NOT NULL AND NOT dirty AND day >= ${firstKeptDay(new Date(), rollupKeepDays())}::date
+          ORDER BY day`.catch(() => []),
+        prismaHistoricalRead.$queryRaw<Array<{ rollups: number; tx: number }>>`
+          SELECT (pg_total_relation_size('elysium_call_day') + pg_total_relation_size('elysium_caller_day')
+                  + pg_total_relation_size('elysium_caller_set') + pg_total_relation_size('elysium_method_sender_day')
+                  + pg_total_relation_size('elysium_day_rollup'))::float8 AS rollups,
+                 pg_total_relation_size('elysium_tx')::float8 AS tx`.catch(() => []),
+      ]);
       // Markers (a one-time rebuild, a position in a listing) are not streams: they have no lag to show.
-      const rows = (await ElysiumIngestRepository.getInstance().listStates()).filter((r) => !ELYSIUM_STATE_MARKERS.has(r.stream));
+      const rows = all.filter((r) => !ELYSIUM_STATE_MARKERS.has(r.stream));
+      const builder = all.find((r) => r.stream === 'rollup');
       const now = Date.now();
+      const built = new Set(days.map((d) => d.day.slice(0, 10)));
+      // Every closed day the builder is due to have built, whether it has a row yet or not.
+      const txCursor = all.find((r) => r.stream === 'tx')?.cursor ?? null;
+      const due = closedRollupDays(txCursor, new Date(now), ELYSIUM_GENESIS);
+      const lastBuilt = days.reduce<number | null>((m, d) => (d.built_ms !== null && (m === null || d.built_ms > m) ? d.built_ms : m), null);
       return {
         streams: rows.map((r) => ({
           stream: r.stream,
@@ -118,6 +153,17 @@ export class ElysiumAnalyticsService {
           lastError: errorCategory(r.lastError),
           lagSeconds: r.cursor ? Math.max(0, Math.round((now - r.cursor.getTime()) / 1000)) : null,
         })),
+        rollups: {
+          builtDays: built.size,
+          waitingDays: due.filter((day) => !built.has(day)).length,
+          firstDay: days[0]?.day.slice(0, 10) ?? null,
+          lastDay: days[days.length - 1]?.day.slice(0, 10) ?? null,
+          lastBuiltAt: iso(lastBuilt),
+          keepDays: rollupKeepDays(),
+          sizeBytes: sizes[0] ? Number(sizes[0].rollups) : null,
+          txTableBytes: sizes[0] ? Number(sizes[0].tx) : null,
+          lastError: errorCategory(builder?.lastError ?? null),
+        },
       };
     });
   }
@@ -208,67 +254,104 @@ export class ElysiumAnalyticsService {
       const now = new Date();
       const curStart = new Date(now.getTime() - spanMs);
       const prevStart = new Date(now.getTime() - 2 * spanMs);
+      const coverage = await readRollupCoverage(now);
+      const cur = planRollupWindow(curStart, now, coverage);
+      const prev = planRollupWindow(prevStart, curStart, coverage);
+      const curRaw = rawRanges(Prisma.sql`t.block_time`, cur);
 
-      const rows = await prismaHistoricalRead.$queryRaw<
-        Array<{
-          address: string;
-          txs: number;
-          callers: number;
-          gas_used: string;
-          txs_prev: number | null;
-          callers_prev: number | null;
-          deployer: string | null;
-          deployed_at: number | null;
-          name: string | null;
-          symbol: string | null;
-          is_token: boolean;
-        }>
-      >`
-        WITH cur AS (
-          SELECT t.to_addr AS address, count(*)::int AS txs,
-                 count(DISTINCT t.from_addr)::int AS callers, sum(t.gas_used)::text AS gas_used
-          FROM elysium_tx t
-          WHERE t.block_time >= ${ts(curStart)}::timestamptz AND t.block_time < ${ts(now)}::timestamptz AND NOT t.is_spam
-            AND t.to_addr IS NOT NULL
-            AND (t.to_addr LIKE ${PRECOMPILE_LIKE}
-                 OR EXISTS (SELECT 1 FROM elysium_contract c WHERE c.address = t.to_addr)
-                 OR EXISTS (SELECT 1 FROM elysium_token k WHERE k.address = t.to_addr))
-          GROUP BY t.to_addr
-          ORDER BY txs DESC, address
-          LIMIT 25
-        ),
-        prev AS (
-          SELECT t.to_addr AS address, count(*)::int AS txs, count(DISTINCT t.from_addr)::int AS callers
-          FROM elysium_tx t
-          WHERE t.to_addr IN (SELECT address FROM cur)
-            AND t.block_time >= ${ts(prevStart)}::timestamptz AND t.block_time < ${ts(curStart)}::timestamptz AND NOT t.is_spam
-          GROUP BY t.to_addr
+      const top = await prismaHistoricalRead.$queryRaw<Array<{ address: string; txs: number; gas_used: string }>>`
+        WITH agg AS (
+          -- Rollup rows and raw rows go to one aggregation: grouping each side first, then
+          -- again together, sorted the rollup rows twice.
+          SELECT address, sum(txs)::int AS txs, sum(gas)::text AS gas_used FROM (
+            SELECT d.to_addr AS address, d.txs, d.gas_used AS gas
+            FROM elysium_call_day d WHERE d.day = ANY(${rollupDays(cur)})
+            UNION ALL
+            SELECT t.to_addr, 1, t.gas_used
+            FROM elysium_tx t
+            WHERE ${curRaw} AND NOT t.is_spam AND t.to_addr IS NOT NULL
+          ) u GROUP BY address
         )
-        SELECT cur.address, cur.txs, cur.callers, cur.gas_used,
-               prev.txs AS txs_prev, prev.callers AS callers_prev,
-               c.deployer, (extract(epoch FROM c.deployed_at) * 1000)::float8 AS deployed_at, tk.name, tk.symbol, (tk.address IS NOT NULL) AS is_token
-        FROM cur
-        LEFT JOIN prev ON prev.address = cur.address
-        LEFT JOIN elysium_contract c ON c.address = cur.address
-        LEFT JOIN elysium_token tk ON tk.address = cur.address
-        ORDER BY cur.txs DESC, cur.address`;
+        SELECT a.address, a.txs, a.gas_used FROM agg a
+        WHERE a.address LIKE ${PRECOMPILE_LIKE}
+           OR EXISTS (SELECT 1 FROM elysium_contract c WHERE c.address = a.address)
+           OR EXISTS (SELECT 1 FROM elysium_token k WHERE k.address = a.address)
+        ORDER BY a.txs DESC, a.address
+        LIMIT 25`;
 
-      const addrs = rows.map((r) => r.address);
-      const [methodRows, names] = await Promise.all([
+      const addrs = top.map((r) => r.address);
+      const [meta, prevTxs, callers, callersPrev, methodRows, names] = await Promise.all([
+        addrs.length
+          ? prismaHistoricalRead.$queryRaw<
+              Array<{
+                address: string;
+                deployer: string | null;
+                deployed_at: number | null;
+                name: string | null;
+                symbol: string | null;
+                is_token: boolean;
+              }>
+            >`
+              SELECT a.address, c.deployer, (extract(epoch FROM c.deployed_at) * 1000)::float8 AS deployed_at,
+                     tk.name, tk.symbol, (tk.address IS NOT NULL) AS is_token
+              FROM unnest(${addrs}::text[]) AS a(address)
+              LEFT JOIN elysium_contract c ON c.address = a.address
+              LEFT JOIN elysium_token tk ON tk.address = a.address`
+          : Promise.resolve([]),
+        addrs.length
+          ? prismaHistoricalRead.$queryRaw<Array<{ address: string; txs: number }>>`
+              SELECT address, sum(txs)::int AS txs FROM (
+                SELECT d.to_addr AS address, sum(d.txs)::bigint AS txs
+                FROM elysium_call_day d
+                WHERE d.day = ANY(${rollupDays(prev)}) AND d.to_addr = ANY(${addrs}::text[])
+                GROUP BY d.to_addr
+                UNION ALL
+                SELECT t.to_addr, count(*)::bigint
+                FROM elysium_tx t
+                WHERE t.to_addr = ANY(${addrs}::text[]) AND ${rawRanges(Prisma.sql`t.block_time`, prev)} AND NOT t.is_spam
+                GROUP BY t.to_addr
+              ) u GROUP BY address`
+          : Promise.resolve([]),
+        distinctCallers(addrs, curStart, now, coverage),
+        distinctCallers(addrs, prevStart, curStart, coverage),
         addrs.length
           ? prismaHistoricalRead.$queryRaw<Array<{ address: string; method_id: string | null; txs: number }>>`
               SELECT address, method_id, txs FROM (
-                SELECT t.to_addr AS address, t.method_id, count(*)::int AS txs,
-                       row_number() OVER (PARTITION BY t.to_addr ORDER BY count(*) DESC, t.method_id) AS rk
-                FROM elysium_tx t
-                WHERE t.to_addr = ANY(${addrs}::text[])
-                  AND t.block_time >= ${ts(curStart)}::timestamptz AND t.block_time < ${ts(now)}::timestamptz
-                  AND NOT t.is_spam
-                GROUP BY t.to_addr, t.method_id
-              ) x WHERE rk <= 3 ORDER BY address, txs DESC`
+                SELECT address, method_id, sum(txs)::int AS txs,
+                       row_number() OVER (PARTITION BY address ORDER BY sum(txs) DESC, method_id) AS rk
+                FROM (
+                  SELECT d.to_addr AS address, NULLIF(d.method_id, '') AS method_id, sum(d.txs)::bigint AS txs
+                  FROM elysium_call_day d
+                  WHERE d.day = ANY(${rollupDays(cur)}) AND d.to_addr = ANY(${addrs}::text[])
+                  GROUP BY 1, 2
+                  UNION ALL
+                  SELECT t.to_addr, t.method_id, count(*)::bigint
+                  FROM elysium_tx t
+                  WHERE t.to_addr = ANY(${addrs}::text[]) AND ${curRaw} AND NOT t.is_spam
+                  GROUP BY 1, 2
+                ) u GROUP BY address, method_id
+              ) x WHERE rk <= 3 ORDER BY address, txs DESC, method_id`
           : Promise.resolve([]),
         this.methodNames(),
       ]);
+      const metaBy = new Map(meta.map((m) => [m.address, m]));
+      const prevBy = new Map(prevTxs.map((r) => [r.address, r.txs]));
+      const rows = top.map((r) => {
+        const m = metaBy.get(r.address);
+        return {
+          address: r.address,
+          txs: r.txs,
+          callers: callers.get(r.address) ?? 0,
+          gas_used: r.gas_used,
+          txs_prev: prevBy.get(r.address) ?? null,
+          callers_prev: callersPrev.get(r.address) ?? null,
+          deployer: m?.deployer ?? null,
+          deployed_at: m?.deployed_at ?? null,
+          name: m?.name ?? null,
+          symbol: m?.symbol ?? null,
+          is_token: m?.is_token ?? false,
+        };
+      });
       const methodsBy = new Map<string, Array<MethodRef & { txs: number }>>();
       for (const m of methodRows) {
         const list = methodsBy.get(m.address) ?? [];
@@ -502,7 +585,8 @@ export class ElysiumAnalyticsService {
    * apart as "system" but still listed; plain transfers to EOAs count in the
    * total only. Fees include the parent
    * posting part (fee_wei is the full receipt fee). Cached 5 min (24h), 10 min
-   * (7d) and 30 min (30d): the 30d window scans every tx of the month.
+   * (7d) and 30 min (30d). The built days of the window come from the day
+   * rollups; the durations date from when 30d read every tx of the month.
    */
   public getFees(window: FeesWindow): Promise<unknown> {
     return cacheService.getOrRefresh(
@@ -512,16 +596,22 @@ export class ElysiumAnalyticsService {
         const now = new Date();
         const start = new Date(now.getTime() - spanMs);
         const prevStart = new Date(now.getTime() - 2 * spanMs);
+        const coverage = await readRollupCoverage(now);
+        const cur = planRollupWindow(start, now, coverage);
+        const prevPlan = planRollupWindow(prevStart, start, coverage);
 
         const rows = await prismaHistoricalRead.$queryRaw<
           Array<{ kind: string; key: string | null; fees: number; txs: number; gas: string | null; n: number }>
         >`
           WITH f AS (
-            SELECT t.to_addr AS address, sum(t.fee_wei) AS fee, count(*)::int AS txs, sum(t.gas_used) AS gas
-            FROM elysium_tx t
-            WHERE t.block_time >= ${ts(start)}::timestamptz AND t.block_time < ${ts(now)}::timestamptz
-              AND NOT t.is_spam AND t.to_addr IS NOT NULL
-            GROUP BY t.to_addr
+            SELECT address, sum(fee) AS fee, sum(txs)::int AS txs, sum(gas) AS gas FROM (
+              SELECT d.to_addr AS address, d.fee_wei AS fee, d.txs, d.gas_used AS gas
+              FROM elysium_call_day d WHERE d.day = ANY(${rollupDays(cur)})
+              UNION ALL
+              SELECT t.to_addr, t.fee_wei, 1, t.gas_used
+              FROM elysium_tx t
+              WHERE ${rawRanges(Prisma.sql`t.block_time`, cur)} AND NOT t.is_spam AND t.to_addr IS NOT NULL
+            ) u GROUP BY address
           ),
           k AS (
             SELECT f.*, c.deployer
@@ -561,20 +651,24 @@ export class ElysiumAnalyticsService {
                 LEFT JOIN elysium_contract c ON c.address = a.address
                 LEFT JOIN elysium_token tk ON tk.address = a.address`,
               prismaHistoricalRead.$queryRaw<Array<{ address: string; fees: number }>>`
-                SELECT to_addr AS address, (sum(fee_wei) / 1e18)::float8 AS fees FROM elysium_tx
-                WHERE to_addr = ANY(${addrs}::text[]) AND NOT is_spam
-                  AND block_time >= ${ts(prevStart)}::timestamptz AND block_time < ${ts(start)}::timestamptz
-                GROUP BY to_addr`,
-              prismaHistoricalRead.$queryRaw<Array<{ address: string; callers: number }>>`
-                SELECT to_addr AS address, count(DISTINCT from_addr)::int AS callers FROM elysium_tx
-                WHERE to_addr = ANY(${addrs}::text[]) AND NOT is_spam
-                  AND block_time >= ${ts(start)}::timestamptz AND block_time < ${ts(now)}::timestamptz
-                GROUP BY to_addr`,
+                SELECT address, (sum(fee) / 1e18)::float8 AS fees FROM (
+                  SELECT d.to_addr AS address, sum(d.fee_wei) AS fee
+                  FROM elysium_call_day d
+                  WHERE d.day = ANY(${rollupDays(prevPlan)}) AND d.to_addr = ANY(${addrs}::text[])
+                  GROUP BY d.to_addr
+                  UNION ALL
+                  SELECT t.to_addr, sum(t.fee_wei)
+                  FROM elysium_tx t
+                  WHERE t.to_addr = ANY(${addrs}::text[]) AND NOT t.is_spam
+                    AND ${rawRanges(Prisma.sql`t.block_time`, prevPlan)}
+                  GROUP BY t.to_addr
+                ) u GROUP BY address`,
+              distinctCallers(addrs, start, now, coverage),
             ])
-          : [[], [], []];
+          : [[], [], new Map<string, number>()];
         const metaBy = new Map(meta.map((m) => [m.address, m]));
         const prevBy = new Map(prev.map((p) => [p.address, num(p.fees)]));
-        const callersBy = new Map(callers.map((c) => [c.address, c.callers]));
+        const callersBy = callers;
 
         const totalFees = num(total?.fees);
         const pct = (v: number) => (totalFees > 0 ? v / totalFees : 0);
@@ -624,7 +718,7 @@ export class ElysiumAnalyticsService {
           })),
         };
       },
-      // The window sets the scan size: ~0.5M txs a day, so 30d reads ~15M rows.
+      // Longer for the wider windows: a 30-day figure moves little in half an hour.
       window === '30d' ? 1800 : window === '7d' ? 600 : 300,
       24 * 3600
     );
@@ -647,17 +741,24 @@ export class ElysiumAnalyticsService {
     return this.cached('economics', `d${days}`, async () => {
       const now = new Date();
       const { keys, start } = this.rangeStart(now, days);
+      // Up to the end of today: a built day is one row, the others are counted from the raw table.
+      const end = new Date(new Date(`${keys[keys.length - 1]}T00:00:00Z`).getTime() + DAY_MS);
+      const plan = planRollupWindow(start, end, await readRollupCoverage(now));
 
       const rows = await prismaHistoricalRead.$queryRaw<
         Array<{ day: string; txs: number; spam: number; failed: number; bridge: number; fees: number }>
       >`
-        SELECT (block_time AT TIME ZONE 'UTC')::date::text AS day,
-               count(*) FILTER (WHERE NOT is_spam)::int AS txs,
-               count(*) FILTER (WHERE is_spam)::int AS spam,
-               count(*) FILTER (WHERE NOT is_spam AND NOT success)::int AS failed,
-               count(*) FILTER (WHERE NOT is_spam AND tx_type IN ('0x64', '0x68', '0x69'))::int AS bridge,
-               (COALESCE(sum(fee_wei), 0) / 1e18)::float8 AS fees
-        FROM elysium_tx WHERE block_time >= ${ts(start)}::timestamptz
+        SELECT r.day::text AS day, r.txs, r.spam_txs AS spam, r.failed_txs AS failed, r.bridge_txs AS bridge,
+               (r.fee_wei / 1e18)::float8 AS fees
+        FROM elysium_day_rollup r WHERE r.day = ANY(${rollupDays(plan)})
+        UNION ALL
+        SELECT (t.block_time AT TIME ZONE 'UTC')::date::text AS day,
+               count(*) FILTER (WHERE NOT t.is_spam)::int AS txs,
+               count(*) FILTER (WHERE t.is_spam)::int AS spam,
+               count(*) FILTER (WHERE NOT t.is_spam AND NOT t.success)::int AS failed,
+               count(*) FILTER (WHERE NOT t.is_spam AND t.tx_type IN ('0x64', '0x68', '0x69'))::int AS bridge,
+               (COALESCE(sum(t.fee_wei), 0) / 1e18)::float8 AS fees
+        FROM elysium_tx t WHERE ${rawRanges(Prisma.sql`t.block_time`, plan)}
         GROUP BY 1`;
 
       const byDay = new Map(
@@ -727,33 +828,59 @@ export class ElysiumAnalyticsService {
       const spanMs = window === '7d' ? 7 * DAY_MS : DAY_MS;
       const now = new Date();
       const start = new Date(now.getTime() - spanMs);
+      // One split for the whole view: a day is taken from the rollups only if its sender
+      // lists are there too, so the counts and the distinct senders cover the same rows.
+      const plan = planRollupWindow(start, now, await readRollupCoverage(now), 'senders');
+      const raw = rawRanges(Prisma.sql`t.block_time`, plan);
       const [rows, totals, names, resolved] = await Promise.all([
         // Top selectors first, then distinct senders / contracts via two-level
         // hash aggregates (count(DISTINCT) per group sorts and takes ~40s here).
+        // The raw part of the window is read once (`edge`) and shared by the three.
         prismaHistoricalRead.$queryRaw<Array<{ method_id: string; txs: number; senders: number; contracts: number }>>`
-          WITH base AS (
-            SELECT method_id, from_addr, to_addr FROM elysium_tx
-            WHERE block_time >= ${ts(start)}::timestamptz AND block_time < ${ts(now)}::timestamptz
-              AND NOT is_spam AND to_addr IS NOT NULL AND method_id IS NOT NULL
+          WITH edge AS MATERIALIZED (
+            SELECT t.method_id, t.from_addr, t.to_addr FROM elysium_tx t
+            WHERE ${raw} AND NOT t.is_spam AND t.to_addr IS NOT NULL AND t.method_id IS NOT NULL
           ),
-          top AS (SELECT method_id, count(*)::int AS txs FROM base GROUP BY 1 ORDER BY txs DESC, method_id LIMIT 25),
+          top AS (
+            SELECT method_id, sum(txs)::int AS txs FROM (
+              SELECT d.method_id, d.txs
+              FROM elysium_call_day d WHERE d.day = ANY(${rollupDays(plan)}) AND d.method_id <> ''
+              UNION ALL
+              SELECT e.method_id, 1 FROM edge e
+            ) u GROUP BY method_id ORDER BY 2 DESC, method_id LIMIT 25
+          ),
           s AS (
-            SELECT method_id, count(*)::int AS n
-            FROM (SELECT DISTINCT b.method_id, b.from_addr FROM base b JOIN top USING (method_id)) x GROUP BY 1
+            SELECT method_id, count(*)::int AS n FROM (
+              SELECT p.method_id, p.from_addr
+              FROM elysium_method_sender_day p JOIN top USING (method_id)
+              WHERE p.day = ANY(${rollupDays(plan)})
+              UNION
+              SELECT e.method_id, e.from_addr FROM edge e JOIN top USING (method_id)
+            ) x GROUP BY 1
           ),
           c AS (
-            SELECT method_id, count(*)::int AS n
-            FROM (SELECT DISTINCT b.method_id, b.to_addr FROM base b JOIN top USING (method_id)) x GROUP BY 1
+            SELECT method_id, count(*)::int AS n FROM (
+              SELECT d.method_id, d.to_addr
+              FROM elysium_call_day d JOIN top USING (method_id)
+              WHERE d.day = ANY(${rollupDays(plan)})
+              UNION
+              SELECT e.method_id, e.to_addr FROM edge e JOIN top USING (method_id)
+            ) x GROUP BY 1
           )
           SELECT top.method_id, top.txs, COALESCE(s.n, 0) AS senders, COALESCE(c.n, 0) AS contracts
           FROM top LEFT JOIN s USING (method_id) LEFT JOIN c USING (method_id)
           ORDER BY top.txs DESC, top.method_id`,
         prismaHistoricalRead.$queryRaw<Array<{ calls: number; transfers: number; creations: number }>>`
-          SELECT count(*) FILTER (WHERE to_addr IS NOT NULL AND method_id IS NOT NULL)::int AS calls,
-                 count(*) FILTER (WHERE to_addr IS NOT NULL AND method_id IS NULL)::int AS transfers,
-                 count(*) FILTER (WHERE to_addr IS NULL)::int AS creations
-          FROM elysium_tx
-          WHERE block_time >= ${ts(start)}::timestamptz AND block_time < ${ts(now)}::timestamptz AND NOT is_spam`,
+          SELECT sum(calls)::int AS calls, sum(transfers)::int AS transfers, sum(creations)::int AS creations FROM (
+            SELECT r.calls::bigint AS calls, r.transfers::bigint AS transfers, r.creations::bigint AS creations
+            FROM elysium_day_rollup r WHERE r.day = ANY(${rollupDays(plan)})
+            UNION ALL
+            SELECT count(*) FILTER (WHERE t.to_addr IS NOT NULL AND t.method_id IS NOT NULL)::bigint,
+                   count(*) FILTER (WHERE t.to_addr IS NOT NULL AND t.method_id IS NULL)::bigint,
+                   count(*) FILTER (WHERE t.to_addr IS NULL)::bigint
+            FROM elysium_tx t
+            WHERE ${raw} AND NOT t.is_spam
+          ) u`,
         this.methodNames(),
         prismaHistoricalRead.$queryRaw<Array<{ looked_up: number; found: number }>>`
           SELECT count(*)::int AS looked_up, count(signature)::int AS found FROM elysium_method_sig`,
@@ -1103,25 +1230,40 @@ export class ElysiumAnalyticsService {
   public getContract(address: string): Promise<unknown> {
     const a = address.toLowerCase();
     return this.cachedFresh('contract', a, async () => {
-      const since7d = new Date(Date.now() - 7 * DAY_MS);
-      const [dep, token, usage, allTime, methods, asPool, asFactory, inPools, names, launch] = await Promise.all([
+      const now = new Date();
+      const since7d = new Date(now.getTime() - 7 * DAY_MS);
+      const coverage = await readRollupCoverage(now);
+      const week = planRollupWindow(since7d, now, coverage);
+      const weekRaw = rawRanges(Prisma.sql`t.block_time`, week);
+      const [dep, token, usage, callers7d, allTime, methods, asPool, asFactory, inPools, names, launch] = await Promise.all([
         prismaHistoricalRead.$queryRaw<Array<{ deployer: string; deploy_tx: string; deployed_at: number; block_number: bigint }>>`
           SELECT deployer, deploy_tx, (extract(epoch FROM deployed_at) * 1000)::float8 AS deployed_at, block_number
           FROM elysium_contract WHERE address = ${a}`,
         prismaHistoricalRead.$queryRaw<Array<{ standard: string; name: string | null; symbol: string | null; decimals: number | null; origin: string | null; transfer_count: bigint }>>`
           SELECT standard, name, symbol, decimals, origin, transfer_count FROM elysium_token WHERE address = ${a}`,
-        prismaHistoricalRead.$queryRaw<Array<{ txs: number; callers: number; failed: number }>>`
-          SELECT count(*)::int AS txs, count(DISTINCT from_addr)::int AS callers,
-                 count(*) FILTER (WHERE NOT success)::int AS failed
-          FROM elysium_tx WHERE to_addr = ${a} AND block_time >= ${ts(since7d)}::timestamptz AND NOT is_spam`,
+        prismaHistoricalRead.$queryRaw<Array<{ txs: number; failed: number }>>`
+          SELECT COALESCE(sum(txs), 0)::int AS txs, COALESCE(sum(failed), 0)::int AS failed FROM (
+            SELECT sum(d.txs)::bigint AS txs, sum(d.failed)::bigint AS failed
+            FROM elysium_call_day d WHERE d.day = ANY(${rollupDays(week)}) AND d.to_addr = ${a}
+            UNION ALL
+            SELECT count(*)::bigint, count(*) FILTER (WHERE NOT t.success)::bigint
+            FROM elysium_tx t WHERE t.to_addr = ${a} AND ${weekRaw} AND NOT t.is_spam
+          ) u`,
+        distinctCallers([a], since7d, now, coverage),
         // First and last call through the (to_addr, block_time) index: an all-time count is too slow on busy contracts.
         prismaHistoricalRead.$queryRaw<Array<{ first: number | null; last: number | null }>>`
           SELECT (SELECT (extract(epoch FROM block_time) * 1000)::float8 FROM elysium_tx WHERE to_addr = ${a} ORDER BY block_time ASC LIMIT 1) AS first,
                  (SELECT (extract(epoch FROM block_time) * 1000)::float8 FROM elysium_tx WHERE to_addr = ${a} ORDER BY block_time DESC LIMIT 1) AS last`,
         prismaHistoricalRead.$queryRaw<Array<{ method_id: string | null; txs: number }>>`
-          SELECT method_id, count(*)::int AS txs FROM elysium_tx
-          WHERE to_addr = ${a} AND block_time >= ${ts(since7d)}::timestamptz AND NOT is_spam
-          GROUP BY 1 ORDER BY txs DESC LIMIT 8`,
+          SELECT method_id, sum(txs)::int AS txs FROM (
+            SELECT NULLIF(d.method_id, '') AS method_id, sum(d.txs)::bigint AS txs
+            FROM elysium_call_day d WHERE d.day = ANY(${rollupDays(week)}) AND d.to_addr = ${a}
+            GROUP BY 1
+            UNION ALL
+            SELECT t.method_id, count(*)::bigint
+            FROM elysium_tx t WHERE t.to_addr = ${a} AND ${weekRaw} AND NOT t.is_spam
+            GROUP BY 1
+          ) u GROUP BY method_id ORDER BY 2 DESC, method_id LIMIT 8`,
         prismaHistoricalRead.$queryRaw<Array<{ factory: string; version: string; token0: string; token1: string; fee: number | null }>>`
           SELECT factory, version, token0, token1, fee FROM elysium_dex_pool WHERE pool = ${a}`,
         prismaHistoricalRead.$queryRaw<Array<{ pools: number; version: string | null }>>`
@@ -1180,7 +1322,7 @@ export class ElysiumAnalyticsService {
           : null,
         usage: {
           txs7d: usage[0]?.txs ?? 0,
-          callers7d: usage[0]?.callers ?? 0,
+          callers7d: callers7d.get(a) ?? 0,
           failed7d: usage[0]?.failed ?? 0,
           firstCall: iso(allTime[0]?.first ?? null),
           lastCall: iso(allTime[0]?.last ?? null),

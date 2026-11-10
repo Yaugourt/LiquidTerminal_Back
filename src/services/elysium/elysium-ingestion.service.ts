@@ -9,6 +9,7 @@ import { rawLogger } from '../../utils/logger';
 import { ElysiumIngestRepository, ElysiumStream } from '../../repositories/prisma/prisma.elysium.repository';
 import { ELYSIUM_PROJECTS } from '../../constants/elysium-projects';
 import { BLOCK_BATCH, ElysiumRpcLogs } from './elysium-rpc-logs';
+import { ElysiumRollupService } from './elysium-rollup.service';
 import {
   dedupeBy,
   ELYSIUM_GENESIS,
@@ -177,6 +178,8 @@ const LAUNCH_STATS_BATCH = 60;
 const LAUNCH_STATS_PRIORITY = 40;
 /** Holder page size: launch tokens have far fewer holders, a full page falls back to the detail count. */
 const LAUNCH_HOLDERS_LIMIT = 1000;
+/** Day rollups: wait after a pass that failed or found the builder's lock taken. */
+const ROLLUP_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
 /** Holder snapshots for the top N tokens of each ranked list only. */
 const TOKEN_STATS_TOP_N = 25;
 const TOKEN_STATS_MAX_AGE_S = 14 * 60;
@@ -218,6 +221,8 @@ class IngestStoppedError extends Error {
  * - methods: resolves the top 200 called selectors via a public signature
  *   database every 30 min (cached permanently, misses retried daily).
  * - tokenstats: holder counts (/tokens/{address}) for the top tokens only.
+ * - rollup: not a provider stream. Sums each closed UTC day of elysium_tx into the day
+ *   rollups the wide analytics windows read (ElysiumRollupService).
  *
  * Provider lag: no stream moves its cursor past the last block the provider
  * has indexed (its /stats last_block_time), so an indexer outage leaves no
@@ -239,6 +244,7 @@ export class ElysiumIngestionService {
   private readonly repo = ElysiumIngestRepository.getInstance();
   private readonly throttle = new CallThrottle();
   private readonly rpcLogs = ElysiumRpcLogs.getInstance();
+  private readonly rollups = ElysiumRollupService.getInstance();
   /** Last read of the provider's head, null until the first successful read. */
   private head: { at: number; value: Date | null } | null = null;
 
@@ -286,6 +292,7 @@ export class ElysiumIngestionService {
     this.schedule('tokenstats', 90_000, () => this.tokenStatsTick());
     this.schedule('launchpad', 25_000, () => this.launchpadTick());
     this.schedule('launchstats', 120_000, () => this.launchStatsTick());
+    if (ElysiumRollupService.isEnabled()) this.schedule('rollup', 60_000, () => this.rollups.tick());
     logDeduplicator.info('Elysium ingestion started');
   }
 
@@ -345,6 +352,7 @@ export class ElysiumIngestionService {
     if (stream === 'tokenstats') return TOKEN_STATS_INTERVAL_MS;
     if (stream === 'launchpad') return LAUNCHPAD_LIVE_INTERVAL_MS;
     if (stream === 'launchstats') return LAUNCH_STATS_INTERVAL_MS;
+    if (stream === 'rollup') return ROLLUP_RETRY_INTERVAL_MS;
     return TOKENS_INTERVAL_MS;
   }
 
