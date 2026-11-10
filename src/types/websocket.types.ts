@@ -174,6 +174,7 @@ export interface WSClient {
 export type WSInternalSubscriptionType =
   | 'liquidation'
   | 'l4book'
+  | 'elysium_blocks'
   | 'wallet_event'
   | 'liquidation_alert'
   | 'fill_alert'
@@ -230,6 +231,7 @@ export type WSEventType =
   | 'l4book_snapshot'
   | 'l4book_delta'
   | 'l4book_unavailable'
+  | 'elysium_blocks'
   | 'wallet_event'
   | 'liquidation_alert'
   | 'fill_alert'

@@ -7,6 +7,7 @@ import { LiquidationsWebSocketService } from '../services/liquidations/liquidati
 import { SSEManagerService } from '../services/liquidations/sse-manager.service';
 import { L4BookService } from '../services/orderbook/l4book.service';
 import { TwapLiveService } from '../services/twap/twap-live.service';
+import { ElysiumLiveService, type ElysiumLiveBlock } from '../services/elysium/elysium-live.service';
 import { AggregatedLiquidation } from '../types/liquidations.types';
 import { TwapLiveDelta } from '../types/twap-live.types';
 import { L4BookDeltaPayload, L4BookSnapshotPayload } from '../types/l4book.types';
@@ -78,6 +79,7 @@ export class InternalWebSocketServer {
   private static readonly SUBSCRIPTION_TYPES: ReadonlySet<string> = new Set([
     'liquidation',
     'l4book',
+    'elysium_blocks',
     'wallet_event',
     'liquidation_alert',
     'fill_alert',
@@ -113,6 +115,7 @@ export class InternalWebSocketServer {
   private sseManager: SSEManagerService | null = null;
   private l4BookService: L4BookService | null = null;
   private twapService: TwapLiveService | null = null;
+  private elysiumLive: ElysiumLiveService | null = null;
   /**
    * Sockets subscribed to `twap`: the 1 s delta goes to these only, and the
    * service is asked for deltas only while this set is not empty.
@@ -177,6 +180,13 @@ export class InternalWebSocketServer {
     // it only while somebody is subscribed (see attachTwap).
     this.twapService = TwapLiveService.getInstance();
 
+    // Elysium mainnet new blocks, streamed from the archive node's WS and
+    // fanned out to whoever is on the `elysium_blocks` channel. No-op unless a
+    // mainnet WS is configured (the service self-guards).
+    this.elysiumLive = ElysiumLiveService.getInstance();
+    this.elysiumLive.onBlocks((blocks) => this.broadcastElysiumBlocks(blocks));
+    this.elysiumLive.start();
+
     logDeduplicator.info('InternalWebSocketServer: Initialized', {
       path: '/ws',
       maxPayload: '64KB',
@@ -218,6 +228,10 @@ export class InternalWebSocketServer {
     // Drops the mirrored books and the upstream HypeDexer socket with them.
     this.l4BookService?.shutdown();
     this.l4BookService = null;
+
+    // Closes the Elysium archive WS and its flush timer.
+    this.elysiumLive?.stop();
+    this.elysiumLive = null;
 
     this.twapUnsubscribe?.();
     this.twapUnsubscribe = null;
@@ -649,6 +663,29 @@ export class InternalWebSocketServer {
    * Broadcast liquidations to all subscribed clients
    * Pre-serializes each message once to avoid redundant JSON.stringify per client.
    */
+  private broadcastElysiumBlocks(blocks: ElysiumLiveBlock[]): void {
+    if (!this.wss || blocks.length === 0) return;
+    const serialized = JSON.stringify({
+      type: 'elysium_blocks',
+      data: blocks,
+      timestamp: new Date().toISOString(),
+    } satisfies WSServerMessage);
+
+    for (const [ws, clientId] of this.clientsBySocket) {
+      // One client's failure must never stop delivery to the rest.
+      try {
+        const client = this.clients.get(clientId);
+        if (!client?.subscriptions.some((s) => s.type === 'elysium_blocks')) continue;
+        this.sendRawMessage(ws, serialized);
+      } catch (error) {
+        logDeduplicator.warn('InternalWebSocketServer: Elysium blocks broadcast failed for one client', {
+          clientId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   private broadcastLiquidations(liquidations: AggregatedLiquidation[]): void {
     if (!this.wss || liquidations.length === 0) return;
 
