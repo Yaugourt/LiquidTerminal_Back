@@ -76,15 +76,19 @@ function windowKey(prefix: string, window: RateWindow, nowS: number): string {
  *
  * Throws on any Redis failure so callers switch to the in-memory fallback —
  * swallowing it returned a count of 0, which let everything through.
+ *
+ * `cost` is what this request weighs in every window (1 unless the limiter
+ * counts something else than requests, see `createIpLimiter`).
  */
-async function countRequest(prefix: string, windows: readonly RateWindow[]): Promise<number[]> {
+async function countRequest(prefix: string, windows: readonly RateWindow[], cost = 1): Promise<number[]> {
   // Circuit open: don't queue on a wedged connection, use the fallback now.
   if (!redisService.isHealthy()) throw new Error('Redis circuit open');
   const now = Math.floor(Date.now() / 1000);
   const pipeline = redisService.getClient().pipeline();
   for (const window of windows) {
     const key = windowKey(prefix, window, now);
-    pipeline.incr(key);
+    if (cost === 1) pipeline.incr(key);
+    else pipeline.incrby(key, cost);
     pipeline.expire(key, window.seconds * 2);
   }
 
@@ -106,26 +110,27 @@ const inMemoryCounters = new Map<string, { count: number; resetAt: number }>();
 const FALLBACK_MAX_PER_SECOND = RATE_LIMITS.BURST_LIMIT.MAX_REQUESTS;
 const FALLBACK_MAX_IPS = 10000;
 
-/** One-second window per key; `maxPerSecond` is the limiter's own burst. */
-function checkInMemoryFallback(ip: string, maxPerSecond: number = FALLBACK_MAX_PER_SECOND): boolean {
+/** One-second window per key; `maxPerSecond` is the limiter's own burst, `cost` what this request weighs. */
+function checkInMemoryFallback(ip: string, maxPerSecond: number = FALLBACK_MAX_PER_SECOND, cost = 1): boolean {
   const now = Date.now();
   const counter = inMemoryCounters.get(ip);
 
   if (!counter || now > counter.resetAt) {
+    if (cost > maxPerSecond) return false;
     // Evict oldest if at capacity
     if (!inMemoryCounters.has(ip) && inMemoryCounters.size >= FALLBACK_MAX_IPS) {
       const firstKey = inMemoryCounters.keys().next().value;
       if (firstKey) inMemoryCounters.delete(firstKey);
     }
-    inMemoryCounters.set(ip, { count: 1, resetAt: now + 1000 });
+    inMemoryCounters.set(ip, { count: cost, resetAt: now + 1000 });
     return true;
   }
 
-  if (counter.count >= maxPerSecond) {
+  if (counter.count + cost > maxPerSecond) {
     return false;
   }
 
-  counter.count++;
+  counter.count += cost;
   return true;
 }
 
@@ -228,8 +233,17 @@ interface IpLimits {
  * budget of billed HypeDexer calls is read once on entry (peekUpstreamBudget)
  * and counted by the client gate (countUpstreamCall). Both paths below admit,
  * so the Redis-down fallback keeps the budget too.
+ *
+ * `cost` makes one request weigh more than 1 in both windows, for a route
+ * where a single request carries several units of work (a JSON-RPC batch). It
+ * is read after the body was validated; anything below 1 counts as 1.
  */
-function createIpLimiter(namespace: string, limits: IpLimits, what: string, options: { upstreamCaller?: boolean } = {}) {
+function createIpLimiter(
+  namespace: string,
+  limits: IpLimits,
+  what: string,
+  options: { upstreamCaller?: boolean; cost?: (req: Request) => number } = {}
+) {
   const windows: readonly RateWindow[] = [
     { name: 'burst', seconds: limits.BURST.WINDOW },
     { name: 'minute', seconds: limits.MINUTE.WINDOW },
@@ -244,8 +258,9 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string, opti
     }
     // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4.
     const key = rateLimitKeyForIp(ip);
+    const cost = options.cost ? Math.max(1, Math.trunc(options.cost(req)) || 1) : 1;
     try {
-      const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${key}`, windows);
+      const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${key}`, windows, cost);
       if (burstCount > limits.BURST.MAX_REQUESTS) {
         return sendLimitExceededResponse(res, `Too many ${what} requests per second`, limits.BURST.WINDOW);
       }
@@ -262,7 +277,7 @@ function createIpLimiter(namespace: string, limits: IpLimits, what: string, opti
       });
       // Fail-secure, same as the general limiter, at this limiter's own burst.
       // Distinct key namespace so the fallbacks don't share a counter.
-      if (checkInMemoryFallback(`${namespace}:${key}`, limits.BURST.MAX_REQUESTS)) {
+      if (checkInMemoryFallback(`${namespace}:${key}`, limits.BURST.MAX_REQUESTS, cost)) {
         await admit(req, res, next);
       } else {
         sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
@@ -288,6 +303,29 @@ export const addressLookupRateLimiter = createIpLimiter(
   },
   'address lookup',
   { upstreamCaller: true }
+);
+
+/**
+ * Elysium mainnet RPC proxy (`POST /elysium/rpc`): every JSON-RPC call is one
+ * call to the keyed archive node, so this counts calls, not requests: a batch
+ * of 20 weighs 20. The general limiter in front of it counts requests, and at
+ * 6,000 a minute a client sending full batches reached the node hundreds of
+ * thousands of times a minute.
+ *
+ * The builder tools send single calls: opening one makes about 7 to 15 of
+ * them at once (network parameters, token check: counted in the front's code,
+ * not measured in a browser), then a pending transaction is polled every 4 s.
+ * 50 a second lets a few people behind one IP open a tool together, and 1,200
+ * a minute is 20 calls a second sustained.
+ */
+export const elysiumRpcRateLimiter = createIpLimiter(
+  'elyrpc',
+  {
+    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_BURST', 50) },
+    MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_MINUTE', 1200) },
+  },
+  'Elysium RPC',
+  { cost: (req) => (Array.isArray(req.body) ? req.body.length : 1) }
 );
 
 /**
