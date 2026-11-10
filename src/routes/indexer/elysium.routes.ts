@@ -1,6 +1,6 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
-import { addressLookupRateLimiter, marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { addressLookupRateLimiter, marketRateLimiter, passthroughRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   elysiumStatsQuerySchema,
@@ -34,6 +34,12 @@ type QuerySchema = z.ZodObject<{ query: z.ZodTypeAny; params: z.ZodTypeAny }>;
  * query to get coerced values (validateGetRequest does not mutate req.query).
  * Logs use a fixed message + fixed code only, never the path/query/error text,
  * to keep logDeduplicator keys low-cardinality.
+ *
+ * The caller picks the cache key of every route here (limit, filters, network,
+ * address), and each miss is a billed HypeDexer call. So each route runs behind
+ * a limiter that makes the client the upstream caller, with its budget of
+ * billed calls: the general pass-through one, or `extraLimiter` (the tighter
+ * address-lookup one) when given.
  */
 function register<S extends QuerySchema>(
   path: string,
@@ -47,7 +53,7 @@ function register<S extends QuerySchema>(
   router.get(
     path,
     marketRateLimiter,
-    ...(extraLimiter ? [extraLimiter] : []),
+    extraLimiter ?? passthroughRateLimiter,
     validateGetRequest(schema),
     (async (req: Request, res: Response) => {
       try {

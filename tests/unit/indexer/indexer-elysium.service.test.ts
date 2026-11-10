@@ -64,4 +64,22 @@ describe('IndexerElysiumService cache keys', () => {
     expect(new Set(keys).size).toBe(5);
     expect(client.getBridgeReserves).toHaveBeenCalledWith({ route: 'native', only_unbacked: true });
   });
+
+  it('shares one entry between no network and network=testnet, and keeps mainnet apart', async () => {
+    const svc = IndexerElysiumService.getInstance();
+    await svc.getStats();
+    await svc.getStats({ network: 'testnet' });
+    await svc.getStats({ network: 'mainnet' });
+    await svc.getBridgeTransfers({ limit: 5 });
+    await svc.getBridgeTransfers({ limit: 5, network: 'testnet' });
+    await svc.getBridgeTransfers({ limit: 5, network: 'mainnet' });
+    expect(keyOf(0)).toBe('hypedexer:elysium:stats');
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(keyOf(2)).toBe('hypedexer:elysium:stats:{"network":"mainnet"}');
+    expect(keyOf(4)).toBe(keyOf(3));
+    expect(keyOf(5)).not.toBe(keyOf(3));
+    // The client still gets the network it was asked for: it picks the upstream path.
+    expect(client.getStats).toHaveBeenNthCalledWith(2, { network: 'testnet' });
+    expect(client.getStats).toHaveBeenNthCalledWith(3, { network: 'mainnet' });
+  });
 });

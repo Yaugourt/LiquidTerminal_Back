@@ -46,10 +46,13 @@ export class IndexerElysiumService {
     ttl: number,
     fetcher: () => Promise<unknown>
   ): Promise<unknown> {
+    // No `network` and `network=testnet` read the same upstream path: one
+    // entry for both, so the explicit form is not a second billed call.
+    const { network, ...rest } = (params ?? {}) as Record<string, unknown>;
     const key = buildHypedexerCacheKey(
       ELYSIUM_CACHE_DOMAIN,
       method,
-      params as Record<string, unknown> | undefined
+      network === 'testnet' ? rest : { ...rest, network }
     );
     return cacheService.getOrSet<unknown>(key, fetcher, ttl);
   }
