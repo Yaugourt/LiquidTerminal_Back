@@ -45,8 +45,13 @@ jest.mock('../../../src/services/elysium/elysium-analytics.service', () => ({
 // The ecosystem service opens the historical database at import time.
 const mockEcosystem = {
   getProjects: jest.fn().mockResolvedValue({ projects: [] }),
-  getLaunchpadTokens: jest.fn().mockResolvedValue({ tokens: [] }),
 };
+
+// So does the launchpad market service (its route has its own test).
+jest.mock('../../../src/services/elysium/elysium-launchpad-market.service', () => ({
+  ElysiumLaunchpadMarketService: { getInstance: () => ({ getPage: jest.fn().mockResolvedValue({ tokens: [] }) }) },
+  LaunchpadSearchBusyError: class extends Error {},
+}));
 
 jest.mock('../../../src/services/elysium/elysium-ecosystem.service', () => ({
   ElysiumEcosystemService: { getInstance: () => mockEcosystem },

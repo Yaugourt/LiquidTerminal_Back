@@ -3,7 +3,7 @@ import { cacheService } from '../../core/cache.service';
 import { redisService } from '../../core/redis.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { ELYSIUM_PROJECTS, ElysiumProject } from '../../constants/elysium-projects';
-import { CURVE_SALE_SUPPLY, HYPE_QUOTES, LAUNCH_TOTAL_SUPPLY, Launchpad, quoteDecimals, USD_QUOTES } from './elysium-launchpad.util';
+import { HYPE_QUOTES, quoteDecimals, USD_QUOTES } from './elysium-launchpad.util';
 
 const CACHE_TTL_S = 60;
 /** How long a computed value is kept to be served while it refreshes. */
@@ -17,7 +17,6 @@ const VERIFIED_TTL_MS = 6 * 3600_000;
 /** Etherscan-style API of the Kinetiq explorer (testnet), where Elysium contracts get verified. */
 const EXPLORER_API = 'https://elysium.kinetiq.xyz/api/';
 const EXPLORER_CONCURRENCY = 4;
-const TOKENS_KEY = 'elysium:ecosystem:launchpads:v1';
 const PERP_MARKETS_CACHE_KEY = 'perp:markets';
 const DAY_MS = 86_400_000;
 /** Length of the daily active-user series, in rolling 24h buckets ending now. */
@@ -78,30 +77,6 @@ interface AllTimeRow {
   first_at: number | null;
 }
 
-export interface ElysiumLaunchTokenView {
-  address: string;
-  symbol: string;
-  name: string;
-  launchpad: string;
-  creator: string | null;
-  priceUsd: number | null;
-  /** Percent change of the last price against the last price 24h ago. */
-  change24h: number | null;
-  volume24h: number | null;
-  txns24h: number;
-  traders24h: number;
-  holders: number | null;
-  /** Price x total supply (every launch mints 1B tokens). */
-  marketCap: number | null;
-  top10Pct: number | null;
-  devPct: number | null;
-  /** Bonding-curve progress in percent; null for tokens that trade in a pool. */
-  curvePct: number | null;
-  /** Unix seconds. */
-  bornAt: number;
-  graduated: boolean;
-}
-
 interface ActivityRow {
   slug: string;
   wallets: number;
@@ -111,34 +86,12 @@ interface ActivityRow {
   wallets_prev24: number;
 }
 
-interface TokenSqlRow {
-  token: string;
-  launchpad: string;
-  kind: string;
-  creator: string | null;
-  symbol: string | null;
-  name: string | null;
-  quote: string;
-  born: number;
-  graduated: boolean;
-  holders: number | null;
-  top10_pct: number | null;
-  dev_pct: number | null;
-  price: number | null;
-  price_24h: number | null;
-  vol24: string | null;
-  txns24: number | null;
-  traders24: number | null;
-  sold: string | null;
-}
-
 /**
  * Elysium ecosystem directory and launchpad token market, computed from our
  * own Elysium tables (historical DB, chain data indexed by HypeDexer).
  * - Projects: 7-day activity = non-spam user txs sent to the project's listed
  *   contracts; launchpads also get their traded volume and launches.
- * - Tokens: every launch decoded from the launchpads' own events, priced from
- *   their last trade, valued at the current HYPE price.
+ * (The launchpad token market itself is ElysiumLaunchpadMarketService.)
  * Served from the last value, refreshed in the background every 60s.
  */
 export class ElysiumEcosystemService {
@@ -153,10 +106,6 @@ export class ElysiumEcosystemService {
 
   public getProjects(): Promise<{ projects: ElysiumProjectView[]; activityGap: ElysiumActivityGap | null; computedAt: string }> {
     return cacheService.getOrRefresh(PROJECTS_KEY, () => this.computeProjects(), CACHE_TTL_S, KEEP_S);
-  }
-
-  public getLaunchpadTokens(): Promise<{ tokens: ElysiumLaunchTokenView[]; hypeUsd: number | null; computedAt: string }> {
-    return cacheService.getOrRefresh(TOKENS_KEY, () => this.computeTokens(), CACHE_TTL_S, KEEP_S);
   }
 
   private verifying = false;
@@ -382,79 +331,5 @@ export class ElysiumEcosystemService {
       SELECT min(block_time) AS start FROM elysium_tx_live WHERE block_time > ${txCursor.toISOString()}::timestamptz`;
     const start = rows[0]?.start ?? null;
     return { from: txCursor.toISOString(), to: start ? start.toISOString() : null };
-  }
-
-  private async computeTokens(): Promise<{ tokens: ElysiumLaunchTokenView[]; hypeUsd: number | null; computedAt: string }> {
-    const now = new Date();
-    const since = new Date(now.getTime() - DAY_MS).toISOString();
-
-    const [rows, hypeUsd] = await Promise.all([
-      prismaHistorical.$queryRaw<TokenSqlRow[]>`
-        WITH last AS (
-          SELECT DISTINCT ON (token) token, price FROM elysium_launch_trade
-          ORDER BY token, block_number DESC, log_index DESC
-        ), before AS (
-          SELECT DISTINCT ON (token) token, price FROM elysium_launch_trade
-          WHERE block_time < ${since}::timestamptz
-          ORDER BY token, block_number DESC, log_index DESC
-        ), day AS (
-          -- V4 swaps only see the router: the trader is the tx sender.
-          SELECT tr.token, sum(tr.quote_amount)::text AS vol24, count(*)::int AS txns24,
-                 count(DISTINCT coalesce(tr.trader, t.from_addr))::int AS traders24
-          FROM elysium_launch_trade tr
-          LEFT JOIN elysium_tx t ON t.tx_hash = tr.tx_hash AND tr.trader IS NULL
-          WHERE tr.block_time >= ${since}::timestamptz
-          GROUP BY tr.token
-        ), curve AS (
-          SELECT token, sum(CASE WHEN is_buy THEN token_amount ELSE -token_amount END)::text AS sold
-          FROM elysium_launch_trade WHERE venue = 'curve'
-          GROUP BY token
-        )
-        SELECT l.token, l.launchpad, l.kind, coalesce(l.creator, tx.from_addr) AS creator,
-               coalesce(l.symbol, tk.symbol) AS symbol, coalesce(l.name, tk.name) AS name, l.quote,
-               (extract(epoch FROM l.created_at))::float8 AS born, l.graduated_at IS NOT NULL AS graduated,
-               l.holders, l.top10_pct, l.dev_pct,
-               last.price, before.price AS price_24h, day.vol24, day.txns24, day.traders24, curve.sold
-        FROM elysium_launch l
-        LEFT JOIN elysium_tx tx ON tx.tx_hash = l.tx_hash
-        LEFT JOIN elysium_token tk ON tk.address = l.token
-        LEFT JOIN last ON last.token = l.token
-        LEFT JOIN before ON before.token = l.token
-        LEFT JOIN day ON day.token = l.token
-        LEFT JOIN curve ON curve.token = l.token`,
-      this.readHypeUsd(),
-    ]);
-
-    const tokens = rows.map((r): ElysiumLaunchTokenView => {
-      // HYPE-quoted launches are valued at the HYPE price, test-USDC ones at $1; anything else stays unpriced.
-      const usd = quoteUsd(r.quote, hypeUsd);
-      const priceUsd = r.price !== null && usd !== null ? r.price * usd : null;
-      const change24h = r.price !== null && r.price_24h ? (r.price / r.price_24h - 1) * 100 : null;
-      const sale = CURVE_SALE_SUPPLY[r.launchpad as Launchpad] ?? null;
-      let curvePct: number | null = null;
-      if (r.kind === 'curve' && sale) {
-        curvePct = r.graduated ? 100 : Math.max(0, Math.min(100, (Number(r.sold ?? 0) / Number(sale)) * 100));
-      }
-      return {
-        address: r.token,
-        symbol: r.symbol ?? r.token.slice(0, 8),
-        name: r.name ?? '',
-        launchpad: r.launchpad,
-        creator: r.creator,
-        priceUsd,
-        change24h,
-        volume24h: usd !== null ? quoteUnits(r.vol24, r.quote) * usd : null,
-        txns24h: r.txns24 ?? 0,
-        traders24h: r.traders24 ?? 0,
-        holders: r.holders,
-        marketCap: priceUsd !== null ? priceUsd * LAUNCH_TOTAL_SUPPLY : null,
-        top10Pct: r.top10_pct,
-        devPct: r.dev_pct,
-        curvePct,
-        bornAt: Math.round(r.born),
-        graduated: r.graduated,
-      };
-    });
-    return { tokens, hypeUsd, computedAt: now.toISOString() };
   }
 }

@@ -26,6 +26,7 @@ import { PortfolioMarginService } from '../services/portfolio-margin/portfolio-m
 import { HypurrSyncService } from '../services/project/hypurr-sync/hypurr-sync.service';
 import { ElysiumAnalyticsService } from '../services/elysium/elysium-analytics.service';
 import { ElysiumEcosystemService } from '../services/elysium/elysium-ecosystem.service';
+import { ElysiumLaunchpadMarketService } from '../services/elysium/elysium-launchpad-market.service';
 import { HLIndexerActiveUsersClient } from '../clients/hypedexer/rest/activeusers/activeusers.client';
 import { HLIndexerBuildersClient } from '../clients/hypedexer/rest/builders/builders-list-poller.client';
 import { LiquidationsIngestionService } from '../services/liquidations/liquidations.ingestion.service';
@@ -208,7 +209,7 @@ export class ClientInitializerService {
       // Warm the Elysium analytics caches once the server is up (served stale-while-revalidate after that).
       setTimeout(() => {
         void ElysiumEcosystemService.getInstance().getProjects().catch(() => undefined);
-        void ElysiumEcosystemService.getInstance().getLaunchpadTokens().catch(() => undefined);
+        void ElysiumLaunchpadMarketService.getInstance().warm().catch(() => undefined);
         void ElysiumAnalyticsService.getInstance().warmDefaults();
       }, 30_000).unref?.();
       logDeduplicator.info('Elysium ingestion service initialized successfully');

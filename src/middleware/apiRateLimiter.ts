@@ -306,6 +306,23 @@ export const addressLookupRateLimiter = createIpLimiter(
 );
 
 /**
+ * Launchpad token search (`GET /elysium/analytics/launchpads?q=`): every new
+ * text is a read of the launches that no cache has (a scan when the text is one
+ * or two letters). The page asks again 150 ms after the last keystroke, so one
+ * person typing makes at most ~7 requests a second; 20 a second and 300 a
+ * minute per IP leave room for several, and the service itself runs three
+ * searches at a time.
+ */
+export const elysiumSearchRateLimiter = createIpLimiter(
+  'elysearch',
+  {
+    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('ELYSIUM_SEARCH_RATE_LIMIT_BURST', 20) },
+    MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('ELYSIUM_SEARCH_RATE_LIMIT_MINUTE', 300) },
+  },
+  'launchpad search'
+);
+
+/**
  * Elysium mainnet RPC proxy (`POST /elysium/rpc`): every JSON-RPC call is one
  * call to the keyed archive node, so this counts calls, not requests: a batch
  * of 20 weighs 20. The general limiter in front of it counts requests, and at

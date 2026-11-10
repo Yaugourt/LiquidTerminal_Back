@@ -1,6 +1,6 @@
 import { Router, Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
-import { addressLookupRateLimiter, marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { addressLookupRateLimiter, elysiumSearchRateLimiter, marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
 import {
   elysiumAnalyticsAddressSchema,
@@ -8,16 +8,19 @@ import {
   elysiumAnalyticsMethodsSchema,
   elysiumAnalyticsDaysSchema,
   elysiumAnalyticsFeesSchema,
+  elysiumAnalyticsLaunchpadsSchema,
   elysiumAnalyticsStatusSchema,
 } from '../../schemas/elysium-analytics.schema';
 import { ElysiumAnalyticsService } from '../../services/elysium/elysium-analytics.service';
 import { ElysiumEcosystemService } from '../../services/elysium/elysium-ecosystem.service';
+import { ElysiumLaunchpadMarketService, LaunchpadSearchBusyError } from '../../services/elysium/elysium-launchpad-market.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = ElysiumAnalyticsService.getInstance();
 const ecosystem = ElysiumEcosystemService.getInstance();
+const launchpadMarket = ElysiumLaunchpadMarketService.getInstance();
 
 type QuerySchema = z.ZodObject<{ query: z.ZodTypeAny; params: z.ZodTypeAny }>;
 
@@ -53,6 +56,11 @@ function register<S extends QuerySchema>(
         const data = await handler(query, params);
         res.json({ success: true, data });
       } catch (error) {
+        if (error instanceof LaunchpadSearchBusyError) {
+          res.setHeader('Retry-After', String(error.retryAfterS));
+          res.status(429).json({ success: false, error: 'Too many searches, retry shortly', code });
+          return;
+        }
         const db = isDatabaseError(error);
         logDeduplicator.error('GET /elysium/analytics failure', {
           code,
@@ -100,8 +108,16 @@ register('/ecosystem', elysiumAnalyticsStatusSchema, 'ELYSIUM_ANALYTICS_ECOSYSTE
   ecosystem.getProjects()
 );
 
-register('/launchpads', elysiumAnalyticsStatusSchema, 'ELYSIUM_ANALYTICS_LAUNCHPADS_ERROR', () =>
-  ecosystem.getLaunchpadTokens()
+// A search is a scan of the launches for every new text: its own, tighter per-IP limit.
+const searchLimiter: RequestHandler = (req, res, next) =>
+  typeof req.query.q === 'string' && req.query.q.trim() !== '' ? elysiumSearchRateLimiter(req, res, next) : next();
+
+register(
+  '/launchpads',
+  elysiumAnalyticsLaunchpadsSchema,
+  'ELYSIUM_ANALYTICS_LAUNCHPADS_ERROR',
+  (q) => launchpadMarket.getPage(q),
+  searchLimiter
 );
 
 // Any address is a fresh cache key and ~10 queries: tighter per-IP limit.
