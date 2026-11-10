@@ -126,6 +126,14 @@ const LAUNCHPAD_STEP_MS = 24 * HOUR_MS;
 const LAUNCHPAD_OVERLAP_MS = 120_000;
 const LAUNCHPAD_SETTLE_MS = 15_000;
 
+/**
+ * The market state kept on each launch (last price, curve sold) is rebuilt from the trades once
+ * more a few minutes after every start, for the tokens traded over this window: while a deploy
+ * overlaps, the previous release still inserts trades without moving that state.
+ */
+const LAUNCH_STATE_HEAL_AFTER_MS = 5 * MINUTE_MS;
+const LAUNCH_STATE_HEAL_WINDOW_MS = 2 * HOUR_MS;
+
 const LAUNCH_STATS_INTERVAL_MS = 5 * MINUTE_MS;
 const LAUNCH_STATS_MAX_AGE_S = 14 * 60;
 const LAUNCH_STATS_BATCH = 60;
@@ -205,6 +213,12 @@ export class ElysiumIngestionService {
   private txStepMs = TX_STEP_MS;
   /** Next block the live tx fallback reads, null until resolved from its cursor. */
   private liveBlock: number | null = null;
+  /** When this process started polling, and what it has done about the launch market state since. */
+  private startedAt = 0;
+  private launchStateFilled = false;
+  private launchStateHealed = false;
+  /** No new attempt at the launch market state before this time (set after a failed one). */
+  private launchStateRetryAt = 0;
 
   public static getInstance(): ElysiumIngestionService {
     if (!ElysiumIngestionService.instance) {
@@ -224,6 +238,7 @@ export class ElysiumIngestionService {
     }
     if (!this.stopped) return;
     this.stopped = false;
+    this.startedAt = Date.now();
     this.schedule('tx', 0, () => this.txTick());
     this.schedule('txlive', 30_000, () => this.txLiveTick());
     this.schedule('bridge', 5_000, () => this.bridgeTick());
@@ -797,7 +812,46 @@ export class ElysiumIngestionService {
     return inserted;
   }
 
+  /**
+   * Keeps the market state of the launches (elysium_launch.last_price, curve_sold) whole. The
+   * trade insert moves it; this covers what the insert cannot: the rows that existed before the
+   * columns did (one rebuild from every trade, recorded under the `launchstate` marker), and the
+   * trades the previous release wrote while a deploy overlapped (a rebuild of the recently traded
+   * tokens, once, a few minutes after each start). Runs inside the launchpad tick, so never
+   * alongside this process's own trade inserts. A failure is logged and tried again later: it
+   * must not hold the launchpad stream itself.
+   */
+  private async ensureLaunchState(): Promise<void> {
+    if (Date.now() < this.launchStateRetryAt) return;
+    try {
+      await this.keepLaunchState();
+    } catch (error) {
+      this.launchStateRetryAt = Date.now() + 10 * MINUTE_MS;
+      logDeduplicator.warn('Elysium ingest: launch market state not rebuilt, retrying later', {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+    }
+  }
+
+  private async keepLaunchState(): Promise<void> {
+    if (!this.launchStateFilled) {
+      if (!(await this.repo.getState('launchstate'))?.backfillDone) {
+        const written = await this.repo.rebuildLaunchState(null);
+        const named = await this.repo.fillLaunchNames();
+        await this.repo.advance('launchstate', { cursor: new Date(), setRows: written, backfillDone: true });
+        void rawLogger.info('Elysium ingest: launch market state filled', { written, named });
+      }
+      this.launchStateFilled = true;
+    }
+    if (!this.launchStateHealed && Date.now() - this.startedAt >= LAUNCH_STATE_HEAL_AFTER_MS) {
+      const written = await this.repo.rebuildLaunchState(new Date(Date.now() - LAUNCH_STATE_HEAL_WINDOW_MS));
+      this.launchStateHealed = true;
+      if (written > 0) void rawLogger.info('Elysium ingest: launch market state healed', { written });
+    }
+  }
+
   private async launchpadTick(): Promise<number> {
+    await this.ensureLaunchState();
     const deadline = Date.now() + TICK_BUDGET_MS;
     const state = await this.repo.getState('launchpad');
     let cursor = state?.cursor ?? null;

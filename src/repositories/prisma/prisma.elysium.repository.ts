@@ -8,6 +8,9 @@ import type {
   LaunchTradeRow,
 } from '../../services/elysium/elysium-launchpad.util';
 
+/** Time limit of a rebuild of the launch market state (the one-time fill reads every trade). */
+const REBUILD_TIMEOUT_MS = 600_000;
+
 /** Constant SQL list of the bridge tx types (no user input involved). */
 const BRIDGE_TYPES_SQL = BRIDGE_TX_TYPES.map((t) => `'${t}'`).join(', ');
 
@@ -20,7 +23,9 @@ export type ElysiumStream =
   | 'methods'
   | 'tokenstats'
   | 'launchpad'
-  | 'launchstats';
+  | 'launchstats'
+  /** Not a stream of its own: the marker of the one-time rebuild of the launch market state. */
+  | 'launchstate';
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -207,6 +212,16 @@ export class ElysiumIngestRepository {
           first_seen = COALESCE(elysium_token.first_seen, EXCLUDED.first_seen),
           transfer_count = EXCLUDED.transfer_count,
           updated_at = now()
+        RETURNING 1
+      ),
+      named AS (
+        -- Launches whose event carries no name (Signal, aka.fun) take the registry's, so the
+        -- launchpad search finds them by symbol. Only rows still without one are written.
+        UPDATE elysium_launch l
+        SET symbol = COALESCE(l.symbol, r.symbol), name = COALESCE(l.name, r.name)
+        FROM jsonb_to_recordset($1::jsonb) AS r(address text, name text, symbol text)
+        WHERE l.token = r.address
+          AND ((l.symbol IS NULL AND r.symbol IS NOT NULL) OR (l.name IS NULL AND r.name IS NOT NULL))
         RETURNING 1
       )
       SELECT count(*)::int AS n FROM up
@@ -465,7 +480,13 @@ export class ElysiumIngestRepository {
     );
   }
 
-  /** Inserts launchpad trades, keyed by (tx_hash, log_index). */
+  /**
+   * Inserts launchpad trades, keyed by (tx_hash, log_index), and in the same
+   * statement moves the market state of their tokens (elysium_launch): the last
+   * trade's price and position, and what the curve has sold. Both come from the
+   * rows that were actually inserted (RETURNING), so a replayed window changes
+   * nothing, and a crash rolls the trades and the state back together.
+   */
   public async insertLaunchTrades(rows: LaunchTradeRow[]): Promise<number> {
     if (rows.length === 0) return 0;
     const result = await prismaHistorical.$queryRawUnsafe<Array<{ n: number }>>(
@@ -480,13 +501,104 @@ export class ElysiumIngestRepository {
           block_number bigint, trader text, is_buy boolean, quote_amount numeric,
           token_amount numeric, price float8)
         ON CONFLICT (tx_hash, log_index) DO NOTHING
+        RETURNING token, block_number, log_index, price, venue, is_buy, token_amount
+      ),
+      newest AS (
+        SELECT DISTINCT ON (token) token, block_number, log_index, price
+        FROM ins ORDER BY token, block_number DESC, log_index DESC
+      ),
+      sold AS (
+        SELECT token, sum(CASE WHEN is_buy THEN token_amount ELSE -token_amount END) AS delta
+        FROM ins WHERE venue = 'curve' GROUP BY token
+      ),
+      state AS (
+        UPDATE elysium_launch l
+        SET curve_sold = CASE WHEN sold.delta IS NULL THEN l.curve_sold
+                              ELSE COALESCE(l.curve_sold, 0) + sold.delta END,
+            last_price = CASE WHEN n.later THEN n.price ELSE l.last_price END,
+            last_block = CASE WHEN n.later THEN n.block_number ELSE l.last_block END,
+            last_log = CASE WHEN n.later THEN n.log_index ELSE l.last_log END
+        FROM (
+          SELECT newest.*, (l2.last_block IS NULL OR (newest.block_number, newest.log_index) > (l2.last_block, l2.last_log)) AS later
+          FROM newest JOIN elysium_launch l2 ON l2.token = newest.token
+        ) n
+        LEFT JOIN sold ON sold.token = n.token
+        WHERE l.token = n.token
         RETURNING 1
       )
-      SELECT count(*)::int AS n FROM ins
+      SELECT (SELECT count(*) FROM ins)::int AS n, (SELECT count(*) FROM state)::int AS moved
       `,
       JSON.stringify(rows)
     );
     return result[0]?.n ?? 0;
+  }
+
+  /**
+   * Recomputes the market state (last trade, curve sold) from elysium_launch_trade, exactly: for
+   * every traded token when `since` is null (the one-time fill of the columns), else for the
+   * tokens with a trade since then (heals trades a process without the insert above wrote, as
+   * the previous release does while a deploy overlaps). Only rows that differ are written.
+   *
+   * A trade's time follows its block, so the last trade by time is the last by (block, log index),
+   * which is what the insert compares. One connection, no parallel workers (the historical
+   * Postgres has a small /dev/shm, which parallel plans over the trade table have overflowed)
+   * and its own time limit.
+   */
+  public async rebuildLaunchState(since: Date | null): Promise<number> {
+    // The tokens to recompute: every launch, or the ones traded since `since`.
+    const scope = since
+      ? `SELECT DISTINCT token FROM elysium_launch_trade WHERE block_time >= $1::timestamptz`
+      : `SELECT token FROM elysium_launch WHERE $1::timestamptz IS NULL`;
+    // An interactive transaction: the settings below are local to it, and Prisma's own
+    // transaction time limit (5 s by default) has to be raised with the statement's.
+    return prismaHistorical.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL max_parallel_workers_per_gather = 0`);
+        await tx.$executeRawUnsafe(`SET LOCAL work_mem = '64MB'`);
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${REBUILD_TIMEOUT_MS}`);
+        return tx.$executeRawUnsafe(
+          `
+          WITH scope AS (${scope}),
+          newest AS (
+            -- One index probe per token (token, block_time), not a sort of the whole trade table.
+            SELECT s.token, x.price, x.block_number, x.log_index
+            FROM scope s
+            CROSS JOIN LATERAL (
+              SELECT tr.price, tr.block_number, tr.log_index FROM elysium_launch_trade tr
+              WHERE tr.token = s.token
+              ORDER BY tr.block_time DESC, tr.block_number DESC, tr.log_index DESC LIMIT 1
+            ) x
+          ),
+          sold AS (
+            SELECT tr.token, sum(CASE WHEN tr.is_buy THEN tr.token_amount ELSE -tr.token_amount END) AS sold
+            FROM elysium_launch_trade tr
+            WHERE tr.venue = 'curve' AND ($1::timestamptz IS NULL OR tr.token IN (SELECT token FROM scope))
+            GROUP BY tr.token
+          )
+          UPDATE elysium_launch l
+          SET last_price = newest.price, last_block = newest.block_number, last_log = newest.log_index,
+              curve_sold = sold.sold
+          FROM newest LEFT JOIN sold ON sold.token = newest.token
+          WHERE l.token = newest.token
+            AND (l.last_price, l.last_block, l.last_log, l.curve_sold)
+                IS DISTINCT FROM (newest.price, newest.block_number, newest.log_index, sold.sold)
+          `,
+          since ? since.toISOString() : null
+        );
+      },
+      { timeout: REBUILD_TIMEOUT_MS + 20_000, maxWait: 15_000 }
+    );
+  }
+
+  /** Gives every launch without a name of its own the registry's (see upsertTokens); the one-time fill. */
+  public async fillLaunchNames(): Promise<number> {
+    return prismaHistorical.$executeRawUnsafe(
+      `UPDATE elysium_launch l
+       SET symbol = COALESCE(l.symbol, t.symbol), name = COALESCE(l.name, t.name)
+       FROM elysium_token t
+       WHERE t.address = l.token
+         AND ((l.symbol IS NULL AND t.symbol IS NOT NULL) OR (l.name IS NULL AND t.name IS NOT NULL))`
+    );
   }
 
   /**

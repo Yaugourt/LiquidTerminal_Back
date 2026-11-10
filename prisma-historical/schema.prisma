@@ -287,9 +287,17 @@ model ElysiumLaunch {
   top10Pct    Float?    @map("top10_pct")
   devPct      Float?    @map("dev_pct")
   statsAt     DateTime? @map("stats_at") @db.Timestamptz(3)
+  /// Price of the token's last trade and where that trade sits (block, log index); kept by the trade insert.
+  lastPrice   Float?    @map("last_price")
+  lastBlock   BigInt?   @map("last_block")
+  lastLog     Int?      @map("last_log")
+  /// Tokens the bonding curve has sold so far (buys minus sells, raw units); kept by the trade insert.
+  curveSold   Decimal?  @map("curve_sold") @db.Decimal(80, 0)
 
   @@index([createdAt])
   @@index([curve])
+  @@index([launchpad, createdAt])
+  @@index([quote, lastPrice])
   @@map("elysium_launch")
 }
 

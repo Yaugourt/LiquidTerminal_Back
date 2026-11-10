@@ -106,7 +106,8 @@ export class ElysiumAnalyticsService {
 
   public getStatus(): Promise<{ streams: Array<Record<string, unknown>> }> {
     return this.cachedFresh('status', 'v1', async () => {
-      const rows = await ElysiumIngestRepository.getInstance().listStates();
+      // `launchstate` is the marker of a one-time rebuild, not a stream: it has no lag to show.
+      const rows = (await ElysiumIngestRepository.getInstance().listStates()).filter((r) => r.stream !== 'launchstate');
       const now = Date.now();
       return {
         streams: rows.map((r) => ({
