@@ -37,7 +37,7 @@ import { TelegramDocUpdateDispatcherService } from '../services/telegram/telegra
 import { TelegramFillAlertDispatcherService } from '../services/telegram/telegram.fill-alert-dispatcher.service';
 import { MarketAlertsService } from '../services/alerts/market-alerts.service';
 import { TwapLiveService } from '../services/twap/twap-live.service';
-import { enabledUnlessFalseEnv } from '../utils/env';
+import { enabledUnlessFalseEnv, isElysiumWorker } from '../utils/env';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export type StartupStatus = 'booting' | 'ready' | 'degraded';
@@ -92,6 +92,11 @@ export class ClientInitializerService {
     try {
       this.startupStatus = 'booting';
       logDeduplicator.info('Starting client initialization...');
+
+      if (isElysiumWorker()) {
+        await this.initializeElysiumWorker();
+        return;
+      }
 
       // ✅ Redis est déjà prêt, on peut initialiser les clients directement
       logDeduplicator.info('Redis is ready, initializing clients...');
@@ -281,6 +286,25 @@ export class ClientInitializerService {
       logDeduplicator.error('Error initializing clients:', { error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
+  }
+
+  /**
+   * PROCESS_ROLE=elysium-worker: the Elysium ingestion and its day rollups alone, for a service
+   * of their own. Reading pages of 1,000 transactions and summing a day of them then no longer
+   * share a thread and a heap with the API and the WebSockets, and a restart of one leaves the
+   * other running. The API service runs with ELYSIUM_INGEST_ENABLED=false in that setup; if both
+   * ingest for a while (the order of two deploys), the per-stream Redis locks keep one at a time.
+   *
+   * No market poller, no socket, no cache warm-up starts here: nothing reads them in this process.
+   */
+  private async initializeElysiumWorker(): Promise<void> {
+    logDeduplicator.info('Process role: elysium-worker, starting the Elysium ingestion only');
+    if (!ElysiumIngestionService.isEnabled()) {
+      logDeduplicator.warn('Process role elysium-worker with ELYSIUM_INGEST_ENABLED=false: this process does nothing');
+    }
+    this.clients.set('elysiumIngestion', ElysiumIngestionService.getInstance());
+    await this.startAllPolling();
+    this.startupStatus = 'ready';
   }
 
   public getStartupStatus(): StartupStatus {

@@ -8,3 +8,11 @@ export function positiveIntEnv(name: string, fallback: number): number {
 export function enabledUnlessFalseEnv(name: string): boolean {
   return process.env[name]?.trim().toLowerCase() !== 'false';
 }
+
+/**
+ * PROCESS_ROLE=elysium-worker: this process runs the Elysium ingestion (and its
+ * day rollups) and nothing else. Unset, or any other value: everything, as before.
+ */
+export function isElysiumWorker(): boolean {
+  return process.env.PROCESS_ROLE?.trim().toLowerCase() === 'elysium-worker';
+}
