@@ -11,6 +11,12 @@ interface Recomputed<T> {
   serialized?: string;
 }
 
+/** TTL of the lock a background refresh holds against other instances; renewed while it runs. */
+const REFRESH_LOCK_TTL_S = 120;
+const REFRESH_LOCK_RENEW_MS = 45_000;
+/** After a failed background refresh of an entry, how long before another is started. */
+const REFRESH_RETRY_MS = 30_000;
+
 /**
  * Seconds to keep an entry: a constant, or a function of the value fetched
  * (e.g. keep an empty upstream answer longer than a busy one).
@@ -176,6 +182,10 @@ export class CacheService {
    * request.
    */
   private readonly directFetches = new Map<string, Promise<Recomputed<unknown>>>();
+  /** getOrRefresh entries (their `:swr` key) being refreshed in the background by this process. */
+  private readonly refreshing = new Set<string>();
+  /** No new background refresh of an entry before this time: set when its refresh failed. */
+  private readonly refreshRetryAt = new Map<string, number>();
 
   /**
    * Récupère une donnée du cache ou l'obtient via une fonction de récupération
@@ -514,19 +524,19 @@ export class CacheService {
   
   /**
    * Stale-while-revalidate read for slow, recomputable aggregates. The last
-   * value is served at once; once it is older than `freshS`, one caller (Redis
-   * lock) recomputes it in the background while everyone keeps the old value.
+   * value is served at once; once it is older than `freshS`, it is recomputed
+   * in the background, once at a time (see refreshBehind), while everyone keeps
+   * the old value. With Redis unusable it is computed for the callers, shared by
+   * the ones asking at the same time.
    * Only a cold key (never computed, or idle past `keepS`) waits for `fetchFn`.
    * A caller over its budget of billed upstream calls (see getOrSetWithMeta)
    * never starts the refresh or the cold compute: it gets the old value, else
    * its refusal.
    */
   async getOrRefresh<T>(key: string, fetchFn: () => Promise<T>, freshS: number, keepS: number): Promise<T> {
-    if (!redisService.isHealthy()) {
-      const refusal = upstreamRefusal();
-      if (refusal) throw refusal;
-      return fetchFn();
-    }
+    // Redis unusable: computed for the caller, once for everyone asking at the same time
+    // (directFetch refuses an over-budget caller that has nothing to join).
+    if (!redisService.isHealthy()) return this.directFetch(key, fetchFn);
     const swrKey = `${key}:swr`;
     const store = async (value: T): Promise<void> => {
       await redisService.set(swrKey, JSON.stringify({ at: Date.now(), value }), keepS);
@@ -536,19 +546,7 @@ export class CacheService {
       if (raw) {
         const entry = JSON.parse(raw) as { at: number; value: T };
         if (Date.now() - entry.at > freshS * 1000 && !upstreamRefusal()) {
-          const lockKey = `lock:${swrKey}`;
-          const acquired = await redisService.getClient().set(lockKey, '1', 'EX', 120, 'NX');
-          if (acquired) {
-            void fetchFn()
-              .then(store)
-              .catch((error) => {
-                logDeduplicator.warn('Background cache refresh failed', {
-                  key,
-                  errorType: error instanceof Error ? error.name : typeof error,
-                });
-              })
-              .finally(() => void redisService.delete(lockKey));
-          }
+          this.refreshBehind(key, swrKey, fetchFn, store);
         }
         return entry.value;
       }
@@ -566,10 +564,53 @@ export class CacheService {
         key,
         errorMessage: error instanceof Error ? error.message : 'Unknown error',
       });
-      const refusal = upstreamRefusal();
-      if (refusal) throw refusal;
-      return fetchFn();
+      return this.directFetch(key, fetchFn);
     }
+  }
+
+  /**
+   * Refreshes a getOrRefresh entry behind the value just served.
+   *
+   * One refresh per key in this process, however long it takes: the Redis lock used to be the
+   * only guard, with a 120 s TTL and a release that did not check whose lock it was. A refresh
+   * slower than that (an aggregate over the whole transaction table) lost its lock, the next
+   * visitor started the same computation next to it, and whichever ended first released the
+   * other's lock for a third. The lock now only keeps other instances off the key; it is renewed
+   * while the refresh runs, so it lasts exactly as long, and is released at the end.
+   *
+   * A refresh that fails is not started again for REFRESH_RETRY_MS: the next visitors keep being
+   * served the last value instead of each launching the computation that just failed.
+   */
+  private refreshBehind<T>(key: string, swrKey: string, fetchFn: () => Promise<T>, store: (value: T) => Promise<void>): void {
+    if (this.refreshing.has(swrKey)) return;
+    if (Date.now() < (this.refreshRetryAt.get(swrKey) ?? 0)) return;
+    this.refreshing.add(swrKey);
+    const lockKey = `lock:${swrKey}`;
+    void (async () => {
+      let held = false;
+      let renewal: NodeJS.Timeout | undefined;
+      try {
+        held = Boolean(await redisService.getClient().set(lockKey, '1', 'EX', REFRESH_LOCK_TTL_S, 'NX'));
+        // Another instance is refreshing it.
+        if (!held) return;
+        renewal = setInterval(() => {
+          void Promise.resolve(redisService.getClient().expire(lockKey, REFRESH_LOCK_TTL_S)).catch(() => undefined);
+        }, REFRESH_LOCK_RENEW_MS);
+        renewal.unref?.();
+        await store(await fetchFn());
+        this.refreshRetryAt.delete(swrKey);
+      } catch (error) {
+        this.refreshRetryAt.set(swrKey, Date.now() + REFRESH_RETRY_MS);
+        logDeduplicator.warn('Background cache refresh failed', {
+          key,
+          errorType: error instanceof Error ? error.name : typeof error,
+        });
+      } finally {
+        if (renewal) clearInterval(renewal);
+        this.refreshing.delete(swrKey);
+        if (held) void redisService.delete(lockKey);
+      }
+    })();
   }
 
   /**

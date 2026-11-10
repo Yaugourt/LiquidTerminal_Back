@@ -44,7 +44,13 @@ const mockRedis = {
       return 'OK';
     },
     exists: async (key: string) => (mockRedis.foreignLock || mockRedis.locks.has(key) ? 1 : 0),
+    expire: async (key: string, seconds: number) => {
+      mockRedis.renewals.push([key, seconds]);
+      return 1;
+    },
   }),
+  /** [key, seconds] of every lock renewal. */
+  renewals: [] as Array<[string, number]>,
 };
 
 jest.mock('../../../src/core/redis.service', () => ({ redisService: mockRedis }));
@@ -456,5 +462,176 @@ describe('CacheService.getOrSet', () => {
     expect(result).toBe('paid for');
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect(mockRedis.set).toHaveBeenCalledWith('k', '"paid for"', 300);
+  });
+});
+
+describe('CacheService.getOrRefresh', () => {
+  let cache: CacheService;
+  const seed = (key: string, value: unknown, ageMs: number): void => {
+    mockRedis.store.set(`${key}:swr`, JSON.stringify({ at: Date.now() - ageMs, value }));
+  };
+  /** A fetchFn that waits to be released. */
+  const gate = <T>(value: T) => {
+    let release!: () => void;
+    let fail!: (error: Error) => void;
+    const fn = jest.fn(
+      () =>
+        new Promise<T>((resolve, reject) => {
+          release = () => resolve(value);
+          fail = reject;
+        })
+    );
+    return { fn, release: () => release(), fail: (e: Error) => fail(e) };
+  };
+  const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  beforeEach(() => {
+    cache = new CacheService();
+    mockRedis.store.clear();
+    mockRedis.expiries.clear();
+    mockRedis.locks.clear();
+    mockRedis.renewals.length = 0;
+    mockRedis.foreignLock = false;
+    mockRedis.lockFails = false;
+    mockRedis.healthy = true;
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it('serves the last value at once and refreshes it behind, once, for everyone asking meanwhile', async () => {
+    seed('agg', 'old', 120_000);
+    const g = gate('new');
+
+    const answers = await Promise.all(Array.from({ length: 6 }, () => cache.getOrRefresh('agg', g.fn, 60, 3600)));
+    expect(answers).toEqual(Array(6).fill('old'));
+    await tick();
+    expect(g.fn).toHaveBeenCalledTimes(1);
+    expect(mockRedis.locks.has('lock:agg:swr')).toBe(true);
+
+    g.release();
+    await tick();
+    await tick();
+    expect(await cache.getOrRefresh('agg', g.fn, 60, 3600)).toBe('new');
+    expect(g.fn).toHaveBeenCalledTimes(1);
+    expect(mockRedis.locks.has('lock:agg:swr')).toBe(false);
+  });
+
+  it('does not start a second refresh when the first outlives its lock', async () => {
+    seed('slow', 'old', 120_000);
+    const g = gate('new');
+    await cache.getOrRefresh('slow', g.fn, 60, 3600);
+    await tick();
+    // The lock is gone (expired, or released by someone else) while the refresh still runs.
+    mockRedis.locks.delete('lock:slow:swr');
+
+    for (let i = 0; i < 5; i++) expect(await cache.getOrRefresh('slow', g.fn, 60, 3600)).toBe('old');
+    await tick();
+    expect(g.fn).toHaveBeenCalledTimes(1);
+
+    g.release();
+    await tick();
+    await tick();
+    expect(await cache.getOrRefresh('slow', g.fn, 60, 3600)).toBe('new');
+  });
+
+  it('renews its lock for as long as the refresh runs', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    seed('long', 'old', 120_000);
+    const g = gate('new');
+    await cache.getOrRefresh('long', g.fn, 60, 3600);
+    await tick();
+
+    jest.advanceTimersByTime(45_000 * 3 + 1);
+    expect(mockRedis.renewals).toEqual([
+      ['lock:long:swr', 120],
+      ['lock:long:swr', 120],
+      ['lock:long:swr', 120],
+    ]);
+
+    g.release();
+    await tick();
+    await tick();
+    jest.advanceTimersByTime(200_000);
+    expect(mockRedis.renewals).toHaveLength(3);
+  });
+
+  it('keeps serving the last value when the refresh fails, and waits 30 s before another', async () => {
+    let now = 1_800_000_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    seed('flaky', 'old', 120_000);
+    const failing = jest.fn(async () => {
+      throw new Error('canceling statement due to statement timeout');
+    });
+
+    expect(await cache.getOrRefresh('flaky', failing, 60, 3600)).toBe('old');
+    await tick();
+    await tick();
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(mockRedis.locks.has('lock:flaky:swr')).toBe(false);
+
+    now += 29_000;
+    expect(await cache.getOrRefresh('flaky', failing, 60, 3600)).toBe('old');
+    await tick();
+    expect(failing).toHaveBeenCalledTimes(1);
+
+    now += 2_000;
+    const working = jest.fn(async () => 'new');
+    expect(await cache.getOrRefresh('flaky', working, 60, 3600)).toBe('old');
+    await tick();
+    await tick();
+    expect(working).toHaveBeenCalledTimes(1);
+    expect(await cache.getOrRefresh('flaky', working, 60, 3600)).toBe('new');
+  });
+
+  it('leaves the refresh to another instance that holds the lock, and can take it later', async () => {
+    seed('shared', 'old', 120_000);
+    const fetchFn = jest.fn(async () => 'new');
+    mockRedis.foreignLock = true;
+    expect(await cache.getOrRefresh('shared', fetchFn, 60, 3600)).toBe('old');
+    await tick();
+    expect(fetchFn).not.toHaveBeenCalled();
+
+    mockRedis.foreignLock = false;
+    expect(await cache.getOrRefresh('shared', fetchFn, 60, 3600)).toBe('old');
+    await tick();
+    await tick();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('still serves the last value when the lock itself cannot be taken', async () => {
+    seed('nolock', 'old', 120_000);
+    const fetchFn = jest.fn(async () => 'new');
+    mockRedis.lockFails = true;
+    expect(await cache.getOrRefresh('nolock', fetchFn, 60, 3600)).toBe('old');
+    await tick();
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh a value that is still fresh', async () => {
+    seed('fresh', 'value', 10_000);
+    const fetchFn = jest.fn(async () => 'new');
+    expect(await cache.getOrRefresh('fresh', fetchFn, 60, 3600)).toBe('value');
+    await tick();
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('computes a cold key once for concurrent callers', async () => {
+    const fetchFn = jest.fn(() => later('first', 20));
+    const answers = await Promise.all(Array.from({ length: 5 }, () => cache.getOrRefresh('cold', fetchFn, 60, 3600)));
+    expect(answers).toEqual(Array(5).fill('first'));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('with Redis unusable, computes once for the callers asking together', async () => {
+    mockRedis.healthy = false;
+    const fetchFn = jest.fn(() => later('direct', 20));
+    const answers = await Promise.all(Array.from({ length: 5 }, () => cache.getOrRefresh('down', fetchFn, 60, 3600)));
+    expect(answers).toEqual(Array(5).fill('direct'));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    // Nothing is kept without Redis: a later caller computes again.
+    await cache.getOrRefresh('down', fetchFn, 60, 3600);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 });
