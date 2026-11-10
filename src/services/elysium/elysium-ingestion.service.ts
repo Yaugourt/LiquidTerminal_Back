@@ -64,8 +64,20 @@ class PageCapError extends Error {
 }
 /** At most ~2 upstream calls per second across every stream. */
 const MIN_CALL_GAP_MS = 500;
-/** How often the provider's last indexed block time is read. */
+/** How often the provider's last indexed block time is read, at least. */
 const HEAD_REFRESH_MS = 30_000;
+/**
+ * A stream about to read up to a time the last known head has not reached reads the head again,
+ * but never more often than this (the provider's /stats itself moves every ~8 s).
+ */
+const HEAD_MIN_REFRESH_MS = 5_000;
+/**
+ * No window read from the provider ends closer to its head than this. The rows of the head's own
+ * second are still being written (2 of 222 missing at head = window end, measured 2026-11-10),
+ * while /stats trails the data by 4 to 11 s: with the 15 s settle below, this margin never holds
+ * a window back unless the provider itself is late.
+ */
+const HEAD_MARGIN_MS = 3_000;
 /** Behind the clock by more than this, the provider counts as lagging. */
 const HEAD_LAG_MS = 2 * MINUTE_MS;
 
@@ -78,7 +90,13 @@ const LOCK_TTL_S = 120;
 
 const TX_LIVE_INTERVAL_MS = 30_000;
 const TX_STEP_MS = HOUR_MS;
-const TX_OVERLAP_MS = 120_000;
+/**
+ * Rows re-read before the cursor on each live tick. A window is complete 6 to 7 s after its end
+ * and its count no longer moves over the next 4 minutes (measured 2026-11-10 on /transactions and
+ * /logs), and no window ends past the provider's head: this is a margin on top of both, not what
+ * catches late rows. At 120 s on a 30 s cadence every row was read (and billed) five times.
+ */
+const TX_OVERLAP_MS = 20_000;
 const TX_SETTLE_MS = 15_000;
 
 /** Live tx fallback: pause between block batches, so the public RPC is never pushed past its rate. */
@@ -102,11 +120,21 @@ const BRIDGE_EXECUTED_SWEEP_MS = 8 * 24 * HOUR_MS;
 const BRIDGE_BACKFILL_STEP_MS = 6 * HOUR_MS;
 
 const TOKENS_INTERVAL_MS = 15 * MINUTE_MS;
+/**
+ * The provider lists tokens by transfer count, 500,000+ of them (2026-11-10), with no way to ask
+ * for the new or the changed ones. Only the head moves: rank 1,000 has 805 transfers, rank 10,000
+ * has 14, rank 20,000 has 4, and everything below has 2 or 3. So each run reads the head, which
+ * holds every token with real activity, and a slice of the rest, round and round: the whole
+ * listing is covered in about six hours. Reading 200 pages a run (the page cap) took over 45
+ * minutes for 20,400 credits, and still left out every token past rank 200,000.
+ */
+const TOKENS_HEAD_PAGES = 20;
+const TOKENS_TAIL_PAGES = 20;
 
 const DEX_LIVE_INTERVAL_MS = 60_000;
 /** DEX logs are sparse on testnet: one day per backfill window is plenty. */
 const DEX_STEP_MS = 24 * HOUR_MS;
-const DEX_OVERLAP_MS = 120_000;
+const DEX_OVERLAP_MS = 20_000;
 const DEX_SETTLE_MS = 15_000;
 
 const METHODS_INTERVAL_MS = 30 * MINUTE_MS;
@@ -123,7 +151,7 @@ const TOKEN_STATS_INTERVAL_MS = 15 * MINUTE_MS;
 
 const LAUNCHPAD_LIVE_INTERVAL_MS = 30_000;
 const LAUNCHPAD_STEP_MS = 24 * HOUR_MS;
-const LAUNCHPAD_OVERLAP_MS = 120_000;
+const LAUNCHPAD_OVERLAP_MS = 20_000;
 const LAUNCHPAD_SETTLE_MS = 15_000;
 
 /**
@@ -135,8 +163,17 @@ const LAUNCH_STATE_HEAL_AFTER_MS = 5 * MINUTE_MS;
 const LAUNCH_STATE_HEAL_WINDOW_MS = 2 * HOUR_MS;
 
 const LAUNCH_STATS_INTERVAL_MS = 5 * MINUTE_MS;
-const LAUNCH_STATS_MAX_AGE_S = 14 * 60;
+/**
+ * Holder stats are one call per token, and there are 420,000 launches for about a thousand that
+ * trade on a given day: read round robin, each token came up every 8 days (54,000 a day, measured
+ * 2026-11-10), the traded ones no sooner than the rest. Now the launches never read come first,
+ * then the ones traded over the last 24h once their stats are half an hour old; these two take at
+ * most two thirds of a batch, so the walk through the quiet ones keeps moving.
+ */
+const LAUNCH_STATS_ACTIVE_MAX_AGE_S = 30 * 60;
+const LAUNCH_STATS_QUIET_MAX_AGE_S = 14 * 60;
 const LAUNCH_STATS_BATCH = 60;
+const LAUNCH_STATS_PRIORITY = 40;
 /** Holder page size: launch tokens have far fewer holders, a full page falls back to the detail count. */
 const LAUNCH_HOLDERS_LIMIT = 1000;
 /** Holder snapshots for the top N tokens of each ranked list only. */
@@ -174,7 +211,7 @@ class IngestStoppedError extends Error {
  *   [cursor - 120s, now - 15s]. System txs are skipped, spam is kept + flagged.
  * - bridge: one-time backfill from genesis, then last 15 min every 60s plus a
  *   26h window (status changes) and an executed-withdrawals sweep every 15 min.
- * - tokens: full ERC-20 listing every 15 min.
+ * - tokens: the most transferred ERC-20s every 15 min, the rest of the listing in slices.
  * - dex: Uniswap V2/V3 pool-creation and swap logs (/logs by topic0), walked
  *   from genesis in 1-day windows, then every 60s like the tx stream.
  * - methods: resolves the top 200 called selectors via a public signature
@@ -311,12 +348,19 @@ export class ElysiumIngestionService {
   }
 
   /**
-   * The time streams may ingest up to: now, or the provider's last indexed block time when it
-   * lags. A failed read keeps the last known head for a while, then falls back to the clock.
+   * The provider's last indexed block time, and whether it lags (`now` is then that time, else the
+   * clock). A failed read keeps the last known head for a while, then falls back to the clock.
+   *
+   * `wantUpTo`: the caller is about to read up to that time. If the head known so far has not
+   * passed it, the head is read again (it has usually moved on since), so a stream is held back
+   * by the provider itself and never by an old reading.
    */
-  private async ingestHorizon(): Promise<{ now: Date; head: Date | null; lagging: boolean }> {
+  private async ingestHorizon(wantUpTo?: number): Promise<{ now: Date; head: Date | null; lagging: boolean }> {
     const clock = Date.now();
-    if (!this.head || clock - this.head.at >= HEAD_REFRESH_MS) {
+    const age = this.head ? clock - this.head.at : Infinity;
+    const known = this.head?.value ?? null;
+    const behind = wantUpTo !== undefined && (known === null || known.getTime() - HEAD_MARGIN_MS < wantUpTo);
+    if (age >= HEAD_REFRESH_MS || (behind && age >= HEAD_MIN_REFRESH_MS)) {
       try {
         await this.throttle.wait();
         this.head = { at: clock, value: await this.client.fetchIngestHead() };
@@ -330,6 +374,14 @@ export class ElysiumIngestionService {
     const head = this.head?.value ?? null;
     const lagging = head !== null && clock - head.getTime() > HEAD_LAG_MS;
     return { now: lagging && head ? head : new Date(clock), head, lagging };
+  }
+
+  /**
+   * The latest time a window read from the provider may end at: a little before its head, or null
+   * when the head is not known (the clock alone then bounds the window, as before).
+   */
+  private providerCeiling(head: Date | null): Date | null {
+    return head ? new Date(head.getTime() - HEAD_MARGIN_MS) : null;
   }
 
   /** The source for a log window: the provider up to its head, the RPC beyond it. */
@@ -395,15 +447,18 @@ export class ElysiumIngestionService {
 
     while (Date.now() < deadline) {
       this.ensureRunning();
-      const { now } = await this.ingestHorizon();
+      // Never past what the provider has indexed: the cursor then leaves nothing behind it,
+      // whether the provider is a few seconds late or stalled for days.
+      const { head } = await this.ingestHorizon(Date.now() - TX_SETTLE_MS);
       const w = planWindow({
         cursor,
         backfillDone,
-        now,
+        now: new Date(Date.now()),
         genesis: ELYSIUM_GENESIS,
         stepMs: this.txStepMs,
         overlapMs: TX_OVERLAP_MS,
         settleMs: TX_SETTLE_MS,
+        ceiling: this.providerCeiling(head),
       });
       if (!w) return TX_LIVE_INTERVAL_MS;
 
@@ -593,18 +648,56 @@ export class ElysiumIngestionService {
   // tokens stream
   // ---------------------------------------------------------------------------
 
-  private async tokensTick(): Promise<number> {
-    let upserted = 0;
-    await this.pageAll('/tokens', { standard: 'erc20' }, async (raw) => {
+  /**
+   * Reads `pages` pages of the token listing from page `from` into the registry. Returns the page
+   * to read next, the rows read, and whether the listing ended inside the range.
+   */
+  private async readTokenPages(from: number, pages: number): Promise<{ next: number; read: number; ended: boolean }> {
+    let read = 0;
+    for (let page = from; page < from + pages; page++) {
+      this.ensureRunning();
+      await this.throttle.wait();
+      const raw = await this.client.fetchIngestPage('/tokens', { standard: 'erc20', limit: PAGE_SIZE, offset: page * PAGE_SIZE });
       const rows = dedupeBy(
         raw.map(normalizeToken).filter((r): r is TokenRow => r !== null),
         (r) => r.address
       );
-      upserted += await this.repo.upsertTokens(rows);
-    }, { truncate: true });
-    // rows = size of the latest listing (a snapshot), not a running total.
-    await this.repo.advance('tokens', { cursor: new Date(), setRows: upserted, backfillDone: true });
-    return TOKENS_INTERVAL_MS;
+      await this.repo.upsertTokens(rows);
+      try {
+        await this.repo.nameLaunches(rows);
+      } catch (error) {
+        // Names for the launchpad list are a convenience: never the reason a registry run fails.
+        logDeduplicator.warn('Elysium ingest: launches not named from this registry page', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        });
+      }
+      read += raw.length;
+      if (raw.length < PAGE_SIZE) return { next: page + 1, read, ended: true };
+    }
+    return { next: from + pages, read, ended: false };
+  }
+
+  private async tokensTick(): Promise<number> {
+    const started = Date.now();
+    const head = await this.readTokenPages(0, TOKENS_HEAD_PAGES);
+    let read = head.read;
+    if (!head.ended) {
+      // Where the walk through the rest of the listing stands: kept in the database, so a restart
+      // resumes it instead of starting over (with a few deploys a day it would never reach the end).
+      const resume = Number((await this.repo.getState('tokenstail'))?.rows ?? 0);
+      const tail = await this.readTokenPages(Math.max(TOKENS_HEAD_PAGES, resume), TOKENS_TAIL_PAGES);
+      read += tail.read;
+      await this.repo.advance('tokenstail', {
+        cursor: new Date(),
+        setRows: tail.ended ? TOKENS_HEAD_PAGES : tail.next,
+        // True once the walk has reached the end of the listing at least once.
+        ...(tail.ended ? { backfillDone: true } : {}),
+      });
+    }
+    // rows = tokens read by the latest run, not a running total.
+    await this.repo.advance('tokens', { cursor: new Date(), setRows: read, backfillDone: true });
+    // From start to start: the head is read every TOKENS_INTERVAL_MS, however long a run took.
+    return Math.max(MINUTE_MS, TOKENS_INTERVAL_MS - (Date.now() - started));
   }
 
   // ---------------------------------------------------------------------------
@@ -642,15 +735,17 @@ export class ElysiumIngestionService {
 
     while (Date.now() < deadline) {
       this.ensureRunning();
-      const { head, lagging } = await this.ingestHorizon();
+      const { head, lagging } = await this.ingestHorizon(Date.now() - DEX_SETTLE_MS);
       const w = planWindow({
         cursor,
         backfillDone,
-        now: new Date(),
+        now: new Date(Date.now()),
         genesis: ELYSIUM_GENESIS,
         stepMs: DEX_STEP_MS,
         overlapMs: DEX_OVERLAP_MS,
         settleMs: DEX_SETTLE_MS,
+        // While the provider lags, the windows past its head are read from the RPC, which is current.
+        ceiling: lagging ? null : this.providerCeiling(head),
       });
       if (!w) return DEX_LIVE_INTERVAL_MS;
       const inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging));
@@ -859,15 +954,16 @@ export class ElysiumIngestionService {
 
     while (Date.now() < deadline) {
       this.ensureRunning();
-      const { head, lagging } = await this.ingestHorizon();
+      const { head, lagging } = await this.ingestHorizon(Date.now() - LAUNCHPAD_SETTLE_MS);
       const w = planWindow({
         cursor,
         backfillDone,
-        now: new Date(),
+        now: new Date(Date.now()),
         genesis: ELYSIUM_GENESIS,
         stepMs: LAUNCHPAD_STEP_MS,
         overlapMs: LAUNCHPAD_OVERLAP_MS,
         settleMs: LAUNCHPAD_SETTLE_MS,
+        ceiling: lagging ? null : this.providerCeiling(head),
       });
       if (!w) return LAUNCHPAD_LIVE_INTERVAL_MS;
       const inserted = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging));
@@ -893,7 +989,12 @@ export class ElysiumIngestionService {
 
   private async launchStatsTick(): Promise<number> {
     const deadline = Date.now() + TICK_BUDGET_MS;
-    const targets = await this.repo.listLaunchesForStats(LAUNCH_STATS_BATCH, LAUNCH_STATS_MAX_AGE_S);
+    const targets = await this.repo.listLaunchesForStats(
+      LAUNCH_STATS_BATCH,
+      LAUNCH_STATS_PRIORITY,
+      LAUNCH_STATS_ACTIVE_MAX_AGE_S,
+      LAUNCH_STATS_QUIET_MAX_AGE_S
+    );
     let done = 0;
     let processed = 0;
     for (const t of targets) {

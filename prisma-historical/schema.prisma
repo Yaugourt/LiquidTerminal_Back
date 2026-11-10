@@ -298,6 +298,7 @@ model ElysiumLaunch {
   @@index([curve])
   @@index([launchpad, createdAt])
   @@index([quote, lastPrice])
+  @@index([statsAt])
   @@map("elysium_launch")
 }
 

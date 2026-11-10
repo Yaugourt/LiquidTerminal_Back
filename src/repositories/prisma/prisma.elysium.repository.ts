@@ -25,7 +25,12 @@ export type ElysiumStream =
   | 'launchpad'
   | 'launchstats'
   /** Not a stream of its own: the marker of the one-time rebuild of the launch market state. */
-  | 'launchstate';
+  | 'launchstate'
+  /** Not a stream of its own: where the walk through the tail of the token listing stands (`rows` = next page). */
+  | 'tokenstail';
+
+/** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
+export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'tokenstail']);
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -191,7 +196,11 @@ export class ElysiumIngestRepository {
     return result[0]?.n ?? 0;
   }
 
-  /** Upserts the token registry snapshot. */
+  /**
+   * Upserts a page of the token registry and returns how many rows it wrote. A row that says
+   * what the registry already holds is left alone: most of a page is unchanged from one run to
+   * the next, and rewriting it was 200,000 dead rows a run for nothing.
+   */
   public async upsertTokens(rows: TokenRow[]): Promise<number> {
     if (rows.length === 0) return 0;
     const result = await prismaHistorical.$queryRawUnsafe<Array<{ n: number }>>(
@@ -212,16 +221,12 @@ export class ElysiumIngestRepository {
           first_seen = COALESCE(elysium_token.first_seen, EXCLUDED.first_seen),
           transfer_count = EXCLUDED.transfer_count,
           updated_at = now()
-        RETURNING 1
-      ),
-      named AS (
-        -- Launches whose event carries no name (Signal, aka.fun) take the registry's, so the
-        -- launchpad search finds them by symbol. Only rows still without one are written.
-        UPDATE elysium_launch l
-        SET symbol = COALESCE(l.symbol, r.symbol), name = COALESCE(l.name, r.name)
-        FROM jsonb_to_recordset($1::jsonb) AS r(address text, name text, symbol text)
-        WHERE l.token = r.address
-          AND ((l.symbol IS NULL AND r.symbol IS NOT NULL) OR (l.name IS NULL AND r.name IS NOT NULL))
+        WHERE (elysium_token.standard, elysium_token.name, elysium_token.symbol, elysium_token.decimals,
+               elysium_token.origin, elysium_token.transfer_count)
+            IS DISTINCT FROM
+              (EXCLUDED.standard, EXCLUDED.name, EXCLUDED.symbol, EXCLUDED.decimals,
+               EXCLUDED.origin, EXCLUDED.transfer_count)
+           OR (elysium_token.first_seen IS NULL AND EXCLUDED.first_seen IS NOT NULL)
         RETURNING 1
       )
       SELECT count(*)::int AS n FROM up
@@ -229,6 +234,25 @@ export class ElysiumIngestRepository {
       JSON.stringify(rows)
     );
     return result[0]?.n ?? 0;
+  }
+
+  /**
+   * Launches whose event carries no name (Signal, aka.fun) take the registry's, so the launchpad
+   * search finds them by symbol. Only rows still without one are written. A statement of its own,
+   * run after the registry upsert: it writes rows of elysium_launch that the trade inserts and
+   * the holder stats write too, and a lock it loses there must not undo a registry page.
+   */
+  public async nameLaunches(rows: TokenRow[]): Promise<number> {
+    const named = rows.filter((r) => r.symbol !== null || r.name !== null);
+    if (named.length === 0) return 0;
+    return prismaHistorical.$executeRawUnsafe(
+      `UPDATE elysium_launch l
+       SET symbol = COALESCE(l.symbol, r.symbol), name = COALESCE(l.name, r.name)
+       FROM jsonb_to_recordset($1::jsonb) AS r(address text, name text, symbol text)
+       WHERE l.token = r.address
+         AND ((l.symbol IS NULL AND r.symbol IS NOT NULL) OR (l.name IS NULL AND r.name IS NOT NULL))`,
+      JSON.stringify(named.map((r) => ({ address: r.address, name: r.name, symbol: r.symbol })))
+    );
   }
 
   /** Inserts DEX pools (a pool address is created once, so conflicts are ignored). */
@@ -590,7 +614,7 @@ export class ElysiumIngestRepository {
     );
   }
 
-  /** Gives every launch without a name of its own the registry's (see upsertTokens); the one-time fill. */
+  /** Gives every launch without a name of its own the registry's (see nameLaunches); the one-time fill. */
   public async fillLaunchNames(): Promise<number> {
     return prismaHistorical.$executeRawUnsafe(
       `UPDATE elysium_launch l
@@ -602,21 +626,55 @@ export class ElysiumIngestRepository {
   }
 
   /**
-   * Launches whose holder stats are missing or older than `maxAgeS`, oldest
-   * first. The creator falls back to the launch tx sender (Signal curves).
+   * The launches whose holder stats to read next, at most `limit`:
+   * 1. the ones never read, newest first (a launch shows its holders soon after it appears);
+   * 2. the ones traded over the last 24h whose stats are older than `activeMaxAgeS`, oldest first;
+   * 3. everything else older than `quietMaxAgeS`, oldest first.
+   * The first two together take at most `priority` of the batch, so the long walk through the
+   * quiet launches always moves. The creator falls back to the launch tx sender (Signal curves).
    */
-  public async listLaunchesForStats(limit: number, maxAgeS: number): Promise<LaunchStatsTarget[]> {
+  public async listLaunchesForStats(
+    limit: number,
+    priority: number,
+    activeMaxAgeS: number,
+    quietMaxAgeS: number
+  ): Promise<LaunchStatsTarget[]> {
     return prismaHistorical.$queryRawUnsafe<LaunchStatsTarget[]>(
       `
+      WITH first AS (
+        SELECT * FROM (
+          (SELECT l.token, 0 AS pri, -extract(epoch FROM l.created_at) AS ord
+           FROM elysium_launch l WHERE l.stats_at IS NULL
+           ORDER BY l.created_at DESC LIMIT $2::int)
+          UNION ALL
+          (SELECT l.token, 1 AS pri, extract(epoch FROM l.stats_at) AS ord
+           FROM (SELECT DISTINCT token FROM elysium_launch_trade
+                 WHERE block_time >= now() - interval '24 hours') a
+           JOIN elysium_launch l ON l.token = a.token
+           WHERE l.stats_at < now() - make_interval(secs => $3::int)
+           ORDER BY l.stats_at LIMIT $2::int)
+        ) p ORDER BY pri, ord LIMIT $2::int
+      ),
+      picks AS (
+        SELECT token, pri, ord FROM first
+        UNION ALL
+        (SELECT l.token, 2 AS pri, extract(epoch FROM l.stats_at) AS ord
+         FROM elysium_launch l
+         WHERE l.stats_at < now() - make_interval(secs => $4::int)
+         ORDER BY l.stats_at LIMIT $1::int)
+      ),
+      best AS (SELECT DISTINCT ON (token) token, pri, ord FROM picks ORDER BY token, pri)
       SELECT l.token, coalesce(l.creator, t.from_addr) AS creator, l.curve, l.pool
-      FROM elysium_launch l
-      LEFT JOIN elysium_tx t ON t.tx_hash = l.tx_hash
-      WHERE l.stats_at IS NULL OR l.stats_at < now() - make_interval(secs => $2::int)
-      ORDER BY l.stats_at ASC NULLS FIRST, l.created_at DESC
+      FROM best
+      JOIN elysium_launch l ON l.token = best.token
+      LEFT JOIN elysium_tx t ON t.tx_hash = l.tx_hash AND l.creator IS NULL
+      ORDER BY best.pri, best.ord
       LIMIT $1::int
       `,
       limit,
-      maxAgeS
+      priority,
+      activeMaxAgeS,
+      quietMaxAgeS
     );
   }
 

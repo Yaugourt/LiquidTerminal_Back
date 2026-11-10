@@ -1,6 +1,6 @@
 import { prismaHistorical } from '../../core/prisma.historical.service';
 import { cacheService } from '../../core/cache.service';
-import { ElysiumIngestRepository } from '../../repositories/prisma/prisma.elysium.repository';
+import { ELYSIUM_STATE_MARKERS, ElysiumIngestRepository } from '../../repositories/prisma/prisma.elysium.repository';
 import {
   fillDays,
   lastDays,
@@ -106,8 +106,8 @@ export class ElysiumAnalyticsService {
 
   public getStatus(): Promise<{ streams: Array<Record<string, unknown>> }> {
     return this.cachedFresh('status', 'v1', async () => {
-      // `launchstate` is the marker of a one-time rebuild, not a stream: it has no lag to show.
-      const rows = (await ElysiumIngestRepository.getInstance().listStates()).filter((r) => r.stream !== 'launchstate');
+      // Markers (a one-time rebuild, a position in a listing) are not streams: they have no lag to show.
+      const rows = (await ElysiumIngestRepository.getInstance().listStates()).filter((r) => !ELYSIUM_STATE_MARKERS.has(r.stream));
       const now = Date.now();
       return {
         streams: rows.map((r) => ({

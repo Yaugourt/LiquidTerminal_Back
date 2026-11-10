@@ -19,6 +19,37 @@ const base = {
 };
 
 describe('planWindow', () => {
+  describe('ceiling (what the provider has indexed)', () => {
+    const now = new Date('2026-09-20T00:01:00Z');
+    const cursor = new Date('2026-09-20T00:00:30Z');
+    const live = { ...base, overlapMs: 20_000, cursor, backfillDone: true, now };
+
+    it('does not hold a window back when the provider is ahead of the settle horizon', () => {
+      const w = planWindow({ ...live, ceiling: new Date('2026-09-20T00:00:52Z') });
+      expect(w?.end).toEqual(new Date('2026-09-20T00:00:45Z'));
+      expect(w?.caughtUp).toBe(true);
+      // Unknown head: the clock alone bounds the window.
+      expect(planWindow({ ...live, ceiling: null })?.end).toEqual(new Date('2026-09-20T00:00:45Z'));
+      expect(planWindow(live)?.end).toEqual(new Date('2026-09-20T00:00:45Z'));
+    });
+
+    it('ends the window at the ceiling when the provider is behind', () => {
+      const w = planWindow({ ...live, ceiling: new Date('2026-09-20T00:00:38Z') });
+      expect(w).toEqual({ start: new Date('2026-09-20T00:00:10Z'), end: new Date('2026-09-20T00:00:38Z'), caughtUp: true });
+    });
+
+    it('reads nothing while the ceiling has not passed the cursor, so the cursor never runs ahead', () => {
+      expect(planWindow({ ...live, ceiling: cursor })).toBeNull();
+      expect(planWindow({ ...live, ceiling: new Date('2026-09-19T00:00:00Z') })).toBeNull();
+    });
+
+    it('bounds a backfill window too', () => {
+      const w = planWindow({ ...base, cursor: new Date('2026-09-12T00:00:00Z'), backfillDone: false, now, ceiling: new Date('2026-09-12T00:20:00Z') });
+      expect(w?.end).toEqual(new Date('2026-09-12T00:20:00Z'));
+      expect(w?.caughtUp).toBe(true);
+    });
+  });
+
   it('starts at genesis without overlap when the stream never ran', () => {
     const now = new Date('2026-09-20T00:00:00Z');
     const w = planWindow({ ...base, cursor: null, backfillDone: false, now });

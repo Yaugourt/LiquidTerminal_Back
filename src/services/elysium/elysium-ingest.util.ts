@@ -29,16 +29,22 @@ export interface PlanWindowInput {
   overlapMs: number;
   /** Rows younger than now - settleMs are left for the next tick. */
   settleMs: number;
+  /**
+   * No window ends past this time, whatever the clock says: what the provider has indexed so far.
+   * Absent or null when that is not known, or does not apply (a source that is always current).
+   */
+  ceiling?: Date | null;
 }
 
 /**
- * Next window to ingest, or null when the cursor is already at the horizon.
+ * Next window to ingest, or null when the cursor is already at the horizon
+ * (now - settleMs, or the ceiling when it is earlier).
  * Backfill walks forward from genesis in `stepMs` windows without overlap;
  * live mode re-reads `overlapMs` before the cursor so late rows are caught
  * (inserts are idempotent, so the overlap only costs a few duplicate reads).
  */
 export function planWindow(p: PlanWindowInput): IngestWindow | null {
-  const horizon = p.now.getTime() - p.settleMs;
+  const horizon = Math.min(p.now.getTime() - p.settleMs, p.ceiling ? p.ceiling.getTime() : Infinity);
   const base = (p.cursor ?? p.genesis).getTime();
   if (base >= horizon) return null;
   const start = p.backfillDone ? Math.max(base - p.overlapMs, p.genesis.getTime()) : base;
