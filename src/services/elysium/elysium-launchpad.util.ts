@@ -623,6 +623,26 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
   return null;
 }
 
+/**
+ * Every value a log of `raw` can name its market by: the emitting contract, and its first indexed
+ * argument read as an address (a token or a curve) and as 32 bytes (a V4 pool id). That is what
+ * decodeLaunchTrade and decodeGraduation look a market up with, so the launches matching these
+ * keys are all the decoders need for these logs.
+ */
+export function launchMarketCandidates(raw: readonly unknown[]): string[] {
+  const keys = new Set<string>();
+  for (const r of raw) {
+    const b = base(r);
+    if (!b) continue;
+    keys.add(b.address);
+    const asAddress = topicAddress(b.l.topic1);
+    if (asAddress) keys.add(asAddress);
+    const asWord = lower(b.l.topic1);
+    if (asWord) keys.add(asWord);
+  }
+  return [...keys];
+}
+
 /** Market keys a launch is traded under. */
 export function launchMarketKeys(l: Pick<LaunchRow, 'token' | 'curve' | 'pool'> & { launchpad: string }): string[] {
   // A curve launch trades on its curve (on Neuriio: the token, inside the pad), then on its V2 pair once graduated.

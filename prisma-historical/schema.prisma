@@ -299,6 +299,7 @@ model ElysiumLaunch {
   @@index([launchpad, createdAt])
   @@index([quote, lastPrice])
   @@index([statsAt])
+  @@index([pool])
   @@map("elysium_launch")
 }
 

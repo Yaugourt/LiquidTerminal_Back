@@ -41,6 +41,7 @@ import {
   decodeLaunchTrade,
   GRADUATION_TOPICS,
   LAUNCH_TOPIC_ORDER,
+  launchMarketCandidates,
   launchMarketKeys,
   LaunchMarket,
   LaunchRow,
@@ -862,9 +863,14 @@ export class ElysiumIngestionService {
   // launchpad stream (Chainzy, CorePad, Signal, Neuriio: launches, graduations, trades)
   // ---------------------------------------------------------------------------
 
-  private async launchMarkets(): Promise<Map<string, LaunchMarket>> {
+  /**
+   * The markets the logs of `raw` can belong to, by market key: read from the launches for the
+   * keys these logs name, at the time of the call (so a launch or a graduation inserted earlier
+   * in the same window is there).
+   */
+  private async launchMarketsFor(raw: readonly unknown[]): Promise<Map<string, LaunchMarket>> {
     const markets = new Map<string, LaunchMarket>();
-    for (const l of await this.repo.listLaunchMarkets()) {
+    for (const l of await this.repo.findLaunchMarkets(launchMarketCandidates(raw))) {
       const market: LaunchMarket = { token: l.token, launchpad: l.launchpad as Launchpad, quote: l.quote };
       for (const key of launchMarketKeys(l)) markets.set(key, market);
     }
@@ -883,9 +889,9 @@ export class ElysiumIngestionService {
         inserted += await this.repo.insertLaunches(rows);
       });
     }
-    const known = await this.launchMarkets();
     for (const topic0 of GRADUATION_TOPICS) {
       await this.pageLogs(source, topic0, start, end, async (raw) => {
+        const known = await this.launchMarketsFor(raw);
         const rows = raw.map(decodeGraduation).filter((g): g is NonNullable<typeof g> => {
           const key = g?.curve ?? g?.token;
           return key !== null && key !== undefined && known.has(key);
@@ -893,10 +899,11 @@ export class ElysiumIngestionService {
         await this.repo.markGraduated(rows);
       });
     }
-    // Graduations can add a pair (Neuriio): rebuild the markets so its swaps in this window are kept.
-    const markets = await this.launchMarkets();
+    // Read per page of logs, after the launches and the graduations above: a pair a graduation
+    // just added (Neuriio) is there for its swaps of this window.
     for (const topic0 of TRADE_TOPICS) {
       await this.pageLogs(source, topic0, start, end, async (raw) => {
+        const markets = await this.launchMarketsFor(raw);
         const rows = dedupeBy(
           raw.map((r) => decodeLaunchTrade(r, markets)).filter((r): r is LaunchTradeRow => r !== null),
           (r) => `${r.tx_hash}:${r.log_index}`

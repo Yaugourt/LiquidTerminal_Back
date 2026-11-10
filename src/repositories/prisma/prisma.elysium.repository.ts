@@ -8,6 +8,9 @@ import type {
   LaunchTradeRow,
 } from '../../services/elysium/elysium-launchpad.util';
 
+/** Market keys looked up per statement (a page of 1,000 logs names at most 3,000). */
+const LAUNCH_MARKET_KEYS_PER_QUERY = 5_000;
+
 /** Time limit of a rebuild of the launch market state (the one-time fill reads every trade). */
 const REBUILD_TIMEOUT_MS = 600_000;
 
@@ -475,11 +478,25 @@ export class ElysiumIngestRepository {
     return result[0]?.n ?? 0;
   }
 
-  /** Every known launch market, for the trade decoders. */
-  public async listLaunchMarkets(): Promise<LaunchMarketDbRow[]> {
-    return prismaHistorical.$queryRawUnsafe<LaunchMarketDbRow[]>(
-      `SELECT token, launchpad, kind, curve, pool, quote FROM elysium_launch`
-    );
+  /**
+   * The launches a set of market keys (contract addresses, V4 pool ids) belongs to, for the trade
+   * decoders: whichever of token, curve or pool matches. Three index lookups per batch of keys,
+   * where the decoders used to be handed every launch (420,000 rows, read twice per 30 s tick).
+   */
+  public async findLaunchMarkets(keys: string[]): Promise<LaunchMarketDbRow[]> {
+    if (keys.length === 0) return [];
+    const rows: LaunchMarketDbRow[] = [];
+    for (let i = 0; i < keys.length; i += LAUNCH_MARKET_KEYS_PER_QUERY) {
+      const batch = keys.slice(i, i + LAUNCH_MARKET_KEYS_PER_QUERY);
+      rows.push(
+        ...(await prismaHistorical.$queryRawUnsafe<LaunchMarketDbRow[]>(
+          `SELECT token, launchpad, kind, curve, pool, quote FROM elysium_launch
+           WHERE token = ANY($1::text[]) OR curve = ANY($1::text[]) OR pool = ANY($1::text[])`,
+          batch
+        ))
+      );
+    }
+    return rows;
   }
 
   /**
