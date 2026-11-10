@@ -351,6 +351,10 @@ export class InternalWebSocketServer {
 
     // Check connection limits
     if (!this.checkConnectionLimits(ip)) {
+      // The refused socket keeps receiving frames until its close completes.
+      // Without an 'error' listener, one invalid frame from it (unmasked,
+      // oversized) is an uncaughtException, and the process exits.
+      ws.on('error', () => undefined);
       ws.close(1008, 'Connection limit exceeded');
       return;
     }
