@@ -449,11 +449,22 @@ export class ElysiumDayCheckService {
 
 /**
  * True for a failure of the provider or of the way to it (an HTTP error, its breaker open, a
- * timeout, a page that announced more rows and carried none), as opposed to a failure of our
- * own statements.
+ * timeout, a page that announced more rows and carried none), and for a run that was ended on
+ * purpose (the service stopping, the tick given up at its time limit), as opposed to a failure
+ * of our own statements on this slot.
+ *
+ * The HTTP clients turn a request that got no answer in time into a plain `Request timeout`:
+ * it was not recognised here, so three slow answers of the provider on one slot were taken for
+ * three failures of ours, and the slot was given up.
  */
-function isProviderFailure(error: unknown): boolean {
+export function isProviderFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  if (['HttpApiError', 'OutboundCapacityError', 'AbortError', 'TimeoutError', 'PageIncompleteError', 'PageCapError'].includes(error.name)) return true;
-  return /circuit breaker is open|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(error.message);
+  if (
+    ['HttpApiError', 'OutboundCapacityError', 'AbortError', 'TimeoutError', 'PageIncompleteError', 'PageCapError', 'IngestStoppedError', 'TickGivenUpError'].includes(
+      error.name
+    )
+  ) {
+    return true;
+  }
+  return /circuit breaker is open|request timeout|fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(error.message);
 }

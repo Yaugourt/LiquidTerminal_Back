@@ -10,7 +10,7 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 }));
 jest.mock('../../../src/utils/logger', () => ({ rawLogger: { info: jest.fn().mockResolvedValue(undefined) } }));
 
-import { ElysiumDayCheckService, daysToCheck, type DayCheckIo } from '../../../src/services/elysium/elysium-day-check.service';
+import { ElysiumDayCheckService, daysToCheck, isProviderFailure, type DayCheckIo } from '../../../src/services/elysium/elysium-day-check.service';
 import { ElysiumCheckRepository, type DayCheckRow, type DayCounts } from '../../../src/repositories/prisma/prisma.elysium-check.repository';
 import { IngestRejects } from '../../../src/services/elysium/elysium-ingest-rejects';
 import type { TxRow } from '../../../src/services/elysium/elysium-ingest.util';
@@ -543,5 +543,26 @@ describe('the daily check', () => {
     io.txCursor.mockResolvedValue(new Date(clock - 15_000));
     await svc.tick();
     expect(slotsRead.length).toBeGreaterThan(288);
+  });
+});
+
+describe('what is not a slot\'s own failure', () => {
+  const named = (name: string, message = 'x'): Error => Object.assign(new Error(message), { name });
+
+  it('a request the provider did not answer in time: the HTTP clients say it as a plain "Request timeout"', () => {
+    expect(isProviderFailure(new Error('Request timeout'))).toBe(true);
+    expect(isProviderFailure(new Error('API request failed: fetch failed'))).toBe(true);
+    expect(isProviderFailure(named('HttpApiError', 'API error: 503'))).toBe(true);
+  });
+
+  it('a run ended on purpose: the service stopping, the tick given up at its time limit', () => {
+    expect(isProviderFailure(named('IngestStoppedError'))).toBe(true);
+    expect(isProviderFailure(named('TickGivenUpError'))).toBe(true);
+  });
+
+  it('a statement of ours that fails is the slot\'s failure', () => {
+    expect(isProviderFailure(new Error('duplicate key value violates unique constraint'))).toBe(false);
+    expect(isProviderFailure(named('PrismaClientKnownRequestError', 'Raw query failed'))).toBe(false);
+    expect(isProviderFailure('not an error')).toBe(false);
   });
 });
