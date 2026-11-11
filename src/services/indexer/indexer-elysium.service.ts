@@ -17,6 +17,10 @@ import { buildHypedexerCacheKey } from '../../clients/hypedexer/rest/shared/hype
 import { cacheService } from '../../core/cache.service';
 import { RateLimiterService } from '../../core/hyperLiquid.ratelimiter.service';
 import { HYPEDEXER_TTL } from '../../constants/hypedexer.cache';
+import { UpstreamBudgetExceededError } from '../../errors/upstreamBudget.errors';
+import { ClientBudget } from '../../utils/clientBudget';
+import { positiveIntEnv } from '../../utils/env';
+import { currentUpstreamCaller } from '../../utils/request-context';
 
 const ELYSIUM_CACHE_DOMAIN = 'elysium';
 
@@ -32,6 +36,14 @@ export class IndexerElysiumService {
     maxWeightPerMinute: 240,
     requestWeight: 1,
   });
+  /**
+   * One client's share of those 240: a quarter. The route limiter lets a
+   * client make 300 address requests a minute, so without a share one client
+   * with fresh addresses spent the whole budget and every other visitor's
+   * lookups failed. An address page makes 3 of these calls and a token page 2:
+   * 60 a minute is 20 pages a minute that nobody has opened yet.
+   */
+  private readonly clientShare = new ClientBudget(positiveIntEnv('ELYSIUM_USER_LOOKUPS_PER_CLIENT_MINUTE', 60), 60_000);
 
   public static getInstance(): IndexerElysiumService {
     if (!IndexerElysiumService.instance) {
@@ -115,8 +127,17 @@ export class IndexerElysiumService {
    * address is a fresh cache key, so a scan spread over many IPs would
    * otherwise spend the paid upstream quota and take the shared outbound
    * slots from every other route. Over budget, these lookups fail fast.
+   *
+   * The client the request is answered for first takes the call from its own
+   * share: past it, it is refused as its own doing (429 + Retry-After, and no
+   * failure is recorded against the address for the other visitors), and the
+   * common budget is left to everyone else.
    */
   private userLookup<T>(fetch: () => Promise<T>): Promise<T> {
+    const caller = currentUpstreamCaller();
+    if (caller && !this.clientShare.take(caller.ipKey, 1)) {
+      return Promise.reject(new UpstreamBudgetExceededError(this.clientShare.retryAfterS()));
+    }
     if (!this.userBudget.checkRateLimit('global')) {
       return Promise.reject(new Error('Elysium per-address lookup budget exhausted'));
     }

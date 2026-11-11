@@ -82,4 +82,71 @@ describe('IndexerElysiumService cache keys', () => {
     expect(client.getStats).toHaveBeenNthCalledWith(2, { network: 'testnet' });
     expect(client.getStats).toHaveBeenNthCalledWith(3, { network: 'mainnet' });
   });
+
+  describe('per-address lookups', () => {
+    const address = (n: number): string => '0x' + n.toString(16).padStart(40, '0');
+    const lookups = { getUserBalances: jest.fn().mockResolvedValue({ balances: [] }) };
+    let caller: { ipKey: string; open: boolean; exhausted: boolean; retryAfterS: number } | undefined;
+
+    beforeEach(() => {
+      jest.resetModules();
+      jest.doMock('../../../src/utils/request-context', () => ({ currentUpstreamCaller: () => caller }));
+      // Loaded again for each case: without these, each load would open a Redis connection and log it.
+      jest.doMock('../../../src/core/redis.service', () => ({ redisService: {} }));
+      jest.doMock('../../../src/utils/logDeduplicator', () => ({
+        logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+      }));
+      jest.doMock('../../../src/core/cache.service', () => ({
+        cacheService: { getOrSet: (_key: string, fetcher: () => Promise<unknown>) => fetcher() },
+      }));
+      jest.doMock('../../../src/clients/hypedexer/rest/elysium/elysium-indexer.client', () => ({
+        HypeDexerElysiumIndexerClient: { getInstance: () => lookups },
+      }));
+      lookups.getUserBalances.mockClear();
+      jest.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    });
+    afterEach(() => {
+      jest.restoreAllMocks();
+      const { RateLimiterService } = require('../../../src/core/hyperLiquid.ratelimiter.service');
+      RateLimiterService.destroyAll();
+    });
+
+    const fresh = (): IndexerElysiumService =>
+      (require('../../../src/services/indexer/indexer-elysium.service') as typeof import('../../../src/services/indexer/indexer-elysium.service')).IndexerElysiumService.getInstance();
+    const as = (ipKey: string): void => {
+      caller = { ipKey, open: true, exhausted: false, retryAfterS: 0 };
+    };
+
+    it('gives one client a quarter of the common budget, and tells it when to come back', async () => {
+      const svc = fresh();
+      as('198.51.100.1');
+      for (let i = 0; i < 60; i++) await svc.getUserBalances(address(i));
+      const refused = await svc.getUserBalances(address(60)).catch((e: Error) => e);
+      expect(refused).toMatchObject({ name: 'UpstreamBudgetExceededError', statusCode: 429, callerRefusal: true, retryAfterS: 60 });
+      expect(lookups.getUserBalances).toHaveBeenCalledTimes(60);
+
+      // The others are not touched: the common budget still has 180 calls for them.
+      for (const ip of ['198.51.100.2', '198.51.100.3', '198.51.100.4']) {
+        as(ip);
+        for (let i = 0; i < 60; i++) await svc.getUserBalances(address(1000 + i));
+      }
+      expect(lookups.getUserBalances).toHaveBeenCalledTimes(240);
+      // Only now is the common budget spent, for everyone, as before.
+      as('198.51.100.5');
+      await expect(svc.getUserBalances(address(5000))).rejects.toThrow('Elysium per-address lookup budget exhausted');
+
+      // Next minute: the first client has its share again.
+      (Date.now as jest.Mock).mockReturnValue(1_800_000_000_000 + 60_000);
+      as('198.51.100.1');
+      await expect(svc.getUserBalances(address(61))).resolves.toEqual({ balances: [] });
+    });
+
+    it('counts a call made for nobody against the common budget only', async () => {
+      const svc = fresh();
+      caller = undefined;
+      for (let i = 0; i < 100; i++) await svc.getUserBalances(address(i));
+      expect(lookups.getUserBalances).toHaveBeenCalledTimes(100);
+    });
+  });
 });
+

@@ -50,6 +50,7 @@ const mockEcosystem = {
 // So does the launchpad market service (its route has its own test).
 jest.mock('../../../src/services/elysium/elysium-launchpad-market.service', () => ({
   ElysiumLaunchpadMarketService: { getInstance: () => ({ getPage: jest.fn().mockResolvedValue({ tokens: [] }) }) },
+  LaunchpadBusyError: class extends Error {},
   LaunchpadSearchBusyError: class extends Error {},
 }));
 
