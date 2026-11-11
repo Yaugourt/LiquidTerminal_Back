@@ -45,7 +45,7 @@ describe('Elysium ingestion: what it asks the provider', () => {
     svc.throttle = { wait: async () => undefined };
     jest.spyOn(Date, 'now').mockReturnValue(NOW);
     fetchHead = jest.spyOn(client, 'fetchIngestHead');
-    fetchPage = jest.spyOn(client, 'fetchIngestPage').mockResolvedValue([]);
+    fetchPage = jest.spyOn(client, 'fetchIngestPage').mockResolvedValue({ rows: [], hasMore: false });
     advance = jest.spyOn(repo, 'advance').mockResolvedValue(undefined);
     getState = jest.spyOn(repo, 'getState');
     jest.spyOn(repo, 'insertTxs').mockResolvedValue({ inserted: 0, contracts: 0 });
@@ -122,7 +122,11 @@ describe('Elysium ingestion: what it asks the provider', () => {
   });
 
   describe('token stream', () => {
-    const page = (n: number) => Array.from({ length: n }, (_, i) => ({ address: '0x' + String(i).padStart(40, '0'), standard: 'erc20', transfer_count: 3 }));
+    // As the provider answers (measured 2026-11-11): has_more is true exactly when the page is full.
+    const page = (n: number) => ({
+      rows: Array.from({ length: n }, (_, i) => ({ address: '0x' + String(i).padStart(40, '0'), standard: 'erc20', transfer_count: 3 })),
+      hasMore: n === 1000,
+    });
     let upsert: jest.SpyInstance;
     const offsets = (): number[] => fetchPage.mock.calls.map((c) => (c[1] as { offset: number }).offset / 1000);
 

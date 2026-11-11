@@ -2,6 +2,7 @@ import { CircuitBreakerService } from '../../../../core/circuit.breaker.service'
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
+import { unwrapHypeDexerApiPayload } from '../../../../utils/hypedexer-api-response.util';
 
 type QueryValue = string | number | boolean | undefined | null;
 
@@ -33,6 +34,13 @@ export interface ElysiumIngestPageQuery {
   start_time?: string;
   end_time?: string;
   [key: string]: QueryValue;
+}
+
+/** One page of an upstream list, as the ingestion reads it. */
+export interface ElysiumIngestPage {
+  rows: unknown[];
+  /** The provider's `has_more`; null when the answer has no such flag. */
+  hasMore: boolean | null;
 }
 
 /** Upstream list paths the ingestion service pages through. */
@@ -239,16 +247,19 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
   }
 
   /**
-   * One page of an upstream list for the ingestion service. Returns the bare
-   * row array (the envelope is peeled); callers page until a short page.
+   * One page of an upstream list for the ingestion service: its rows, and what the provider says
+   * of the rest (`has_more`, null when the answer does not carry it). The flag is read before the
+   * envelope is peeled; it used to be thrown away with it.
    */
-  public async fetchIngestPage(path: ElysiumIngestPath, params: ElysiumIngestPageQuery): Promise<unknown[]> {
-    const data = await this.ingestCircuitBreaker.execute(() =>
-      this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}${path}${buildQuery(params)}`)
+  public async fetchIngestPage(path: ElysiumIngestPath, params: ElysiumIngestPageQuery): Promise<ElysiumIngestPage> {
+    const body = await this.ingestCircuitBreaker.execute(() =>
+      this.get<unknown>(`${ELYSIUM_PREFIX}${path}${buildQuery(params)}`)
     );
+    const flag = body && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>).has_more : null;
+    const data = unwrapHypeDexerApiPayload(body);
     if (!Array.isArray(data)) {
       throw new Error('Elysium ingest: expected a row array');
     }
-    return data;
+    return { rows: data, hasMore: typeof flag === 'boolean' ? flag : null };
   }
 }

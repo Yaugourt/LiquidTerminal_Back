@@ -59,13 +59,25 @@ import {
 const PAGE_SIZE = 1000;
 /** Hard stop per window: 200k rows/hour is ~20x the measured peak. */
 const MAX_PAGES_PER_WINDOW = 200;
-/** Smallest tx window the stream shrinks to when a window overflows the page cap. */
-const TX_MIN_STEP_MS = 60_000;
+/**
+ * Smallest window a time stream shrinks to when a window overflows the page cap. Only there is a
+ * window cut (anyone can write to the testnet, and a burst must not stall a stream for ever),
+ * and the cut is counted.
+ */
+const MIN_STEP_MS = 60_000;
 
 class PageCapError extends Error {
   constructor() {
     super('Elysium ingest: window exceeded the page cap');
     this.name = 'PageCapError';
+  }
+}
+
+/** The provider said there is more to read and returned nothing: the window cannot be trusted. */
+class PageIncompleteError extends Error {
+  constructor(path: string) {
+    super(`Elysium ingest: ${path} announced more rows and returned none`);
+    this.name = 'PageIncompleteError';
   }
 }
 /** At most ~2 upstream calls per second across every stream. */
@@ -275,6 +287,9 @@ export class ElysiumIngestionService {
   private backfillWindows = 0;
   /** Current tx window length: halves on a page-cap overflow, grows back after. */
   private txStepMs = TX_STEP_MS;
+  /** The same for the two log streams (their backfill windows are a day long). */
+  private dexStepMs = DEX_STEP_MS;
+  private launchpadStepMs = LAUNCHPAD_STEP_MS;
   /** Next block the live tx fallback reads, null until resolved from its cursor. */
   private liveBlock: number | null = null;
   /** When this process started polling, and what it has done about the launch market state since. */
@@ -445,6 +460,7 @@ export class ElysiumIngestionService {
 
   /** Every log with `topic0` in the window, page by page, from the chosen source. */
   private async pageLogs(
+    stream: ElysiumStream,
     source: LogSource,
     topic0: string,
     start: Date,
@@ -457,7 +473,17 @@ export class ElysiumIngestionService {
       return;
     }
     const time = { start_time: toUpstreamTime(start), end_time: toUpstreamTime(end) };
-    await this.pageAll('/logs', { ...time, topic0 }, onPage, { truncate: true });
+    // A topic with more logs than the page cap in this window: the caller reads it in halves,
+    // down to the smallest step. It used to be cut here, at any window length, and the cursor
+    // moved on: a day of backfill with 200,000 swaps of one kind lost the rest for good.
+    await this.pageAll(stream, '/logs', { ...time, topic0 }, onPage, { truncate: this.atSmallestStep(stream) });
+  }
+
+  /** Whether the stream's windows are down to the smallest step (only then may one be cut). */
+  private atSmallestStep(stream: ElysiumStream): boolean {
+    if (stream === 'dex') return this.dexStepMs <= MIN_STEP_MS;
+    if (stream === 'launchpad') return this.launchpadStepMs <= MIN_STEP_MS;
+    return true;
   }
 
   private ensureRunning(): void {
@@ -496,26 +522,38 @@ export class ElysiumIngestionService {
   }
 
   /**
-   * Pages a list endpoint until a short page, handing each page to `onPage`.
-   * At the page cap it throws PageCapError, or with `truncate` keeps what it
-   * read and returns true: anyone can write to the testnet, so a window that
-   * spam pushes past the cap must not stall a stream forever.
+   * Pages a list endpoint to its end, handing each page to `onPage`.
+   *
+   * The end is what the provider says it is (`has_more`), and the next page starts after the
+   * rows actually received. A page shorter than asked used to mean "done": a page the provider
+   * cut short then ended the window, and the cursor moved past the rows it had not sent.
+   * (Measured 2026-11-11: today `has_more` is true exactly when the page is full, so on a
+   * healthy provider both rules agree.) A page that announces more and carries nothing fails the
+   * window: it is read again later, and the cursor stays.
+   *
+   * At the page cap it throws PageCapError, for the caller to read the window in smaller steps;
+   * with `truncate` (the smallest step) it keeps what it read, counts the cut and returns true.
    */
   private async pageAll(
+    stream: ElysiumStream,
     path: ElysiumIngestPath,
     params: Record<string, string | boolean>,
     onPage: (rows: unknown[]) => Promise<void>,
     opts: { truncate?: boolean } = {}
   ): Promise<boolean> {
+    let offset = 0;
     for (let page = 0; page < MAX_PAGES_PER_WINDOW; page++) {
       this.ensureRunning();
       await this.throttle.wait();
-      const query: ElysiumIngestPageQuery = { ...params, limit: PAGE_SIZE, offset: page * PAGE_SIZE };
-      const rows = await this.client.fetchIngestPage(path, query);
+      const query: ElysiumIngestPageQuery = { ...params, limit: PAGE_SIZE, offset };
+      const { rows, hasMore } = await this.client.fetchIngestPage(path, query);
+      if (hasMore === true && rows.length === 0) throw new PageIncompleteError(path);
       await onPage(rows);
-      if (rows.length < PAGE_SIZE) return false;
+      offset += rows.length;
+      if (hasMore === false || (hasMore === null && rows.length < PAGE_SIZE)) return false;
     }
     if (!opts.truncate) throw new PageCapError();
+    this.rejects.note(stream, 'window-truncated', `${path} ${JSON.stringify(params)} cut after ${offset} rows`);
     logDeduplicator.warn('Elysium ingest: window truncated at the page cap', { path });
     return true;
   }
@@ -551,6 +589,7 @@ export class ElysiumIngestionService {
       let inserted = 0;
       try {
         await this.pageAll(
+          'tx',
           '/transactions',
           {
             start_time: toUpstreamTime(w.start),
@@ -564,12 +603,12 @@ export class ElysiumIngestionService {
             inserted += (await this.repo.insertTxs(rows)).inserted;
           },
           // At the smallest step, keep what was read and move on.
-          { truncate: this.txStepMs <= TX_MIN_STEP_MS }
+          { truncate: this.txStepMs <= MIN_STEP_MS }
         );
       } catch (error) {
         if (!(error instanceof PageCapError)) throw error;
         // Too many txs in this window (a spam burst): retry it in halves.
-        this.txStepMs = Math.max(TX_MIN_STEP_MS, Math.floor(this.txStepMs / 2));
+        this.txStepMs = Math.max(MIN_STEP_MS, Math.floor(this.txStepMs / 2));
         continue;
       }
       // Window fit: grow back toward the normal step.
@@ -655,7 +694,7 @@ export class ElysiumIngestionService {
 
   private async ingestBridgeWindow(params: Record<string, string>): Promise<number> {
     let changed = 0;
-    await this.pageAll('/bridge/transfers', params, async (raw) => {
+    await this.pageAll('bridge', '/bridge/transfers', params, async (raw) => {
       const rows = dedupeBy(this.mapCounted<BridgeRow>('bridge', raw, normalizeBridgeTransfer), (r) => r.transfer_id);
       changed += await this.repo.upsertBridgeTransfers(rows);
     }, { truncate: true });
@@ -740,7 +779,7 @@ export class ElysiumIngestionService {
     for (let page = from; page < from + pages; page++) {
       this.ensureRunning();
       await this.throttle.wait();
-      const raw = await this.client.fetchIngestPage('/tokens', { standard: 'erc20', limit: PAGE_SIZE, offset: page * PAGE_SIZE });
+      const { rows: raw, hasMore } = await this.client.fetchIngestPage('/tokens', { standard: 'erc20', limit: PAGE_SIZE, offset: page * PAGE_SIZE });
       const rows = dedupeBy(this.mapCounted<TokenRow>('tokens', raw, normalizeToken), (r) => r.address);
       await this.repo.upsertTokens(rows);
       try {
@@ -752,7 +791,8 @@ export class ElysiumIngestionService {
         });
       }
       read += raw.length;
-      if (raw.length < PAGE_SIZE) return { next: page + 1, read, ended: true };
+      // The listing ends where the provider says it does; without the flag, at a short page.
+      if (hasMore === false || (hasMore === null && raw.length < PAGE_SIZE)) return { next: page + 1, read, ended: true };
     }
     return { next: from + pages, read, ended: false };
   }
@@ -787,13 +827,13 @@ export class ElysiumIngestionService {
   private async ingestDexWindow(start: Date, end: Date, source: LogSource): Promise<number> {
     let inserted = 0;
     for (const topic0 of [DEX_TOPICS.v2PairCreated, DEX_TOPICS.v3PoolCreated]) {
-      await this.pageLogs(source, topic0, start, end, async (raw) => {
+      await this.pageLogs('dex', source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(this.decodeCounted<DexPoolRow>('dex', raw, decodePoolCreated), (r) => r.pool);
         inserted += await this.repo.insertDexPools(rows);
       });
     }
     for (const topic0 of [DEX_TOPICS.v2Swap, DEX_TOPICS.v3Swap]) {
-      await this.pageLogs(source, topic0, start, end, async (raw) => {
+      await this.pageLogs('dex', source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(this.decodeCounted<DexSwapRow>('dex', raw, decodeSwap), (r) => `${r.tx_hash}:${r.log_index}`);
         inserted += await this.repo.insertDexSwaps(rows);
       });
@@ -829,7 +869,7 @@ export class ElysiumIngestionService {
         backfillDone,
         now: new Date(Date.now()),
         genesis: ELYSIUM_GENESIS,
-        stepMs: DEX_STEP_MS,
+        stepMs: this.dexStepMs,
         overlapMs: DEX_OVERLAP_MS,
         settleMs: DEX_SETTLE_MS,
         // While the provider lags, the windows past its head are read from the RPC, which is current.
@@ -837,7 +877,17 @@ export class ElysiumIngestionService {
       });
       if (!w) return DEX_LIVE_INTERVAL_MS;
       this.countedUpTo.set('dex', cursor ? cursor.getTime() : -Infinity);
-      const inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging));
+      let inserted: number;
+      try {
+        inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging));
+      } catch (error) {
+        if (!(error instanceof PageCapError)) throw error;
+        // One topic has more logs in this window than the page cap: read it in halves (the rows
+        // already stored are skipped by their key when the halves are read).
+        this.dexStepMs = Math.max(MIN_STEP_MS, Math.floor(this.dexStepMs / 2));
+        continue;
+      }
+      this.dexStepMs = Math.min(DEX_STEP_MS, this.dexStepMs * 2);
       const finishesBackfill = !backfillDone && w.caughtUp;
       await this.repo.advance('dex', {
         cursor: w.end,
@@ -969,7 +1019,7 @@ export class ElysiumIngestionService {
     let inserted = 0;
     // Launches first, so trades in the same window find their market.
     for (const topic0 of LAUNCH_TOPIC_ORDER) {
-      await this.pageLogs(source, topic0, start, end, async (raw) => {
+      await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
         const launches: LaunchRow[] = [];
         for (const r of raw) {
           const row = decodeLaunch(r);
@@ -980,7 +1030,7 @@ export class ElysiumIngestionService {
       });
     }
     for (const topic0 of GRADUATION_TOPICS) {
-      await this.pageLogs(source, topic0, start, end, async (raw) => {
+      await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
         const known = await this.launchMarketsFor(raw);
         const rows = raw.map(decodeGraduation).filter((g, i): g is NonNullable<typeof g> => {
           const key = g?.curve ?? g?.token;
@@ -994,7 +1044,7 @@ export class ElysiumIngestionService {
     // Read per page of logs, after the launches and the graduations above: a pair a graduation
     // just added (Neuriio) is there for its swaps of this window.
     for (const topic0 of TRADE_TOPICS) {
-      await this.pageLogs(source, topic0, start, end, async (raw) => {
+      await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
         const markets = await this.launchMarketsFor(raw);
         const trades: LaunchTradeRow[] = [];
         for (const r of raw) {
@@ -1065,14 +1115,22 @@ export class ElysiumIngestionService {
         backfillDone,
         now: new Date(Date.now()),
         genesis: ELYSIUM_GENESIS,
-        stepMs: LAUNCHPAD_STEP_MS,
+        stepMs: this.launchpadStepMs,
         overlapMs: LAUNCHPAD_OVERLAP_MS,
         settleMs: LAUNCHPAD_SETTLE_MS,
         ceiling: lagging ? null : this.providerCeiling(head),
       });
       if (!w) return LAUNCHPAD_LIVE_INTERVAL_MS;
       this.countedUpTo.set('launchpad', cursor ? cursor.getTime() : -Infinity);
-      const inserted = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging));
+      let inserted: number;
+      try {
+        inserted = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging));
+      } catch (error) {
+        if (!(error instanceof PageCapError)) throw error;
+        this.launchpadStepMs = Math.max(MIN_STEP_MS, Math.floor(this.launchpadStepMs / 2));
+        continue;
+      }
+      this.launchpadStepMs = Math.min(LAUNCHPAD_STEP_MS, this.launchpadStepMs * 2);
       const finishesBackfill = !backfillDone && w.caughtUp;
       await this.repo.advance('launchpad', {
         cursor: w.end,

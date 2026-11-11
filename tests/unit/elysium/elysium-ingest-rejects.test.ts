@@ -127,6 +127,7 @@ describe('Elysium ingestion: left-out rows are counted and written', () => {
   let addRejects: jest.SpyInstance;
   let fetchPage: jest.SpyInstance;
 
+  const page = (rows: unknown[]) => ({ rows, hasMore: false });
   const tx = (n: number, at: number, over: Record<string, unknown> = {}) => ({
     tx_hash: `0x${n.toString(16).padStart(64, '0')}`,
     from_addr: `0x${'a'.repeat(40)}`,
@@ -162,12 +163,12 @@ describe('Elysium ingestion: left-out rows are counted and written', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('counts a transaction without a sender once, not the system ones, and not the ones read before', async () => {
-    fetchPage.mockResolvedValue([
+    fetchPage.mockResolvedValue(page([
       tx(1, NOW - 30_000),
       tx(2, NOW - 30_000, { from_addr: '' }), // malformed, new
       tx(3, NOW - 30_000, { is_system: true, from_addr: '' }), // left out on purpose
       tx(4, NOW - 50_000, { from_addr: '' }), // malformed, but in the part re-read before the cursor
-    ]);
+    ]));
 
     await svc.runTick('tx', () => svc.txTick());
 
@@ -179,25 +180,25 @@ describe('Elysium ingestion: left-out rows are counted and written', () => {
   });
 
   it('writes nothing when nothing was left out', async () => {
-    fetchPage.mockResolvedValue([tx(1, NOW - 30_000)]);
+    fetchPage.mockResolvedValue(page([tx(1, NOW - 30_000)]));
     await svc.runTick('tx', () => svc.txTick());
     expect(addRejects).not.toHaveBeenCalled();
   });
 
   it('keeps the counts when they cannot be written, and writes them with the next tick’s', async () => {
-    fetchPage.mockResolvedValue([tx(2, NOW - 30_000, { from_addr: '' })]);
+    fetchPage.mockResolvedValue(page([tx(2, NOW - 30_000, { from_addr: '' })]));
     addRejects.mockRejectedValueOnce(new Error('connection lost'));
     await svc.runTick('tx', () => svc.txTick());
     expect(svc.rejects.size).toBe(1);
 
-    fetchPage.mockResolvedValue([tx(5, NOW - 20_000, { tx_hash: '' })]);
+    fetchPage.mockResolvedValue(page([tx(5, NOW - 20_000, { tx_hash: '' })]));
     await svc.runTick('tx', () => svc.txTick());
     expect(addRejects).toHaveBeenLastCalledWith([expect.objectContaining({ stream: 'tx', reason: 'row-malformed', count: 2 })]);
     expect(svc.rejects.size).toBe(0);
   });
 
   it('writes the counts of a tick that failed, too', async () => {
-    fetchPage.mockResolvedValueOnce([tx(2, NOW - 30_000, { from_addr: '' })]);
+    fetchPage.mockResolvedValueOnce(page([tx(2, NOW - 30_000, { from_addr: '' })]));
     (repo.insertTxs as jest.Mock).mockRejectedValueOnce(new Error('connection lost'));
     await svc.runTick('tx', () => svc.txTick());
     expect(repo.recordError).toHaveBeenCalled();
