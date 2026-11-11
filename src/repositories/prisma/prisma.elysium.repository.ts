@@ -58,6 +58,8 @@ export interface LaunchStatsTarget {
   creator: string | null;
   curve: string | null;
   pool: string | null;
+  /** A launch read for the first time that has no symbol yet (its event carries none). */
+  needsName?: boolean;
 }
 
 export interface ElysiumIngestStateRow {
@@ -604,8 +606,15 @@ export class ElysiumIngestRepository {
    */
   public async insertLaunchTrades(rows: LaunchTradeRow[]): Promise<number> {
     if (rows.length === 0) return 0;
-    const result = await prismaHistorical.$queryRawUnsafe<Array<{ n: number }>>(
-      `
+    const tokens = [...new Set(rows.map((r) => r.token))].sort();
+    return prismaHistorical.$transaction(async (tx) => {
+      // The launches these trades move are locked first, in one order, as a rebuild of their
+      // state does: two writers of the same launches then wait for each other instead of
+      // deadlocking (6 deadlocks in 120 rounds of an insert against a rebuild before this,
+      // measured on a real Postgres; each one failed a tick).
+      await tx.$queryRawUnsafe(`SELECT token FROM elysium_launch WHERE token = ANY($1::text[]) ORDER BY token FOR UPDATE`, tokens);
+      const result = await tx.$queryRawUnsafe<Array<{ n: number }>>(
+        `
       WITH ins AS (
         INSERT INTO elysium_launch_trade (tx_hash, log_index, token, venue, block_time, block_number,
           trader, is_buy, quote_amount, token_amount, price)
@@ -619,33 +628,40 @@ export class ElysiumIngestRepository {
         RETURNING token, block_number, log_index, price, venue, is_buy, token_amount
       ),
       newest AS (
+        -- A trade without a price (0) is stored, and never becomes the launch's last price.
         SELECT DISTINCT ON (token) token, block_number, log_index, price
-        FROM ins ORDER BY token, block_number DESC, log_index DESC
+        FROM ins WHERE price > 0 ORDER BY token, block_number DESC, log_index DESC
       ),
       sold AS (
         SELECT token, sum(CASE WHEN is_buy THEN token_amount ELSE -token_amount END) AS delta
         FROM ins WHERE venue = 'curve' GROUP BY token
       ),
       state AS (
+        -- Every comparison is made against the row being updated (l), not against a second read of
+        -- it: when this statement waits for another writer of the same launch (a rebuild of its
+        -- state, another process's trades), it goes on from what that writer left, and neither
+        -- loses the other's work.
         UPDATE elysium_launch l
         SET curve_sold = CASE WHEN sold.delta IS NULL THEN l.curve_sold
                               ELSE COALESCE(l.curve_sold, 0) + sold.delta END,
-            last_price = CASE WHEN n.later THEN n.price ELSE l.last_price END,
-            last_block = CASE WHEN n.later THEN n.block_number ELSE l.last_block END,
-            last_log = CASE WHEN n.later THEN n.log_index ELSE l.last_log END
-        FROM (
-          SELECT newest.*, (l2.last_block IS NULL OR (newest.block_number, newest.log_index) > (l2.last_block, l2.last_log)) AS later
-          FROM newest JOIN elysium_launch l2 ON l2.token = newest.token
-        ) n
-        LEFT JOIN sold ON sold.token = n.token
-        WHERE l.token = n.token
+            last_price = CASE WHEN n.token IS NOT NULL AND (l.last_block IS NULL OR (n.block_number, n.log_index) > (l.last_block, l.last_log))
+                              THEN n.price ELSE l.last_price END,
+            last_block = CASE WHEN n.token IS NOT NULL AND (l.last_block IS NULL OR (n.block_number, n.log_index) > (l.last_block, l.last_log))
+                              THEN n.block_number ELSE l.last_block END,
+            last_log = CASE WHEN n.token IS NOT NULL AND (l.last_block IS NULL OR (n.block_number, n.log_index) > (l.last_block, l.last_log))
+                            THEN n.log_index ELSE l.last_log END
+        FROM (SELECT token FROM newest UNION SELECT token FROM sold) k
+        LEFT JOIN newest n ON n.token = k.token
+        LEFT JOIN sold ON sold.token = k.token
+        WHERE l.token = k.token
         RETURNING 1
       )
       SELECT (SELECT count(*) FROM ins)::int AS n, (SELECT count(*) FROM state)::int AS moved
-      `,
-      JSON.stringify(rows)
-    );
-    return result[0]?.n ?? 0;
+        `,
+        JSON.stringify(rows)
+      );
+      return result[0]?.n ?? 0;
+    });
   }
 
   /**
@@ -671,16 +687,28 @@ export class ElysiumIngestRepository {
         await tx.$executeRawUnsafe(`SET LOCAL max_parallel_workers_per_gather = 0`);
         await tx.$executeRawUnsafe(`SET LOCAL work_mem = '64MB'`);
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${REBUILD_TIMEOUT_MS}`);
+        // The launches concerned are locked first, in one order. A trade insert that touches one
+        // of them then waits for this rebuild, and adds its own trades on top of what it wrote:
+        // without the lock the rebuild could overwrite the state with a sum computed before those
+        // trades were visible, and they were missing until the next rebuild (a deploy overlap).
+        await tx.$queryRawUnsafe(
+          `WITH scope AS (${scope})
+           SELECT count(*)::int AS n FROM (
+             SELECT l.token FROM elysium_launch l WHERE l.token IN (SELECT token FROM scope) ORDER BY l.token FOR UPDATE
+           ) locked`,
+          since ? since.toISOString() : null
+        );
         return tx.$executeRawUnsafe(
           `
           WITH scope AS (${scope}),
           newest AS (
             -- One index probe per token (token, block_time), not a sort of the whole trade table.
+            -- A trade without a price (0) is never a launch's last price.
             SELECT s.token, x.price, x.block_number, x.log_index
             FROM scope s
             CROSS JOIN LATERAL (
               SELECT tr.price, tr.block_number, tr.log_index FROM elysium_launch_trade tr
-              WHERE tr.token = s.token
+              WHERE tr.token = s.token AND tr.price > 0
               ORDER BY tr.block_time DESC, tr.block_number DESC, tr.log_index DESC LIMIT 1
             ) x
           ),
@@ -757,7 +785,8 @@ export class ElysiumIngestRepository {
          ORDER BY l.stats_at LIMIT $1::int)
       ),
       best AS (SELECT DISTINCT ON (token) token, pri, ord FROM picks ORDER BY token, pri)
-      SELECT l.token, coalesce(l.creator, t.from_addr) AS creator, l.curve, l.pool
+      SELECT l.token, coalesce(l.creator, t.from_addr) AS creator, l.curve, l.pool,
+             (l.symbol IS NULL AND l.stats_at IS NULL) AS "needsName"
       FROM best
       JOIN elysium_launch l ON l.token = best.token
       LEFT JOIN elysium_tx t ON t.tx_hash = l.tx_hash AND l.creator IS NULL

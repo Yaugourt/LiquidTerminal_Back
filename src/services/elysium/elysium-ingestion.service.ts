@@ -1240,6 +1240,33 @@ export class ElysiumIngestionService {
     return processed < addresses.length ? 5_000 : TOKEN_STATS_INTERVAL_MS;
   }
   /**
+   * Gives a new launch its name and symbol from the provider's page of its token, on its first
+   * holder read (a few minutes after it appears). The launch events of Signal, Chainzy and
+   * aka.fun carry no name: such a launch took it from the token registry, whose walk reaches a
+   * token with two or three transfers 6 to 12 hours after its creation, and the launchpad list
+   * showed an address meanwhile. One more call (3 credits) per such launch, once. A failure is
+   * not one of the stream: the registry walk still brings the name later.
+   */
+  private async nameNewLaunch(token: string, known: Record<string, unknown> | null): Promise<void> {
+    try {
+      let detail = known;
+      if (!detail) {
+        await this.throttle.wait();
+        detail = await this.client.fetchIngestToken(token);
+      }
+      const row = normalizeToken({ ...detail, address: token });
+      if (!row || (row.symbol === null && row.name === null)) return;
+      await this.writeRows('launchstats', [row], (part) => this.repo.upsertTokens(part), (r) => r.address);
+      await this.repo.nameLaunches([row]);
+    } catch (error) {
+      if (error instanceof IngestStoppedError) throw error;
+      logDeduplicator.warn('Elysium ingest: new launch not named from its token page', {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+    }
+  }
+
+  /**
    * A token whose figures the provider would not give: counted, left alone for a while, and the
    * run goes on with the next one. `inARow` such tokens in a row is the provider failing, not
    * the tokens: the error is thrown, so the stream records it and backs off like any other.
@@ -1522,6 +1549,7 @@ export class ElysiumIngestionService {
         this.setTokenAside('launchstats', t.token, error, ++failedInARow);
         continue;
       }
+      if (t.needsName) await this.nameNewLaunch(t.token, detail);
       const holders = raw
         .map((h) => (h && typeof h === 'object' ? (h as Record<string, unknown>) : null))
         .filter((h): h is Record<string, unknown> => h !== null)

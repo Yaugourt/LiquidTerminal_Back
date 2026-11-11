@@ -325,8 +325,10 @@ export class ElysiumCheckRepository {
           hashes
         );
         await tx.$executeRawUnsafe(`DELETE FROM elysium_launch WHERE tx_hash = ANY($1::text[])`, hashes);
-        const tokens = [...new Set(traded.map((t) => t.token))];
+        const tokens = [...new Set(traded.map((t) => t.token))].sort();
         if (tokens.length > 0) {
+          // Locked in one order first, as every writer of the launches' state does.
+          await tx.$queryRawUnsafe(`SELECT token FROM elysium_launch WHERE token = ANY($1::text[]) ORDER BY token FOR UPDATE`, tokens);
           // The market state of these launches, exactly, from the trades that are left.
           await tx.$executeRawUnsafe(
             `WITH scope AS (SELECT unnest($1::text[]) AS token),
@@ -335,7 +337,7 @@ export class ElysiumCheckRepository {
                FROM scope s
                LEFT JOIN LATERAL (
                  SELECT tr.price, tr.block_number, tr.log_index FROM elysium_launch_trade tr
-                 WHERE tr.token = s.token
+                 WHERE tr.token = s.token AND tr.price > 0
                  ORDER BY tr.block_time DESC, tr.block_number DESC, tr.log_index DESC LIMIT 1
                ) x ON true
              ),

@@ -285,12 +285,30 @@ function toUnits(v: bigint, decimals = 18): number {
   return decimals === 18 ? Number(v) / WEI : Number(v) / 10 ** decimals;
 }
 
-/** Quote per token from a sqrtPriceX96, both sides 18 decimals. */
-export function priceFromSqrt(sqrtPriceX96: bigint, tokenIsCurrency0: boolean): number {
+/**
+ * Quote per token from a sqrtPriceX96; 0 when the value gives no price. The token has 18
+ * decimals like every launchpad token, the quote `quoteDec` (the ratio is between raw amounts:
+ * it was read as if every quote had 18, which a 6-decimal quote would have priced 10^12 off).
+ */
+export function priceFromSqrt(sqrtPriceX96: bigint, tokenIsCurrency0: boolean, quoteDec = 18): number {
   const r = Number(sqrtPriceX96) / Q96;
-  const p = r * r; // currency1 per currency0
+  const p = r * r; // currency1 per currency0, raw
   if (!Number.isFinite(p) || p <= 0) return 0;
-  return tokenIsCurrency0 ? p : 1 / p;
+  const price = (tokenIsCurrency0 ? p : 1 / p) * 10 ** (18 - quoteDec);
+  return Number.isFinite(price) ? price : 0;
+}
+
+/**
+ * The price a pool trade is stored with: the pool's price after the swap, or, when the event
+ * carries a value that gives none, what the trade itself paid per token. A trade stored at 0
+ * used to become the launch's last price.
+ */
+function poolPrice(sqrtPriceX96: bigint, tokenIsCurrency0: boolean, quote: string, quoteAmt: bigint, tokenAmt: bigint): number {
+  const dec = quoteDecimals(quote);
+  const spot = priceFromSqrt(sqrtPriceX96, tokenIsCurrency0, dec);
+  if (spot > 0) return spot;
+  const paid = toUnits(abs(quoteAmt), dec) / toUnits(abs(tokenAmt));
+  return Number.isFinite(paid) && paid > 0 ? paid : 0;
 }
 
 function abs(v: bigint): bigint {
@@ -549,7 +567,7 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
       is_buy: isBuy,
       quote_amount: quote.toString(),
       token_amount: tokens.toString(),
-      price: toUnits(quote) / toUnits(tokens),
+      price: toUnits(quote, quoteDecimals(m.quote)) / toUnits(tokens),
     };
   }
 
@@ -596,7 +614,7 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
       is_buy: tokenAmt < 0n,
       quote_amount: abs(quoteAmt).toString(),
       token_amount: abs(tokenAmt).toString(),
-      price: priceFromSqrt(wordUint(w[2] as string), tokenIs0),
+      price: poolPrice(wordUint(w[2] as string), tokenIs0, m.quote, quoteAmt, tokenAmt),
     };
   }
 
@@ -621,7 +639,7 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
       is_buy: tokenAmt > 0n,
       quote_amount: abs(quoteAmt).toString(),
       token_amount: abs(tokenAmt).toString(),
-      price: priceFromSqrt(wordUint(w[2] as string), tokenIs0),
+      price: poolPrice(wordUint(w[2] as string), tokenIs0, m.quote, quoteAmt, tokenAmt),
     };
   }
 

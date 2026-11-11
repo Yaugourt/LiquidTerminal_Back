@@ -122,6 +122,46 @@ describe('Elysium ingestion: a token that cannot be read', () => {
     expect(detail.mock.calls.map((c) => c[0])).toEqual([TOKEN(1), TOKEN(3)]);
   });
 
+  describe('a new launch without a name', () => {
+    let detail: jest.SpyInstance;
+    let upsert: jest.SpyInstance;
+    let name: jest.SpyInstance;
+    beforeEach(() => {
+      detail = jest.spyOn(client, 'fetchIngestToken').mockResolvedValue({ address: TOKEN(1), standard: 'erc20', name: 'Signal Cat', symbol: 'SCAT', decimals: 18, transfer_count: 2, holders: 1 });
+      upsert = jest.spyOn(repo, 'upsertTokens').mockResolvedValue(1);
+      name = jest.spyOn(repo, 'nameLaunches').mockResolvedValue(1);
+      holders.mockResolvedValue([{ address: TOKEN(900), share: 0.25 }]);
+    });
+
+    it('takes its name from the provider’s page of its token on its first holder read, not 6 to 12 hours later', async () => {
+      list.mockResolvedValue([{ token: TOKEN(1), creator: null, curve: null, pool: null, needsName: true }]);
+      await svc.launchStatsTick();
+      expect(detail).toHaveBeenCalledWith(TOKEN(1));
+      expect(upsert).toHaveBeenCalledWith([expect.objectContaining({ address: TOKEN(1), symbol: 'SCAT', name: 'Signal Cat', transfer_count: '2' })]);
+      expect(name).toHaveBeenCalledWith([expect.objectContaining({ address: TOKEN(1), symbol: 'SCAT' })]);
+      expect(update).toHaveBeenCalledWith(TOKEN(1), 1, 25, null);
+    });
+
+    it('asks for nothing more for a launch that has a name, or was read before', async () => {
+      list.mockResolvedValue(targets(1));
+      await svc.launchStatsTick();
+      expect(detail).not.toHaveBeenCalled();
+      expect(name).not.toHaveBeenCalled();
+    });
+
+    it('still records the holders when the token page cannot be read or says nothing', async () => {
+      list.mockResolvedValue([{ token: TOKEN(1), creator: null, curve: null, pool: null, needsName: true }]);
+      detail.mockRejectedValueOnce(new Error('API error: 500'));
+      await svc.launchStatsTick();
+      expect(update).toHaveBeenCalledWith(TOKEN(1), 1, 25, null);
+      expect(svc.rejects.take()).toEqual([]);
+
+      detail.mockResolvedValue({ address: TOKEN(1), standard: 'erc20', name: null, symbol: '', transfer_count: 1 });
+      await svc.launchStatsTick();
+      expect(name).not.toHaveBeenCalled();
+    });
+  });
+
   it('never pads a supply to an absurd decimals read from a token', async () => {
     jest.spyOn(repo, 'listTokensForStats').mockResolvedValue([TOKEN(1)]);
     const stat = jest.spyOn(repo, 'upsertTokenStat').mockResolvedValue(undefined);
