@@ -194,6 +194,16 @@ describe('the status of the streams', () => {
     expect(by.launchpad.state).toBe('stalled');
   });
 
+  it('a stream still reading the history for the first time is backfilling, not behind', async () => {
+    await x(`UPDATE elysium_ingest_state SET backfill_done = false, cursor = now() - interval '30 days' WHERE stream = 'dex'`);
+    try {
+      const again = await analytics.statusView().compute();
+      expect(again.streams.find((s) => s.stream === 'dex')).toMatchObject({ state: 'backfilling', backfillDone: false });
+    } finally {
+      await x(`UPDATE elysium_ingest_state SET backfill_done = true, cursor = now() - interval '40 seconds' WHERE stream = 'dex'`);
+    }
+  });
+
   it('the markers are not streams: the one-time jobs are listed apart', () => {
     expect('provider' in by).toBe(false);
     expect('launchstate' in by).toBe(false);

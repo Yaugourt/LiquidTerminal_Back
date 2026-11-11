@@ -8,7 +8,7 @@ import { streamHealth } from '../../../src/services/elysium/elysium-analytics.ut
 
 const NOW = Date.parse('2026-11-11T18:00:00Z');
 const ago = (s: number): Date => new Date(NOW - s * 1000);
-const row = (stream: string, over: Partial<{ cursor: Date | null; lastError: string | null; okAt: Date | null }> = {}) => ({
+const row = (stream: string, over: Partial<{ cursor: Date | null; lastError: string | null; okAt: Date | null; backfillDone: boolean }> = {}) => ({
   stream,
   cursor: ago(20),
   lastError: null,
@@ -20,6 +20,17 @@ const current = ago(8);
 describe('streamHealth', () => {
   it('a stream that runs and whose data is current is ok, with its lag', () => {
     expect(streamHealth(row('tx'), NOW, current)).toEqual({ lagSeconds: 20, everyS: 30, state: 'ok' });
+  });
+
+  it('a stream still reading the history for the first time is backfilling, not behind; it is failing or stalled like any other', () => {
+    const month = ago(30 * 86_400);
+    expect(streamHealth(row('tx', { cursor: month, backfillDone: false }), NOW, current).state).toBe('backfilling');
+    expect(streamHealth(row('dex', { cursor: month, backfillDone: false }), NOW, ago(6 * 3600)).state).toBe('backfilling');
+    expect(streamHealth(row('tx', { cursor: month, backfillDone: false, lastError: 'API error: 500' }), NOW, current).state).toBe('failing');
+    expect(streamHealth(row('tx', { cursor: month, backfillDone: false, okAt: ago(3600) }), NOW, current).state).toBe('stalled');
+    // Its history read, the same lag is a lag.
+    expect(streamHealth(row('tx', { cursor: month, backfillDone: true }), NOW, current).state).toBe('behind');
+    expect(streamHealth(row('tx', { cursor: ago(20), backfillDone: false }), NOW, current).state).toBe('ok');
   });
 
   it('a stream whose last run failed is failing, whatever its cursor', () => {

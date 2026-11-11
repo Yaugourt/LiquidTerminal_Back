@@ -138,6 +138,8 @@ export type StreamState =
   | 'stalled'
   /** Its data stops where the provider's index stops: nothing to read until the provider moves on. */
   | 'waiting-provider'
+  /** It runs and has not read the chain's history to the end yet: its data is old because it is still on its way. */
+  | 'backfilling'
   /** Its data is late while the provider is not. */
   | 'behind';
 
@@ -155,7 +157,7 @@ export interface StreamHealth {
  * would have rung for nothing, or never.
  */
 export function streamHealth(
-  row: { stream: string; cursor: Date | null; lastError: string | null; okAt: Date | null },
+  row: { stream: string; cursor: Date | null; lastError: string | null; okAt: Date | null; backfillDone?: boolean },
   now: number,
   providerHead: Date | null
 ): StreamHealth {
@@ -169,6 +171,9 @@ export function streamHealth(
     return { lagSeconds, everyS, state: 'stalled' };
   }
   if (lagSeconds === null || lagSeconds * 1000 <= Math.max(BEHIND_PERIODS * period, 300_000)) return { lagSeconds, everyS, state: 'ok' };
+  // Late data from a stream that is still reading the history for the first time (a new database,
+  // a new stream): it is where it should be, and saying "behind" would ring for hours for nothing.
+  if (row.backfillDone === false) return { lagSeconds, everyS, state: 'backfilling' };
   // Late data. The provider's own index is late too: the stream has read all there is. (The log
   // streams read past the provider's head from the RPC, so they have no such excuse.)
   const providerLate = providerHead !== null && now - providerHead.getTime() > PROVIDER_LAG_S * 1000;

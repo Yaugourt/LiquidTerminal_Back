@@ -16,7 +16,7 @@ curl -s "$BACK/elysium/analytics/status" | jq '.data | {streams: [.streams[] | {
 
 | Field | What it says |
 | --- | --- |
-| `streams[].state` | `ok`, `failing` (its last run failed, `lastError` says how), `stalled` (no completed run for 3 of its periods and 5 minutes: its loop does not run), `behind` (its data is late while the provider is not), `waiting-provider` (its data stops where the provider's index stops) |
+| `streams[].state` | `ok`, `failing` (its last run failed, `lastError` says how), `stalled` (no completed run for 3 of its periods and 5 minutes: its loop does not run), `behind` (its data is late while the provider is not), `waiting-provider` (its data stops where the provider's index stops), `backfilling` (it runs and has not read the chain's history to the end yet: a new database or a new stream) |
 | `streams[].lastOkAt` | when the stream last completed a run, with or without rows to write |
 | `streams[].lagSeconds` | age of the stream's data; `null` for the streams whose cursor is the time of their run (`tokens`, `methods`, `tokenstats`, `launchstats`) |
 | `provider` | the provider's last indexed block time and how far behind the clock it is |
