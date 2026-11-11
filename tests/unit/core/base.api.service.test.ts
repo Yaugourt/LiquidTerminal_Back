@@ -132,3 +132,48 @@ describe('BaseApiService response ceiling', () => {
     );
   });
 });
+
+describe('BaseApiService time limit', () => {
+  const realFetch = global.fetch;
+  afterEach(() => {
+    global.fetch = realFetch;
+    jest.useRealTimers();
+  });
+
+  class OneShot extends BaseApiService {
+    public once<T>(endpoint: string, timeoutMs: number): Promise<T> {
+      return this.fetchWithTimeout<T>(endpoint, { method: 'GET' }, timeoutMs);
+    }
+  }
+
+  /** Headers at once, then a body that sends its first bytes and stops, until the request is aborted. */
+  const stalledBody = (signal: AbortSignal): Response => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"data":['));
+        signal.addEventListener('abort', () => controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      },
+    });
+    return new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  it('covers the reading of the body: an answer that stops half way ends at the time limit (it was waited for with no limit)', async () => {
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => stalledBody(init?.signal as AbortSignal)) as unknown as typeof fetch;
+    const client = new OneShot('https://upstream.example');
+    const started = Date.now();
+    await expect(client.once('/slow', 150)).rejects.toThrow('Request timeout');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('still returns a body that arrives whole', async () => {
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({ ok: 1 }), { status: 200 })) as unknown as typeof fetch;
+    await expect(new OneShot('https://upstream.example').once('/fast', 150)).resolves.toEqual({ ok: 1 });
+  });
+
+  it('fails on a body that is not JSON with the parser\'s own error, as before', async () => {
+    global.fetch = jest.fn(async () => new Response('<html>', { status: 200 })) as unknown as typeof fetch;
+    const error = await new OneShot('https://upstream.example').once('/html', 150).catch((e: unknown) => e);
+    expect((error as Error).name).toBe('SyntaxError');
+    expect((error as Error).message).toContain('not valid JSON');
+  });
+});

@@ -151,6 +151,18 @@ export function isHyperliquidInfoUrl(baseUrl: string): boolean {
   return /\/info\/?$/.test(baseUrl);
 }
 
+/** Carries what reading a response body threw out of the request's own error handling. */
+class ResponseBodyError extends Error {
+  constructor(public readonly cause: unknown) {
+    super('response body unreadable');
+    this.name = 'ResponseBodyError';
+  }
+}
+
+function isAbort(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError';
+}
+
 export abstract class BaseApiService {
     private readonly API_TIMEOUT = 30000; // 30 secondes au lieu de 5
     private readonly MAX_RETRIES = 3;
@@ -250,13 +262,25 @@ export abstract class BaseApiService {
           );
         }
 
-        const parsed = response.json();
-        if (hyperliquidType === undefined) return parsed;
-        return parsed.then((data: T) => {
-          hyperliquidWeightMeter.recordItems(hyperliquidType, data);
-          return data;
-        });
+        // Awaited here, inside the try: the time limit and the outbound slot then cover the
+        // reading of the body. Returned as a promise, the `finally` below ran first, and an
+        // answer whose body stopped half way was waited for with no limit at all.
+        let data: T;
+        try {
+          data = (await response.json()) as T;
+        } catch (bodyError) {
+          throw new ResponseBodyError(bodyError);
+        }
+        if (hyperliquidType !== undefined) hyperliquidWeightMeter.recordItems(hyperliquidType, data);
+        return data;
       } catch (error) {
+        // A body that does not read: the error it gave before (the caller's, unlogged and
+        // unwrapped), except the abort of the time limit, which is a timeout like any other.
+        if (error instanceof ResponseBodyError) {
+          if (isAbort(error.cause)) throw new Error('Request timeout');
+          throw error.cause;
+        }
+
         logDeduplicator.error('API request failed', {
           url: safeUrl,
           error: error instanceof Error ? error.message : String(error),
