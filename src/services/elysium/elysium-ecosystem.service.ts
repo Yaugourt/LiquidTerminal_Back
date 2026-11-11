@@ -1,3 +1,4 @@
+import { Prisma } from '../../../prisma-historical/generated/client';
 import { prismaHistoricalAggregate } from '../../core/prisma.historical.service';
 import { redisService } from '../../core/redis.service';
 import { ViewResult, viewScheduler, type ViewCadence, type ViewDef } from '../../core/viewScheduler';
@@ -24,6 +25,13 @@ const PERP_MARKETS_CACHE_KEY = 'perp:markets';
 const DAY_MS = 86_400_000;
 /** Length of the daily active-user series, in rolling 24h buckets ending now. */
 const SERIES_DAYS = 14;
+/**
+ * A call read from the RPC (elysium_tx_live, alias lv) that the provider's stream has not
+ * stored. The views take the live rows after the stream's cursor, but that cursor is read before
+ * the statement runs: the stream moves on meanwhile, and a call it had stored by then was in
+ * both tables, counted twice until the next computation.
+ */
+const NOT_STORED = Prisma.sql`NOT EXISTS (SELECT 1 FROM elysium_tx st WHERE st.tx_hash = lv.tx_hash)`;
 
 /** USD value of one unit of a launch quote: the HYPE price for HYPE quotes, $1 for test USDC, else null. */
 function quoteUsd(quote: string, hypeUsd: number | null): number | null {
@@ -147,8 +155,9 @@ export class ElysiumEcosystemService {
       calls AS (
         SELECT from_addr, to_addr, block_time FROM elysium_tx WHERE NOT is_spam
         UNION ALL
-        SELECT from_addr, to_addr, block_time FROM elysium_tx_live
-        WHERE block_time > COALESCE(${cursor}::timestamptz, 'infinity'::timestamptz)
+        SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
+        WHERE lv.block_time > COALESCE(${cursor}::timestamptz, 'infinity'::timestamptz)
+          AND ${NOT_STORED}
       )
       SELECT reg.slug, count(*)::int AS txs, count(DISTINCT t.from_addr)::int AS wallets,
              extract(epoch FROM min(t.block_time))::float8 AS first_at
@@ -225,9 +234,14 @@ export class ElysiumEcosystemService {
 
   /** The provider's tx cursor: elysium_tx is complete up to it, elysium_tx_live takes over after. */
   private async readTxCursor(): Promise<Date | null> {
-    const rows = await prismaHistoricalAggregate.$queryRaw<Array<{ cursor: Date | null }>>`
-      SELECT cursor FROM elysium_ingest_state WHERE stream = 'tx'`;
-    return rows[0]?.cursor ?? null;
+    // As epoch millis, like the repository does: a timestamp read as a Date through the pg
+    // adapter comes back shifted by the session's UTC offset when the database session is not
+    // in UTC (an hour off on a Europe/Paris session, measured 2026-11-11: the live rows of that
+    // hour were then left out of every count).
+    const rows = await prismaHistoricalAggregate.$queryRaw<Array<{ cursor_ms: number | null }>>`
+      SELECT (extract(epoch FROM cursor) * 1000)::float8 AS cursor_ms FROM elysium_ingest_state WHERE stream = 'tx'`;
+    const ms = rows[0]?.cursor_ms;
+    return ms === null || ms === undefined ? null : new Date(Number(ms));
   }
 
   private async computeProjects(): Promise<{
@@ -261,9 +275,10 @@ export class ElysiumEcosystemService {
           SELECT from_addr, to_addr, block_time FROM elysium_tx
           WHERE block_time >= ${since14}::timestamptz AND NOT is_spam
           UNION ALL
-          SELECT from_addr, to_addr, block_time FROM elysium_tx_live
-          WHERE block_time >= ${since14}::timestamptz
-            AND block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
+          SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
+          WHERE lv.block_time >= ${since14}::timestamptz
+            AND lv.block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
+            AND ${NOT_STORED}
         ) t ON t.to_addr = reg.addr
         GROUP BY reg.slug`,
       // Bucket 0 is the last 24h; buckets are rolling so the latest one is never a partial day.
@@ -279,9 +294,10 @@ export class ElysiumEcosystemService {
           SELECT from_addr, to_addr, block_time FROM elysium_tx
           WHERE block_time >= ${since14}::timestamptz AND block_time <= ${nowIso}::timestamptz AND NOT is_spam
           UNION ALL
-          SELECT from_addr, to_addr, block_time FROM elysium_tx_live
-          WHERE block_time >= ${since14}::timestamptz AND block_time <= ${nowIso}::timestamptz
-            AND block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
+          SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
+          WHERE lv.block_time >= ${since14}::timestamptz AND lv.block_time <= ${nowIso}::timestamptz
+            AND lv.block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
+            AND ${NOT_STORED}
         ) t ON t.to_addr = reg.addr
         GROUP BY 1, 2`,
       prismaHistoricalAggregate.$queryRaw<Array<{ launchpad: string; launches: number }>>`
@@ -349,9 +365,10 @@ export class ElysiumEcosystemService {
   /** The window with no activity data: from the provider's tx cursor to where the live fallback began. */
   private async readActivityGap(txCursor: Date | null, now: Date): Promise<ElysiumActivityGap | null> {
     if (!txCursor || now.getTime() - txCursor.getTime() < GAP_MIN_MS) return null;
-    const rows = await prismaHistoricalAggregate.$queryRaw<Array<{ start: Date | null }>>`
-      SELECT min(block_time) AS start FROM elysium_tx_live WHERE block_time > ${txCursor.toISOString()}::timestamptz`;
-    const start = rows[0]?.start ?? null;
-    return { from: txCursor.toISOString(), to: start ? start.toISOString() : null };
+    const rows = await prismaHistoricalAggregate.$queryRaw<Array<{ start_ms: number | null }>>`
+      SELECT (extract(epoch FROM min(block_time)) * 1000)::float8 AS start_ms
+      FROM elysium_tx_live WHERE block_time > ${txCursor.toISOString()}::timestamptz`;
+    const startMs = rows[0]?.start_ms;
+    return { from: txCursor.toISOString(), to: startMs === null || startMs === undefined ? null : new Date(Number(startMs)).toISOString() };
   }
 }
