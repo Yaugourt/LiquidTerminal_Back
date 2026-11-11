@@ -1,8 +1,9 @@
 /**
- * A connection refused by the per-IP cap is closed by the server, but it can
- * still send frames until the close completes. An invalid frame on it (here an
- * unmasked one) must stay contained: before the fix the socket had no 'error'
- * listener, so the frame error was an uncaughtException and the process exited.
+ * A connection over the per-client cap is refused at the upgrade: it gets an
+ * HTTP 429 and no socket. Whatever it sends afterwards must stay contained
+ * (before the first fix the refused socket was accepted, closed, and had no
+ * 'error' listener: one invalid frame on it was an uncaughtException and the
+ * process exited).
  */
 import crypto from 'crypto';
 import http from 'http';
@@ -79,7 +80,7 @@ describe('InternalWebSocketServer connection cap', () => {
     delete process.env.WS_MAX_CONNECTIONS_PER_IP;
   });
 
-  it('contains an invalid frame sent on a refused connection', async () => {
+  it('refuses the connection at the handshake, and contains whatever it sends next', async () => {
     const first = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     await new Promise<void>((resolve, reject) => {
       first.once('open', () => resolve());
@@ -88,10 +89,14 @@ describe('InternalWebSocketServer connection cap', () => {
     await tick(50);
     expect(wsServer.getStats().totalConnections).toBe(1);
 
-    // Second connection from the same IP: over the cap of 1, the server closes it.
+    // Second connection from the same IP: over the cap of 1, refused before the upgrade completes.
     const refused = await rawUpgrade(port);
-    expect(refused.received().toString('latin1')).toContain('101 Switching Protocols');
-    // One unmasked text frame ("hi"): a client frame must be masked.
+    const answer = refused.received().toString('latin1');
+    expect(answer).toContain('HTTP/1.1 429');
+    expect(answer).toContain('Retry-After: 5');
+    expect(answer).not.toContain('101 Switching Protocols');
+    // One unmasked text frame ("hi") all the same: there is no socket to read it.
+    refused.socket.on('error', () => undefined);
     refused.socket.write(Buffer.from([0x81, 0x02, 0x68, 0x69]));
     await tick(200);
 

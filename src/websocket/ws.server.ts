@@ -21,6 +21,9 @@ import {
 } from '../types/websocket.types';
 import { CompletedTrade } from '../types/wallet-events.types';
 import { enabledUnlessFalseEnv, positiveIntEnv } from '../utils/env';
+import { rateLimitKeyForIp } from '../utils/client-ip';
+import { ClientBudget } from '../utils/clientBudget';
+import { SECURITY_CONSTANTS } from '../constants/security.constants';
 import { normalizeLiquidationFilters } from './liquidationFilters';
 
 /**
@@ -53,11 +56,33 @@ export class InternalWebSocketServer {
   // message a minute), so thousands of viewers are cheap, and a shared IP
   // (CGNAT, office) carries many people. Abuse is bounded by the per-socket
   // message rate and buffered-bytes guard. Env: WS_MAX_CONNECTIONS_PER_IP,
-  // WS_MAX_TOTAL_CONNECTIONS.
+  // WS_MAX_TOTAL_CONNECTIONS, WS_MAX_CONNECTIONS_PER_MINUTE.
+  //
+  // "Per IP" is per client key, as for the HTTP limiters: the address for
+  // IPv4, the /64 for IPv6 (one IPv6 host owns the whole prefix and can pick
+  // any address in it, so a count per address was no cap at all for it).
   private static readonly MAX_CONNECTIONS_PER_IP = positiveIntEnv('WS_MAX_CONNECTIONS_PER_IP', 200);
   private static readonly MAX_TOTAL_CONNECTIONS = positiveIntEnv('WS_MAX_TOTAL_CONNECTIONS', 10_000);
+  /**
+   * New connections one client may open in a minute. The cap above counts
+   * the sockets open at once, so opening and closing in a loop was free: each
+   * turn is a handshake, a log line and a round of bookkeeping. Above the cap
+   * of open sockets on purpose: when the backend restarts, every tab behind
+   * one address reconnects within seconds, and all of them must get in.
+   */
+  private static readonly MAX_CONNECTIONS_PER_MINUTE = positiveIntEnv('WS_MAX_CONNECTIONS_PER_MINUTE', 300);
+  private connectionRate = new ClientBudget(InternalWebSocketServer.MAX_CONNECTIONS_PER_MINUTE, 60_000);
   private static readonly MAX_MESSAGES_PER_SECOND = 10;
-  private messageCounters: Map<string, { count: number; resetAt: number }> = new Map();
+  /**
+   * A public socket is closed once it has sent this many frames past the
+   * limit within one second, or has gone past the limit in this many of its
+   * seconds in a row. Until 2026-11-11 a client over the limit was answered
+   * an error for each frame and kept for good: 200 sockets sending 64 kB
+   * frames had this process parse and answer all of them.
+   */
+  private static readonly MAX_EXCESS_MESSAGES = 20;
+  private static readonly MAX_SECONDS_OVER_LIMIT = 5;
+  private messageCounters: Map<string, { count: number; resetAt: number; strikes: number }> = new Map();
 
   /**
    * Subscription types that carry another user's private data (Telegram chat
@@ -99,8 +124,14 @@ export class InternalWebSocketServer {
   /** Coin ids across perps (`BTC`), spot (`@107`, `PURR/USDC`), HIP-3 (`xyz:SKHX`) and HIP-4 (`#10250`). */
   private static readonly L4_COIN_PATTERN = /^[A-Za-z0-9@#:/_.-]{1,32}$/;
 
-  /** Unsent backlog past which a public client is dropped (see dropIfBackedUp). */
-  private static readonly MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+  /**
+   * Unsent backlog past which a public client is dropped (see dropIfBackedUp).
+   * Every feed together sends about 14 kB a second and the largest frame, the
+   * TWAP snapshot, is about 100 kB (measured on prod, 2026-11-11): 1 MiB is
+   * over a minute of everything for a client that stopped reading. It was
+   * 4 MiB, 800 MB for the 200 sockets one address may open.
+   */
+  private static readonly MAX_BUFFERED_BYTES = 1024 * 1024;
   /** The serialized twap snapshot is shared by the subscribers of one second. */
   private static readonly TWAP_SNAPSHOT_CACHE_MS = 1_000;
   /** A client gets a twap snapshot at most this often (a re-subscribe in between only gets `subscribed`). */
@@ -151,6 +182,14 @@ export class InternalWebSocketServer {
       server: httpServer,
       path: '/ws',
       maxPayload: 64 * 1024, // 64KB max message size
+      // A client over a cap is refused here, before the handshake completes:
+      // it gets one HTTP answer and no socket. Accepting it and closing it
+      // right after (as before) completed the upgrade for every attempt.
+      verifyClient: (info, done) => {
+        const refusal = this.refuseUpgrade(info.req, info.origin);
+        if (refusal) done(false, refusal.status, refusal.reason, refusal.headers);
+        else done(true);
+      },
     });
 
     // Setup event handlers
@@ -224,6 +263,7 @@ export class InternalWebSocketServer {
     this.clientsBySocket.clear();
     this.ipConnectionCount.clear();
     this.messageCounters.clear();
+    this.connectionRate = new ClientBudget(InternalWebSocketServer.MAX_CONNECTIONS_PER_MINUTE, 60_000);
 
     // Drops the mirrored books and the upstream HypeDexer socket with them.
     this.l4BookService?.shutdown();
@@ -344,12 +384,50 @@ export class InternalWebSocketServer {
   }
 
   /**
+   * Why an upgrade request is refused, or null to accept it. Runs before the
+   * handshake completes, synchronously with the acceptance that follows it,
+   * so the counts it reads cannot move in between.
+   *
+   * - Origin: a browser always sends one, and only our own pages may open the
+   *   socket from a browser (the same list as the HTTP API's CORS). Without the
+   *   check any site could feed its visitors from this socket, each from their
+   *   own address and so outside every per-client cap. No Origin is not a
+   *   browser (the Telegram bot, a script) and is accepted, as on the HTTP API.
+   *   WS_CHECK_ORIGIN=false switches the check off.
+   * - The caps on open sockets, per client and in all.
+   * - The client's new connections of the minute.
+   */
+  private refuseUpgrade(
+    req: IncomingMessage,
+    origin: string | undefined
+  ): { status: number; reason: string; headers?: Record<string, string> } | null {
+    if (
+      origin &&
+      enabledUnlessFalseEnv('WS_CHECK_ORIGIN') &&
+      !(SECURITY_CONSTANTS.ALLOWED_ORIGINS as readonly string[]).includes(origin)
+    ) {
+      logDeduplicator.warn('InternalWebSocketServer: origin refused', { origin: origin.slice(0, 120) });
+      return { status: 403, reason: 'Origin not allowed' };
+    }
+    const client = rateLimitKeyForIp(this.resolveClientIp(req));
+    if (!this.checkConnectionLimits(client)) {
+      return { status: 429, reason: 'Connection limit exceeded', headers: { 'Retry-After': '5' } };
+    }
+    if (!this.connectionRate.take(client, 1)) {
+      logDeduplicator.warn('InternalWebSocketServer: too many new connections in a minute', { ip: client });
+      return { status: 429, reason: 'Too many connections', headers: { 'Retry-After': String(this.connectionRate.retryAfterS()) } };
+    }
+    return null;
+  }
+
+  /**
    * Handle new WebSocket connection
    */
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
-    const ip = this.resolveClientIp(req);
+    // The client key the caps are counted under: the address, or its /64 for IPv6.
+    const ip = rateLimitKeyForIp(this.resolveClientIp(req));
 
-    // Check connection limits
+    // Checked at the upgrade already (refuseUpgrade); kept as a second line.
     if (!this.checkConnectionLimits(ip)) {
       // The refused socket keeps receiving frames until its close completes.
       // Without an 'error' listener, one invalid frame from it (unmasked,
@@ -406,15 +484,28 @@ export class InternalWebSocketServer {
   private handleMessage(ws: WebSocket, clientId: string, data: Buffer | ArrayBuffer | Buffer[]): void {
     const client = this.clients.get(clientId);
     if (!client) return;
+    // Being closed (see below): what it still sends is not looked at.
+    if (ws.readyState !== WebSocket.OPEN) return;
 
     // Rate limiting
-    if (!this.checkMessageRateLimit(clientId)) {
-      this.sendMessage(ws, {
-        type: 'error',
-        error: 'Rate limit exceeded',
-        code: 'RATE_LIMIT',
-        timestamp: new Date().toISOString(),
-      });
+    const verdict = this.checkMessageRateLimit(clientId);
+    if (verdict !== 'ok') {
+      // One answer for the first frame over the limit, none for the rest of the second.
+      if (verdict === 'first-excess' || (verdict === 'close' && client.isAuthenticated)) {
+        this.sendMessage(ws, {
+          type: 'error',
+          error: 'Rate limit exceeded',
+          code: 'RATE_LIMIT',
+          timestamp: new Date().toISOString(),
+        });
+      }
+      // The authenticated bot is never cut for its rate: its alerts would be lost.
+      if (verdict === 'close' && !client.isAuthenticated) {
+        logDeduplicator.warn('InternalWebSocketServer: Closing client over the message rate', { clientId, ip: client.ip });
+        ws.close(1008, 'Rate limit exceeded');
+        // A client that ignores the close frame keeps the socket: cut it shortly after.
+        setTimeout(() => ws.terminate(), 2_000).unref();
+      }
       return;
     }
 
@@ -442,7 +533,8 @@ export class InternalWebSocketServer {
         default:
           this.sendMessage(ws, {
             type: 'error',
-            error: `Unknown method: ${(message as { method?: string }).method}`,
+            // Fixed text: the method is the client's own, up to 64 kB of it.
+            error: 'Unknown method',
             code: 'UNKNOWN_METHOD',
             timestamp: new Date().toISOString(),
           });
@@ -1267,26 +1359,37 @@ export class InternalWebSocketServer {
   }
 
   /**
-   * Check message rate limit
+   * Counts one frame of a client against its second.
+   * - 'ok': within the limit.
+   * - 'first-excess': the first frame over it in this second (the one that is answered).
+   * - 'excess': a further one.
+   * - 'close': too many over it in this second, or over it too many seconds in a row.
    */
-  private checkMessageRateLimit(clientId: string): boolean {
+  private checkMessageRateLimit(clientId: string): 'ok' | 'first-excess' | 'excess' | 'close' {
     const now = Date.now();
     const counter = this.messageCounters.get(clientId);
 
     if (!counter || now > counter.resetAt) {
+      // A new second: the one before counts as a strike when it went over the limit.
+      const over = counter ? counter.count > InternalWebSocketServer.MAX_MESSAGES_PER_SECOND : false;
       this.messageCounters.set(clientId, {
         count: 1,
         resetAt: now + 1000,
+        strikes: over ? counter!.strikes + 1 : 0,
       });
-      return true;
-    }
-
-    if (counter.count >= InternalWebSocketServer.MAX_MESSAGES_PER_SECOND) {
-      return false;
+      return 'ok';
     }
 
     counter.count++;
-    return true;
+    const excess = counter.count - InternalWebSocketServer.MAX_MESSAGES_PER_SECOND;
+    if (excess <= 0) return 'ok';
+    if (excess > InternalWebSocketServer.MAX_EXCESS_MESSAGES) return 'close';
+    if (excess === 1) {
+      // Over the limit again, right after seconds that already were.
+      if (counter.strikes + 1 >= InternalWebSocketServer.MAX_SECONDS_OVER_LIMIT) return 'close';
+      return 'first-excess';
+    }
+    return 'excess';
   }
 
   /**
