@@ -14,6 +14,19 @@ import { registerPool } from './poolRegistry';
  */
 const READ_STATEMENT_TIMEOUT_MS = positiveIntEnv('HISTORICAL_READ_STATEMENT_TIMEOUT_MS', 600_000);
 
+/**
+ * Limits of the writers' pool. It had none: a write that waited on a row lock, or a statement
+ * that never ended, held its connection, and the ingestion stream behind it, until the process
+ * restarted. Ceilings, far above what any write takes (the long ones, a day's rollups and the
+ * rebuild of the launch state, set their own inside their transaction):
+ * - a statement ends after 10 minutes;
+ * - a statement that waits for a lock gives up after 1 minute (its tick fails and runs again);
+ * - a transaction left open and idle is closed after 5 minutes, and its locks with it.
+ */
+const WRITE_STATEMENT_TIMEOUT_MS = positiveIntEnv('HISTORICAL_WRITE_STATEMENT_TIMEOUT_MS', 600_000);
+const WRITE_LOCK_TIMEOUT_MS = positiveIntEnv('HISTORICAL_WRITE_LOCK_TIMEOUT_MS', 60_000);
+const WRITE_IDLE_IN_TRANSACTION_TIMEOUT_MS = positiveIntEnv('HISTORICAL_WRITE_IDLE_IN_TRANSACTION_TIMEOUT_MS', 300_000);
+
 /** The longest a statement of the pages pool may run: its reads answer a visitor who is waiting. */
 const PAGES_STATEMENT_TIMEOUT_MS = positiveIntEnv('HISTORICAL_PAGES_STATEMENT_TIMEOUT_MS', 30_000);
 
@@ -68,6 +81,10 @@ class PrismaHistoricalService {
         idleTimeoutMillis: 10000,       // recycle idle connections after 10s
         connectionTimeoutMillis: 10000, // aligned with the main DB pool
         keepAlive: true,                // detect dead TCP connections early
+        // Session settings given at connection time: every connection of this pool has them.
+        options:
+          `-c statement_timeout=${WRITE_STATEMENT_TIMEOUT_MS} -c lock_timeout=${WRITE_LOCK_TIMEOUT_MS} ` +
+          `-c idle_in_transaction_session_timeout=${WRITE_IDLE_IN_TRANSACTION_TIMEOUT_MS}`,
       });
       PrismaHistoricalService.instance = PrismaHistoricalService.client('historical', pool);
     }

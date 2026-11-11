@@ -523,7 +523,10 @@ export class ElysiumIngestRepository {
 
   /**
    * Advances the watermark after a fully ingested window and clears the last
-   * error. `addRows` increments the counter, `setRows` replaces it.
+   * error. `addRows` increments the counter, `setRows` replaces it. A cursor
+   * never moves back: of two writers of one stream (two processes while a
+   * deploy overlaps, or with Redis down), the one that is behind leaves the
+   * cursor where the other put it.
    */
   public async advance(
     stream: ElysiumStream,
@@ -534,7 +537,9 @@ export class ElysiumIngestRepository {
       `INSERT INTO elysium_ingest_state (stream, cursor, rows, backfill_done, last_error, updated_at)
        VALUES ($1::text, $2::timestamptz, $3::bigint, COALESCE($4::boolean, false), NULL, now())
        ON CONFLICT (stream) DO UPDATE SET
-         cursor = COALESCE(EXCLUDED.cursor, elysium_ingest_state.cursor),
+         cursor = CASE WHEN EXCLUDED.cursor IS NULL THEN elysium_ingest_state.cursor
+                       WHEN elysium_ingest_state.cursor IS NULL THEN EXCLUDED.cursor
+                       ELSE GREATEST(elysium_ingest_state.cursor, EXCLUDED.cursor) END,
          rows = CASE WHEN $5::boolean THEN EXCLUDED.rows ELSE elysium_ingest_state.rows + EXCLUDED.rows END,
          backfill_done = COALESCE($4::boolean, elysium_ingest_state.backfill_done),
          last_error = NULL,

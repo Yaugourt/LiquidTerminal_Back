@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { HypeDexerElysiumIndexerClient } from '../../clients/hypedexer/rest/elysium/elysium-indexer.client';
 import type {
   ElysiumIngestPageQuery,
@@ -117,7 +118,20 @@ type LogSource = 'provider' | 'rpc';
 
 /** Work budget per tick so a lock never outlives its TTL. */
 const TICK_BUDGET_MS = 40_000;
+/** How long a stream's lock outlives a process that died holding it (it is renewed while a tick runs). */
 const LOCK_TTL_S = 120;
+/**
+ * The longest a tick may take. A tick aims at TICK_BUDGET_MS and checks it between two pieces of
+ * work; nothing bounded the piece itself. A write that waited on a lock, or an answer whose body
+ * stopped half way, then never came back: the stream's loop only starts again when its tick
+ * ends, so the stream was stopped until the next restart, with no error to see. Past this limit
+ * the tick is given up: the stream records it as an error, and runs again.
+ */
+const TICK_LIMIT_MS = 5 * MINUTE_MS;
+/** A registry run reads 40 pages of a slow listing (about 7 minutes, measured 2026-11-10). */
+const TOKENS_TICK_LIMIT_MS = 20 * MINUTE_MS;
+/** A day's rollups are built in one transaction of up to 15 minutes. */
+const ROLLUP_TICK_LIMIT_MS = 20 * MINUTE_MS;
 
 const TX_LIVE_INTERVAL_MS = 30_000;
 const TX_STEP_MS = HOUR_MS;
@@ -285,6 +299,25 @@ class IngestStoppedError extends Error {
     this.name = 'IngestStoppedError';
   }
 }
+
+/** A tick that ran past its time limit: what its stream records. */
+class TickTimeLimitError extends Error {
+  constructor(stream: string, limitMs: number) {
+    super(`Elysium ingest: ${stream} tick given up after ${Math.round(limitMs / 1000)} s`);
+    this.name = 'TickTimeLimitError';
+  }
+}
+
+/** What a tick given up for running too long throws at its next step, so it stops there instead of running beside its successor. */
+class TickGivenUpError extends Error {
+  constructor() {
+    super('Elysium ingest: tick given up');
+    this.name = 'TickGivenUpError';
+  }
+}
+
+/** The tick the current call belongs to, and whether it was given up. */
+const currentTick = new AsyncLocalStorage<{ givenUp: boolean }>();
 
 /**
  * Elysium ingestion: pulls raw txs, bridge transfers and the token registry
@@ -465,9 +498,15 @@ export class ElysiumIngestionService {
   private async runLockedTick(stream: ElysiumStream, tick: () => Promise<number>): Promise<number> {
     let next = 0;
     try {
-      const ran = await withDistributedLock(`poll:elysium-ingest:${stream}`, LOCK_TTL_S, async () => {
-        next = await tick();
-      });
+      // The lock is held for as long as the tick runs (renewed), and given back by its owner only.
+      const ran = await withDistributedLock(
+        `poll:elysium-ingest:${stream}`,
+        LOCK_TTL_S,
+        async () => {
+          next = await this.withinTimeLimit(stream, tick);
+        },
+        { renew: true }
+      );
       if (!ran) next = this.baseInterval(stream);
       this.failures.set(stream, 0);
       return next;
@@ -487,6 +526,39 @@ export class ElysiumIngestionService {
       });
       return this.baseInterval(stream) * Math.min(2 ** count, 10);
     }
+  }
+
+  /**
+   * Runs a tick, and gives it up when it is not over after its stream's time limit. The tick
+   * itself cannot be interrupted: it is marked as given up, and stops at its next step
+   * (ensureRunning) instead of going on beside the tick that follows it. One that never comes
+   * back stays pending, and harms nothing: its stream runs again.
+   */
+  private async withinTimeLimit(stream: ElysiumStream, tick: () => Promise<number>): Promise<number> {
+    const limitMs = this.tickLimit(stream);
+    const context = { givenUp: false };
+    const work = currentTick.run(context, tick);
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        context.givenUp = true;
+        reject(new TickTimeLimitError(stream, limitMs));
+      }, limitMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([work, limit]);
+    } finally {
+      clearTimeout(timer);
+      // Whatever the tick given up ends with, nobody waits for it any more.
+      work.catch(() => undefined);
+    }
+  }
+
+  private tickLimit(stream: ElysiumStream): number {
+    if (stream === 'tokens') return TOKENS_TICK_LIMIT_MS;
+    if (stream === 'rollup') return ROLLUP_TICK_LIMIT_MS;
+    return TICK_LIMIT_MS;
   }
 
   private baseInterval(stream: ElysiumStream): number {
@@ -575,6 +647,7 @@ export class ElysiumIngestionService {
 
   private ensureRunning(): void {
     if (this.stopped) throw new IngestStoppedError();
+    if (currentTick.getStore()?.givenUp) throw new TickGivenUpError();
   }
 
   /**
