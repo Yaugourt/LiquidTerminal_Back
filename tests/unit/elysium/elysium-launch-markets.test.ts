@@ -8,6 +8,8 @@ import {
   decodeGraduation,
   decodeLaunch,
   decodeLaunchTrade,
+  graduationKey,
+  launchGraduationKeys,
   launchMarketCandidates,
   launchMarketKeys,
   type LaunchMarket,
@@ -49,16 +51,35 @@ describe('launch markets for a page of logs', () => {
     expect(logs.map((l) => decodeLaunchTrade(l, subset))).toEqual(logs.map((l) => decodeLaunchTrade(l, every)));
   });
 
-  it('knows the market of every graduation the full set knows', () => {
-    let seen = 0;
+  it('finds the launch of every graduation among the launches its log names', () => {
+    // It used to compare two lookups by TRADE key, which both missed every Kiln graduation.
+    const pads = new Set<string>();
     for (const l of logs) {
       const g = decodeGraduation(l);
-      const key = g?.curve ?? g?.token;
-      if (!key) continue;
-      seen += 1;
-      expect(mapOf(found(launchMarketCandidates([l]))).has(key)).toBe(every.has(key));
+      if (!g) continue;
+      const key = graduationKey(g);
+      const named = found(launchMarketCandidates([l]));
+      const launch = launches.find((x) => x.token === g.token || (g.curve !== null && x.curve === g.curve));
+      if (!launch) continue;
+      pads.add(launch.launchpad);
+      expect(key).not.toBeNull();
+      expect(named.flatMap(launchGraduationKeys)).toContain(key);
     }
-    expect(seen).toBeGreaterThan(0);
+    expect([...pads]).toContain('Kiln');
+  });
+
+  it('graduates a token only under its own pad, and a curve launch only by its curve', () => {
+    const kiln = launches.find((l) => l.launchpad === 'Kiln') as LaunchRow;
+    const graduation = logs.map(decodeGraduation).find((g) => g?.launchpad === 'Kiln');
+    expect(graduation).toBeDefined();
+    expect(launchGraduationKeys(kiln)).toEqual([`Kiln:${kiln.token}`]);
+    expect(graduationKey(graduation!)).toBe(`Kiln:${kiln.token}`);
+    // The same token address under another pad, or a curve launch named by its token: no match.
+    expect(launchGraduationKeys({ ...kiln, launchpad: 'Neuriio' })).not.toContain(graduationKey(graduation!));
+    expect(launchGraduationKeys({ token: kiln.token, curve: '0x' + 'cc'.repeat(20), launchpad: 'CorePad' })).toEqual(['0x' + 'cc'.repeat(20)]);
+    expect(launchGraduationKeys({ token: kiln.token, curve: null, launchpad: 'BunnyPad' })).toEqual([]);
+    expect(graduationKey({ curve: '0x' + 'cc'.repeat(20), token: null, launchpad: null, pool: null, graduated_at: '' })).toBe('0x' + 'cc'.repeat(20));
+    expect(graduationKey({ curve: null, token: kiln.token, launchpad: null, pool: null, graduated_at: '' })).toBeNull();
   });
 
   it('names the emitter and the first indexed argument, as an address and as 32 bytes', () => {

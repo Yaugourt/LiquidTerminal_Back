@@ -30,13 +30,15 @@ export type ElysiumStream =
   | 'launchstats'
   /** Not a stream of its own: the marker of the one-time rebuild of the launch market state. */
   | 'launchstate'
+  /** Not a stream of its own: the marker of the one-time re-read of the Kiln graduations (`rows` = launches marked). */
+  | 'kilngrads'
   /** Not a stream of its own: where the walk through the tail of the token listing stands (`rows` = next page). */
   | 'tokenstail'
   /** Not a stream of its own: the builder of the day rollups (only its last error is kept here). */
   | 'rollup';
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
-export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'tokenstail', 'rollup']);
+export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'kilngrads', 'tokenstail', 'rollup']);
 
 export interface LaunchMarketDbRow {
   token: string;

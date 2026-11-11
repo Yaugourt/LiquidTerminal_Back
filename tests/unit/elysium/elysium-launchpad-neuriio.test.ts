@@ -116,6 +116,7 @@ describe('elysium launchpad decoders: Neuriio', () => {
     expect(g).toEqual({
       curve: null,
       token: HYPE_TOKEN,
+      launchpad: 'Neuriio',
       pool: '0xd53a1901004dae187fbc333c9925b40ba44495eb',
       graduated_at: '2026-10-01T00:00:00.000Z',
     });

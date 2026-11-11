@@ -280,9 +280,10 @@ export function toLaunchTokenView(
   const change24h = r.price !== null && price24h ? (r.price / price24h - 1) * 100 : null;
   const sale = CURVE_SALE_SUPPLY[r.launchpad as Launchpad] ?? null;
   let curvePct: number | null = null;
-  if (r.kind === 'curve' && sale) {
-    curvePct = r.graduated ? 100 : Math.max(0, Math.min(100, (Number(r.sold ?? 0) / Number(sale)) * 100));
-  }
+  // A graduated curve is full whatever it sold; before that the share needs the pad's sale supply
+  // (not known for Kiln, whose curves graduate on a HYPE target).
+  if (r.kind === 'curve' && r.graduated) curvePct = 100;
+  else if (r.kind === 'curve' && sale) curvePct = Math.max(0, Math.min(100, (Number(r.sold ?? 0) / Number(sale)) * 100));
   return {
     address: r.token,
     symbol: r.symbol ?? r.token.slice(0, 8),

@@ -182,10 +182,12 @@ export interface LaunchTradeRow {
   price: number;
 }
 
-/** A graduation, keyed by its curve contract (CorePad, Signal) or its token (Neuriio pads). */
+/** A graduation, keyed by its curve contract (CorePad, Signal) or its token (Neuriio pads, Kiln). */
 export interface GraduationRow {
   curve: string | null;
   token: string | null;
+  /** The pad that emitted it, for the graduations keyed by token (the pad's own contract says so). */
+  launchpad: Launchpad | null;
   /** Pair the token moved to, when the event names it. */
   pool: string | null;
   graduated_at: string;
@@ -425,15 +427,15 @@ export function decodeGraduation(raw: unknown): GraduationRow | null {
     // Graduation locks the liquidity: Kiln tokens do not trade on a pool afterwards.
     const token = topicAddress(b.l.topic1);
     if (!EMITTERS.kilnFactory.has(b.address) || !token) return null;
-    return { curve: null, token, pool: null, graduated_at };
+    return { curve: null, token, launchpad: 'Kiln', pool: null, graduated_at };
   }
   if (b.topic0 === LAUNCHPAD_TOPICS.neuriioGraduated) {
     const token = topicAddress(b.l.topic1);
     if (!NEURIIO_PADS.has(b.address) || !token) return null;
-    return { curve: null, token, pool: topicAddress(b.l.topic2), graduated_at };
+    return { curve: null, token, launchpad: 'Neuriio', pool: topicAddress(b.l.topic2), graduated_at };
   }
   if (b.topic0 !== LAUNCHPAD_TOPICS.corepadGraduated && b.topic0 !== LAUNCHPAD_TOPICS.signalGraduated) return null;
-  return { curve: b.address, token: null, pool: null, graduated_at };
+  return { curve: b.address, token: null, launchpad: null, pool: null, graduated_at };
 }
 
 /**
@@ -708,6 +710,26 @@ export function launchMarketKeys(l: Pick<LaunchRow, 'token' | 'curve' | 'pool'> 
   // A curve launch trades on its curve (on Neuriio: the token, inside the pad), then on its V2 pair once graduated.
   const curve = l.launchpad === 'Neuriio' || l.launchpad === 'BunnyPad' ? l.token : l.curve;
   return [curve, l.pool].filter((k): k is string => k !== null);
+}
+
+/**
+ * The keys a launch graduates under: its curve contract where the curve emits the event
+ * (CorePad, Signal), its token where the pad does (Neuriio, Kiln), prefixed with the pad so a
+ * pad can only graduate its own tokens.
+ *
+ * Graduations were looked up with the keys a launch TRADES under (launchMarketKeys). A Kiln
+ * launch trades on its curve and graduates by its token, so no Kiln graduation ever matched:
+ * 468 of them in the provider's logs, none in our table (2026-11-11).
+ */
+export function launchGraduationKeys(l: Pick<LaunchRow, 'token' | 'curve'> & { launchpad: string }): string[] {
+  if (l.launchpad === 'Neuriio' || l.launchpad === 'Kiln') return [`${l.launchpad}:${l.token}`];
+  return l.curve ? [l.curve] : [];
+}
+
+/** The key a decoded graduation names its launch by, in the terms of launchGraduationKeys. */
+export function graduationKey(g: GraduationRow): string | null {
+  if (g.curve) return g.curve;
+  return g.token && g.launchpad ? `${g.launchpad}:${g.token}` : null;
 }
 
 /** Topic order for one ingest window: launches first, so trades in the same window find their market. */

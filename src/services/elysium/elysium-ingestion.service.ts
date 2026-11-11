@@ -46,7 +46,11 @@ import {
   decodeGraduation,
   decodeLaunch,
   decodeLaunchTrade,
+  graduationKey,
+  GraduationRow,
   GRADUATION_TOPICS,
+  LAUNCHPAD_TOPICS,
+  launchGraduationKeys,
   LAUNCH_TOPIC_ORDER,
   launchMarketCandidates,
   launchMarketKeys,
@@ -320,6 +324,9 @@ export class ElysiumIngestionService {
   private launchStateHealed = false;
   /** No new attempt at the launch market state before this time (set after a failed one). */
   private launchStateRetryAt = 0;
+  /** The same for the one-time re-read of the Kiln graduations. */
+  private kilnHistoryDone = false;
+  private kilnHistoryRetryAt = 0;
 
   public static getInstance(): ElysiumIngestionService {
     if (!ElysiumIngestionService.instance) {
@@ -1147,14 +1154,7 @@ export class ElysiumIngestionService {
     }
     for (const topic0 of GRADUATION_TOPICS) {
       await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
-        const known = await this.launchMarketsFor(raw);
-        const rows = raw.map(decodeGraduation).filter((g, i): g is NonNullable<typeof g> => {
-          const key = g?.curve ?? g?.token;
-          const found = key !== null && key !== undefined && known.has(key);
-          if (!found && this.firstRead('launchpad', raw[i])) this.noteLogReject(marketRejectReason(raw[i], (k) => known.has(k)));
-          return found;
-        });
-        await this.writeRows('launchpad', rows, (part) => this.repo.markGraduated(part), (r) => `graduation ${r.curve ?? r.token}`);
+        await this.markGraduations(raw);
       });
     }
     // Read per page of logs, after the launches and the graduations above: a pair a graduation
@@ -1182,6 +1182,28 @@ export class ElysiumIngestionService {
   /** A status-like value longer than its column, stored cut: counted, with the value, for a first read. */
   private noteCut(stream: ElysiumStream, raw: unknown, field: string, value: string): void {
     if (this.firstRead(stream, raw)) this.rejects.note(stream, 'text-truncated', `${field}=${value}`);
+  }
+
+  /**
+   * Marks the launches a page of graduation logs names as graduated, and returns how many rows
+   * that changed. A graduation is kept when a launch we hold graduates under its key
+   * (launchGraduationKeys); one a pad emitted for a token never seen launching is counted.
+   */
+  private async markGraduations(raw: readonly unknown[]): Promise<number> {
+    const keys = new Set<string>();
+    const tokens = new Set<string>();
+    for (const l of await this.repo.findLaunchMarkets(launchMarketCandidates(raw))) {
+      tokens.add(l.token);
+      for (const key of launchGraduationKeys(l)) keys.add(key);
+    }
+    const rows: GraduationRow[] = [];
+    raw.forEach((log) => {
+      const g = decodeGraduation(log);
+      const key = g ? graduationKey(g) : null;
+      if (g && key !== null && keys.has(key)) rows.push(g);
+      else if (this.firstRead('launchpad', log)) this.noteLogReject(marketRejectReason(log, (k) => tokens.has(k)));
+    });
+    return this.writeRows('launchpad', rows, (part) => this.repo.markGraduated(part), (r) => `graduation ${r.curve ?? r.token}`);
   }
 
   private noteLogReject(reject: { reason: 'log-malformed' | 'log-undecodable' | 'launch-unknown-emitter' | 'market-unknown'; sample: string } | null): void {
@@ -1226,12 +1248,52 @@ export class ElysiumIngestionService {
     }
   }
 
+  /**
+   * Once: the Kiln graduations of the windows the stream read before it could match them (see
+   * launchGraduationKeys). One topic, from genesis to where the stream stands: from the
+   * provider up to its head, from the RPC past it. Later windows are read by the stream itself.
+   * A failure is logged and tried again later: it must not hold the launchpad stream.
+   */
+  private async ensureKilnGraduations(cursor: Date | null): Promise<void> {
+    if (this.kilnHistoryDone || !cursor || Date.now() < this.kilnHistoryRetryAt) return;
+    try {
+      if (!(await this.repo.getState('kilngrads'))?.backfillDone) {
+        const { head, lagging } = await this.ingestHorizon();
+        const providerEnd = lagging && head && head.getTime() < cursor.getTime() ? head : cursor;
+        let marked = 0;
+        const onPage = async (raw: unknown[]): Promise<void> => {
+          marked += await this.markGraduations(raw);
+        };
+        await this.pageAll(
+          'launchpad',
+          '/logs',
+          { start_time: toUpstreamTime(ELYSIUM_GENESIS), end_time: toUpstreamTime(providerEnd), topic0: LAUNCHPAD_TOPICS.kilnGraduated },
+          onPage
+        );
+        if (providerEnd.getTime() < cursor.getTime()) {
+          await onPage(await this.rpcLogs.getLogs(LAUNCHPAD_TOPICS.kilnGraduated, providerEnd, cursor));
+        }
+        await this.repo.advance('kilngrads', { cursor, setRows: marked, backfillDone: true });
+        void rawLogger.info('Elysium ingest: Kiln graduation history read', { marked });
+      }
+      this.kilnHistoryDone = true;
+    } catch (error) {
+      if (error instanceof IngestStoppedError) throw error;
+      this.kilnHistoryRetryAt = Date.now() + 10 * MINUTE_MS;
+      logDeduplicator.warn('Elysium ingest: Kiln graduation history not read, retrying later', {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+    }
+  }
+
   private async launchpadTick(): Promise<number> {
     await this.ensureLaunchState();
     const deadline = Date.now() + TICK_BUDGET_MS;
     const state = await this.repo.getState('launchpad');
     let cursor = state?.cursor ?? null;
     let backfillDone = state?.backfillDone ?? false;
+    // The history only matters once the stream has passed it: during its first backfill it reads everything itself.
+    if (backfillDone) await this.ensureKilnGraduations(cursor);
 
     while (Date.now() < deadline) {
       this.ensureRunning();
