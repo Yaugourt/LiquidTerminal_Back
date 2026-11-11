@@ -54,7 +54,6 @@ function cleanMessage(message: unknown, code: number, secrets: readonly string[]
   if (typeof message !== 'string') return fixedMessage(code);
   const lower = message.toLowerCase();
   if (secrets.some((secret) => lower.includes(secret.toLowerCase())) || LOCATION.test(message)) return fixedMessage(code);
-  // eslint-disable-next-line no-control-regex
   const plain = message.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
   if (plain.length === 0) return fixedMessage(code);
   return plain.length > MESSAGE_MAX_CHARS ? `${plain.slice(0, MESSAGE_MAX_CHARS)}…` : plain;

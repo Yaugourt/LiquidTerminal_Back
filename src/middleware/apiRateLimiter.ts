@@ -52,7 +52,7 @@ function secondsUntilRollover(windowSeconds: number): number {
   return Math.max(1, windowSeconds - (now % windowSeconds));
 }
 
-// Fenêtres de temps, dans l'ordre des compteurs renvoyés par countRequest
+// Fenêtres de temps, dans l'ordre des compteurs renvoyés par countRequests
 const MARKET_WINDOWS: readonly RateWindow[] = [
   { name: 'burst', seconds: RATE_LIMITS.BURST_LIMIT.WINDOW },
   { name: 'minute', seconds: RATE_LIMITS.MINUTE_LIMIT.WINDOW },
@@ -65,8 +65,9 @@ function windowKey(prefix: string, window: RateWindow, nowS: number): string {
 }
 
 /**
- * Counts this request in one fixed window per entry of `windows` and returns
- * the counts, in a single round trip (INCR + EXPIRE per window).
+ * Counts this request under each of `prefixes` (a client and, for IPv6, the /48
+ * it sits in), in one fixed window per entry of `windows`, and returns the
+ * counts of each prefix, in a single round trip (INCR + EXPIRE per window).
  *
  * The sorted sets this replaces kept every request as a member for the whole
  * window — up to 72k per IP for the hour — at twelve commands per request. A
@@ -82,11 +83,6 @@ function windowKey(prefix: string, window: RateWindow, nowS: number): string {
  * counts something else than requests, see `createIpLimiter`), or one weight
  * per window, in the order of `windows`.
  */
-async function countRequest(prefix: string, windows: readonly RateWindow[], cost: number | readonly number[] = 1): Promise<number[]> {
-  return (await countRequests([prefix], windows, cost))[0];
-}
-
-/** countRequest for several prefixes (a client and the /48 it sits in), still in one round trip: the counts of each, in order. */
 async function countRequests(prefixes: readonly string[], windows: readonly RateWindow[], cost: number | readonly number[] = 1): Promise<number[][]> {
   // Circuit open: don't queue on a wedged connection, use the fallback now.
   if (!redisService.isHealthy()) throw new Error('Redis circuit open');
@@ -150,7 +146,7 @@ interface MemoryEntry {
 const inMemoryCounters = new Map<string, MemoryEntry>();
 const FALLBACK_MAX_IPS = 10000;
 
-/** Counts `cost` under `key` in each of `windows`, in this process, and returns the counts (like countRequest). */
+/** Counts `cost` under `key` in each of `windows`, in this process, and returns the counts (as countRequests does for one prefix). */
 function countInMemory(
   key: string,
   windows: readonly RateWindow[],

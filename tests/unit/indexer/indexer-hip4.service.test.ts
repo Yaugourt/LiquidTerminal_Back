@@ -37,6 +37,7 @@ jest.mock('../../../src/clients/hypedexer/rest/hip4/hip4.client', () => ({
 }));
 
 import { IndexerHip4Service } from '../../../src/services/indexer/indexer-hip4.service';
+import { cacheService } from '../../../src/core/cache.service';
 import { HYPEDEXER_TTL } from '../../../src/constants/hypedexer.cache';
 import { OUTCOME_TEMPLATES } from '../utils/hip4-templates.fixture';
 import { runWithUpstreamCaller } from '../../../src/utils/request-context';
@@ -626,6 +627,10 @@ describe('IndexerHip4Service caching', () => {
     describe('while Redis is down', () => {
       afterEach(() => {
         mockRedis.isHealthy = () => true;
+        // What the cache kept in this process during the outage stays with the case that fetched
+        // it. (In production it is carried over on purpose: a read made once is not made again.)
+        (cacheService as unknown as { memory: Map<string, unknown>; memoryChars: number }).memory.clear();
+        (cacheService as unknown as { memoryChars: number }).memoryChars = 0;
       });
 
       it('computes once, then serves that entry instead of ~270 reads per caller', async () => {
