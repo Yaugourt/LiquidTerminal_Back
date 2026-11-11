@@ -232,42 +232,24 @@ describe('rate limiters', () => {
     });
 
     /**
-     * A /64 is one subnet, a /48 is 65,536 of them: whoever holds one had 65,536 budgets. The
-     * /48 is counted too, against 16 times a client's limit.
+     * The request limiters do not count the /48 a client sits in: a carrier shares a /48 between
+     * thousands of strangers, and a count at that level is filled by anyone in it.
      */
     it.each([
       ['market', marketRateLimiter, 200],
       ['passthrough', passthroughRateLimiter, 300],
-    ] as const)('%s limiter: the /64s of one /48 share 16 clients\' worth, another /48 and IPv4 do not', async (_name, limiter, max) => {
-      for (let subnet = 0; subnet < 16; subnet++) {
+    ] as const)('%s limiter: a subnet that floods, or many subnets at their limit, never get a neighbour of their /48 refused', async (_name, limiter, max) => {
+      // One subscriber far over its own limit: it is refused, its requests keep coming.
+      const flood = await burst(limiter, '2001:db8:77:1::1', max * 20);
+      expect(flood.filter((s) => s === 200)).toHaveLength(max);
+      // Thirty other subnets of the same /48, each at its limit in the same second.
+      for (let subnet = 2; subnet < 32; subnet++) {
         const statuses = await burst(limiter, `2001:db8:77:${subnet.toString(16)}::1`, max);
         expect(statuses.every((s) => s === 200)).toBe(true);
       }
-      // The 17th subnet of the same /48 has made no request of its own, and is refused.
-      expect(await hit(limiter, '2001:db8:77:ffff::1')).toBe(429);
-      expect(lastRetryAfter).toBe('1');
-      expect(await hit(limiter, '2001:db8:78::1')).toBe(200);
-      expect(await hit(limiter, '198.51.100.7')).toBe(200);
-      // The next second starts a new window for the /48 as for its subnets.
-      now += 1000;
+      // A neighbour that has asked for nothing yet is served.
       expect(await hit(limiter, '2001:db8:77:ffff::1')).toBe(200);
-    });
-
-    it('counts the /48 in the same round trip, and nothing more for IPv4', async () => {
-      await hit(marketRateLimiter, '2001:db8:99:1::1');
-      expect(mockRedis.execCalls).toBe(1);
-      expect([...mockRedis.counters.keys()].filter((k) => k.includes('site:2001:db8:99::/48'))).toHaveLength(3);
-      mockRedis.counters.clear();
-      await hit(marketRateLimiter, '192.0.2.44');
-      expect(mockRedis.execCalls).toBe(2);
-      expect([...mockRedis.counters.keys()].some((k) => k.includes('site:'))).toBe(false);
-    });
-
-    it('applies the /48 count to the in-memory fallback too', async () => {
-      mockRedis.fail = 'reject';
-      for (let subnet = 0; subnet < 16; subnet++) await burst(marketRateLimiter, `2001:db8:55:${subnet.toString(16)}::1`, 200);
-      expect(await hit(marketRateLimiter, '2001:db8:55:ffff::1')).toBe(429);
-      expect(await hit(marketRateLimiter, '2001:db8:56::1')).toBe(200);
+      expect([...mockRedis.counters.keys()].some((k) => k.includes('/48'))).toBe(false);
     });
 
     it('applies the /64 key to the in-memory fallback too', async () => {

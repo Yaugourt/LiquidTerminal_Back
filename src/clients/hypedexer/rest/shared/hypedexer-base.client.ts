@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { BaseApiService } from '../../../../core/base.api.service';
 import { unwrapHypeDexerApiPayload } from '../../../../utils/hypedexer-api-response.util';
 import { currentUpstreamCaller, upstreamRefusal } from '../../../../utils/request-context';
@@ -13,6 +14,21 @@ import { countUpstreamCredits, UPSTREAM_CALL_BASE_CREDITS } from '../../../../mi
  * The entry is cleared in `.finally()` so subsequent calls retry normally.
  */
 const inFlightHypedexerRequests: Map<string, Promise<unknown>> = new Map();
+
+/**
+ * The client a call was started for, for as long as the call runs. The bill arrives with the
+ * answer, and the request may be over by then: a reader of a live key is served the last copy
+ * after 1.5 s while the refresh it started goes on. Counted only against a request still open,
+ * what such a call cost past its first 2 credits was never counted: a caller asking again at
+ * each expiry for a 1,000-row key it had filled once paid 2 credits for calls billed 102.
+ */
+interface BilledCall {
+  ipKey: string;
+  siteKey?: string;
+  /** Answers already billed for this call (a retry after an answer whose body did not read is billed again). */
+  bills: number;
+}
+const billedCall = new AsyncLocalStorage<BilledCall>();
 
 function buildInFlightKey(method: string, endpoint: string): string {
   return `${method} ${endpoint}`;
@@ -57,21 +73,31 @@ export abstract class HypeDexerBaseClient extends BaseApiService {
    * caller (pollers, timers, a finished request, the authenticated export,
    * which has its own quota) means nothing to check or count.
    */
-  private admitUpstreamCall(): void {
+  private admitUpstreamCall(): BilledCall | undefined {
     const caller = currentUpstreamCaller();
-    if (!caller) return;
+    if (!caller) return undefined;
     this.refuseExhaustedCaller();
     countUpstreamCredits(caller, UPSTREAM_CALL_BASE_CREDITS);
+    return { ipKey: caller.ipKey, ...(caller.siteKey ? { siteKey: caller.siteKey } : {}), bills: 0 };
+  }
+
+  /** Runs `call` as the call started for `payer` (see billedCall), or as nobody's. */
+  private billedTo<T>(payer: BilledCall | undefined, call: () => Promise<T>): Promise<T> {
+    return payer ? billedCall.run(payer, call) : call();
   }
 
   /**
    * The answer says what the call cost (2 credits plus 1 per 10 rows): what it costs past the
-   * price counted when it started is counted for the client it was made for, while its request
-   * is still open. A call that fails is not billed, and keeps the price it started with.
+   * price counted when it started is counted for the client the call was started for. A call
+   * that fails is not billed, and keeps the price it started with; a call billed twice (its
+   * first answer did not read, and it was sent again) is counted twice.
    */
   protected override onBilled(credits: number): void {
-    const caller = currentUpstreamCaller();
-    if (caller && credits > UPSTREAM_CALL_BASE_CREDITS) countUpstreamCredits(caller, credits - UPSTREAM_CALL_BASE_CREDITS);
+    const payer = billedCall.getStore();
+    if (!payer) return;
+    const due = payer.bills === 0 ? credits - UPSTREAM_CALL_BASE_CREDITS : credits;
+    payer.bills += 1;
+    if (due > 0) countUpstreamCredits(payer, due);
   }
 
   private refuseExhaustedCaller(): void {
@@ -80,18 +106,15 @@ export abstract class HypeDexerBaseClient extends BaseApiService {
   }
 
   public override async get<T>(endpoint: string): Promise<T> {
-    this.admitUpstreamCall();
-    return super.get<T>(endpoint);
+    return this.billedTo(this.admitUpstreamCall(), () => super.get<T>(endpoint));
   }
 
   public override async post<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
-    this.admitUpstreamCall();
-    return super.post<T>(endpoint, body);
+    return this.billedTo(this.admitUpstreamCall(), () => super.post<T>(endpoint, body));
   }
 
   protected override async getSingleAttempt<T>(endpoint: string, timeoutMs?: number): Promise<T> {
-    this.admitUpstreamCall();
-    return super.getSingleAttempt<T>(endpoint, timeoutMs);
+    return this.billedTo(this.admitUpstreamCall(), () => super.getSingleAttempt<T>(endpoint, timeoutMs));
   }
 
   protected async getUnwrapped<T>(endpoint: string): Promise<T> {

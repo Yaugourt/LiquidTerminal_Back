@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { redisService } from '../core/redis.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { positiveIntEnv } from '../utils/env';
-import { rateLimitKeyForIp, siteKeyForIp } from '../utils/client-ip';
+import { rateLimitKeyForIp } from '../utils/client-ip';
 import { runWithUpstreamCaller, type UpstreamBudgetState } from '../utils/request-context';
 import { elysiumRpcRequestWeight } from '../schemas/elysium-rpc.schema';
 
@@ -65,9 +65,10 @@ function windowKey(prefix: string, window: RateWindow, nowS: number): string {
 }
 
 /**
- * Counts this request under each of `prefixes` (a client and, for IPv6, the /48
- * it sits in), in one fixed window per entry of `windows`, and returns the
- * counts of each prefix, in a single round trip (INCR + EXPIRE per window).
+ * Counts this request under each of `prefixes` (one for a limiter; a client,
+ * its /48 and everyone for the credit budget), in one fixed window per entry of
+ * `windows`, and returns the counts of each prefix, in a single round trip
+ * (INCR + EXPIRE per window).
  *
  * The sorted sets this replaces kept every request as a member for the whole
  * window — up to 72k per IP for the hour — at twelve commands per request. A
@@ -111,17 +112,9 @@ async function countRequests(prefixes: readonly string[], windows: readonly Rate
   );
 }
 
-/**
- * How many times a client's limit the /48 it sits in may reach, for IPv6. An address is
- * counted under its /64 (one subnet) and under its /48 (one site, 65,536 subnets): without the
- * second count, whoever holds a /48 has 65,536 budgets. 16 leaves room for the many people a
- * carrier or a campus can put in one /48, and is 4,096 times less than before.
- */
-const V6_SITE_FACTOR = positiveIntEnv('RATE_LIMIT_V6_SITE_FACTOR', 16);
-
-/** The first window whose count is over its limit (times `factor`), or undefined. */
-function exceeded(counts: readonly number[], windows: readonly RateWindow[], limits: readonly number[], factor = 1): RateWindow | undefined {
-  return windows.find((_, i) => counts[i] > limits[i] * factor);
+/** The first window whose count is over its limit, or undefined. */
+function exceeded(counts: readonly number[], windows: readonly RateWindow[], limits: readonly number[]): RateWindow | undefined {
+  return windows.find((_, i) => counts[i] > limits[i]);
 }
 
 /** "second" for the one-second window, else the window's own name: what a refusal says. */
@@ -205,14 +198,21 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
     return;
   }
   // An IPv6 host owns a whole /64 and can pick any address in it, so the
-  // budget is per /64 (IPv4 stays per address); the /48 it sits in is counted too.
-  const prefixes = limiterPrefixes('ratelimit', ip);
+  // budget is per /64 (IPv4 stays per address).
+  //
+  // Not per /48 as well. A /48 holds 65,536 subnets, and whoever holds one has as many
+  // budgets; but a /48 is also what a carrier or an access provider shares between
+  // thousands of strangers, and a count at that level is filled by anyone in it: one
+  // subscriber with a /56 could have every neighbour of its /48 refused on every route.
+  // Refusing visitors for what someone else does is worse than the flood it would hold
+  // back, which the per-route ceilings and the paid budget (counted per /48) still bound.
+  const prefix = `ratelimit:${rateLimitKeyForIp(ip)}`;
 
-  let counts: number[][];
+  let counts: number[];
   let fallback = false;
   try {
     // Vérification multi-niveaux avec Redis
-    counts = await countRequests(prefixes, MARKET_WINDOWS);
+    [counts] = await countRequests([prefix], MARKET_WINDOWS);
   } catch (error) {
     logDeduplicator.error('Rate limiter Redis error, using in-memory fallback', {
       error: error instanceof Error ? error.message : String(error),
@@ -221,21 +221,15 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
     });
     // Fail-secure: the same windows and limits, counted in this process.
     fallback = true;
-    counts = prefixes.map((prefix) => countInMemory(prefix, MARKET_WINDOWS));
+    counts = countInMemory(prefix, MARKET_WINDOWS);
   }
-  const refused = exceeded(counts[0], MARKET_WINDOWS, MARKET_LIMITS) ?? (counts[1] && exceeded(counts[1], MARKET_WINDOWS, MARKET_LIMITS, V6_SITE_FACTOR));
+  const refused = exceeded(counts, MARKET_WINDOWS, MARKET_LIMITS);
   if (refused) {
     return sendLimitExceededResponse(res, fallback ? 'Too many requests (fallback mode)' : `Too many requests per ${windowWord(refused)}`, refused.seconds);
   }
   next();
 };
 
-/** The counter prefix of a client under `namespace`, and for IPv6 the one of its /48. */
-function limiterPrefixes(namespace: string, ip: string): string[] {
-  const site = siteKeyForIp(ip);
-  const client = `${namespace}:${rateLimitKeyForIp(ip)}`;
-  return site ? [client, `${namespace}:site:${site}`] : [client];
-}
 
 /** 429 with Retry-After set to the rollover of the window that refused it. */
 function sendLimitExceededResponse(res: Response, message: string, windowSeconds: number): void {
@@ -305,14 +299,14 @@ function createIpLimiter(
       res.status(400).json({ error: 'IP address not found', message: 'Could not determine client IP address' });
       return;
     }
-    // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4; the /48 is counted too.
-    const prefixes = limiterPrefixes(`ratelimit:${namespace}`, ip);
+    // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4.
+    const prefix = `ratelimit:${namespace}:${rateLimitKeyForIp(ip)}`;
     const weight = options.cost ? Math.max(1, Math.trunc(options.cost(req)) || 1) : 1;
     const costs = [Math.min(limits.BURST.MAX_REQUESTS, weight), Math.min(limits.MINUTE.MAX_REQUESTS, weight)];
-    let counts: number[][];
+    let counts: number[];
     let fallback = false;
     try {
-      counts = await countRequests(prefixes, windows, costs);
+      [counts] = await countRequests([prefix], windows, costs);
     } catch (error) {
       logDeduplicator.error('IP rate limiter Redis error, using in-memory fallback', {
         namespace,
@@ -322,9 +316,9 @@ function createIpLimiter(
       });
       // Fail-secure, same as the general limiter: this limiter's own windows and limits, in this process.
       fallback = true;
-      counts = prefixes.map((prefix) => countInMemory(prefix, windows, costs));
+      counts = countInMemory(prefix, windows, costs);
     }
-    const refused = exceeded(counts[0], windows, maxes) ?? (counts[1] && exceeded(counts[1], windows, maxes, V6_SITE_FACTOR));
+    const refused = exceeded(counts, windows, maxes);
     if (refused) {
       return sendLimitExceededResponse(res, fallback ? 'Too many requests (fallback mode)' : `Too many ${what} requests per ${windowWord(refused)}`, refused.seconds);
     }
@@ -474,13 +468,19 @@ export const namesWriteRateLimiter = createIpLimiter(
 // open behind one IP. Only floods and scripts get near them.
 //
 // Per /48 for IPv6 (a site: 65,536 subnets, each of which had a budget of its
-// own): 8 clients' worth.
+// own): 8 clients' worth. Only what was really billed is counted, so one subnet
+// adds at most its own budget to its /48's count: a single abusive subscriber
+// cannot spend the share of its neighbours.
 //
 // For all clients together: 120,000 credits a minute. Past it, a client that has
-// spent less than its reserve this minute (600 credits: a few cold pages) still
-// goes on, so that a flood from many addresses cannot leave an ordinary visitor
-// with nothing; past twice it, nobody starts new billed work until the minute
-// rolls over. What every visitor together can spend is bounded either way.
+// spent less than its reserve this minute (1,500 credits, a quarter of its own
+// budget: a visitor's pages, or an office's) still goes on, so that a flood from
+// many addresses cannot leave ordinary visitors with nothing. What all visitors
+// together can spend is bounded by a last stop at ten times the ceiling (1.2
+// million a minute): past it nobody starts new billed work until the minute
+// rolls over. It is a fuse, not a setting to run at: reaching it past the ceiling
+// takes 720 addresses each under its reserve, and stopping there means refusing
+// every visitor's uncached reads, which is what the rest of this is built not to do.
 //
 // The budget covers the routes whose cache keys the caller picks (the limiters
 // above that set the upstream caller). Shared aggregates are not charged to
@@ -490,7 +490,8 @@ export const namesWriteRateLimiter = createIpLimiter(
 //
 // The budget is decided once per request, on entry (peekUpstreamBudget); what is
 // billed is counted as it is known (countUpstreamCredits: the price every call
-// has when it starts, the rest when its answer says what it cost) and never
+// has when it starts, the rest when its answer says what it cost, for the client
+// the call was started for, whether its request is still open or not) and never
 // refused while it is counted: a request that started within budget is served
 // whole, and the client's next request finds the counters where they ended.
 const CREDIT_BUDGET = {
@@ -501,10 +502,10 @@ const CREDIT_BUDGET = {
 const CREDIT_SITE_FACTOR = positiveIntEnv('HYPEDEXER_CREDIT_BUDGET_V6_SITE_FACTOR', 8);
 /** What all clients together may spend in a minute before the big spenders are held back. */
 const CREDIT_GLOBAL_MINUTE = positiveIntEnv('HYPEDEXER_CREDIT_BUDGET_GLOBAL_MINUTE', 120_000);
-/** Past this many times the common ceiling, nobody starts new billed work. */
-const CREDIT_GLOBAL_HARD_FACTOR = 2;
+/** Past this, nobody starts new billed work until the minute rolls over (ten times the common ceiling by default). */
+const CREDIT_GLOBAL_HARD_MINUTE = positiveIntEnv('HYPEDEXER_CREDIT_BUDGET_GLOBAL_HARD_MINUTE', 10 * CREDIT_GLOBAL_MINUTE);
 /** What a client can spend in a minute and still go on once the common ceiling is passed. */
-const CREDIT_RESERVE_MINUTE = positiveIntEnv('HYPEDEXER_CREDIT_RESERVE_MINUTE', 600);
+const CREDIT_RESERVE_MINUTE = positiveIntEnv('HYPEDEXER_CREDIT_RESERVE_MINUTE', 1_500);
 
 /** What any HypeDexer call is billed at least: counted when the call starts, before its answer says the rest. */
 export const UPSTREAM_CALL_BASE_CREDITS = 2;
@@ -553,7 +554,7 @@ function budgetState(
   // The common ceiling. The reserve is per /48 for IPv6: a site's subnets share one, not 65,536.
   const everyone = counts.global[0];
   const mine = counts.site ? counts.site[0] : minute;
-  if (everyone >= CREDIT_GLOBAL_MINUTE * CREDIT_GLOBAL_HARD_FACTOR || (everyone >= CREDIT_GLOBAL_MINUTE && mine >= CREDIT_RESERVE_MINUTE)) {
+  if (everyone >= CREDIT_GLOBAL_HARD_MINUTE || (everyone >= CREDIT_GLOBAL_MINUTE && mine >= CREDIT_RESERVE_MINUTE)) {
     retryAfterS = Math.max(retryAfterS, minuteLeftS);
   }
   return retryAfterS > 0

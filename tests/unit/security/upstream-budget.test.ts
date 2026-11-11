@@ -16,6 +16,7 @@ process.env.HYPEDEXER_CREDIT_BUDGET_MINUTE = '5';
 process.env.HYPEDEXER_CREDIT_BUDGET_HOUR = '8';
 // The common ceiling and the /48's share have their own cases below; here they stay out of the way.
 process.env.HYPEDEXER_CREDIT_BUDGET_GLOBAL_MINUTE = '1000';
+process.env.HYPEDEXER_CREDIT_BUDGET_GLOBAL_HARD_MINUTE = '2000';
 process.env.HYPEDEXER_CREDIT_RESERVE_MINUTE = '3';
 process.env.HYPEDEXER_CREDIT_BUDGET_V6_SITE_FACTOR = '2';
 
@@ -536,7 +537,7 @@ describe('peekUpstreamBudget and countUpstreamCall', () => {
       expect(await peekUpstreamBudget('10.1.0.3')).toEqual({ exhausted: false, retryAfterS: 0 });
     });
 
-    it('past twice it, nobody starts new billed work until the minute rolls over', async () => {
+    it('at the last stop, far past it, nobody starts new billed work until the minute rolls over', async () => {
       everyone(2000);
       expect(await peekUpstreamBudget('10.1.0.4')).toEqual({ exhausted: true, retryAfterS: 60 });
       now += 60_000;
@@ -663,6 +664,63 @@ describe('HypeDexer client gate', () => {
     await settle();
     expect(spentBy('9.9.9.9')).toBe(12 + 102 + 2 + 2);
     expect(spent()).toBe(118);
+  });
+
+  /**
+   * A reader of a live key is served the last copy after 1.5 s while the refresh it started
+   * goes on: the bill arrives once its request is over. Counted only against an open request,
+   * a 1,000-row refresh was counted 2 credits for 102 billed.
+   */
+  it('counts the whole bill for the client the call was started for, even when its request is over by then', async () => {
+    let answer!: () => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = () =>
+            resolve(new Response(JSON.stringify({ data: [1] }), { status: 200, headers: { 'content-type': 'application/json', 'x-credit-cost': '102' } }));
+        })
+    );
+    const { res } = exchange('9.9.4.4');
+    let call!: Promise<unknown>;
+    await asCaller(
+      '9.9.4.4',
+      async () => {
+        call = client.one('/thousand-rows');
+        // The request is answered (with the last copy) before the provider answers.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        res.emit('finish');
+      },
+      { res }
+    );
+    await settle();
+    expect(spentBy('9.9.4.4')).toBe(2);
+    answer();
+    await call;
+    await settle();
+    expect(spentBy('9.9.4.4')).toBe(102);
+    expect(spent()).toBe(102);
+  });
+
+  it('counts a call the provider billed twice (its first answer did not read, it was sent again) twice', async () => {
+    const billed = (body: string): Response => new Response(body, { status: 200, headers: { 'content-type': 'application/json', 'x-credit-cost': '12' } });
+    fetchMock.mockResolvedValueOnce(billed('<html>not json')).mockResolvedValueOnce(billed(JSON.stringify({ data: [1] })));
+    await asCaller('9.9.4.5', () => client.one('/twice').catch(() => undefined));
+    await settle();
+    // Whether the client retries a body that does not read is its own business; each bill it got is counted.
+    expect(spentBy('9.9.4.5')).toBe(12 * fetchMock.mock.calls.length);
+  });
+
+  it('charges nothing for a billed answer of a call nobody was admitted for (the shared /info reads)', async () => {
+    class Unadmitted extends TestClient {
+      raw(path: string): Promise<unknown> {
+        return this.fetchWithTimeout<unknown>(path, { method: 'GET' });
+      }
+    }
+    fetchMock.mockResolvedValueOnce(new Response('{"ok":1}', { status: 200, headers: { 'content-type': 'application/json', 'x-credit-cost': '3' } }));
+    await asCaller('9.9.4.6', () => new Unadmitted().raw('/info'));
+    await settle();
+    expect(spentBy('9.9.4.6')).toBe(0);
+    expect(spent()).toBe(0);
   });
 
   it('a call that fails is not billed, and keeps the price it started with', async () => {
