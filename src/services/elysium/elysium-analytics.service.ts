@@ -14,7 +14,9 @@ import {
 } from './elysium-analytics.util';
 import { methodName } from './elysium-dex.util';
 import { distinctCallers, planRollupWindow, rawRanges, readRollupCoverage, rollupDays } from './elysium-rollup.reader';
-import { errorCategory } from './elysium-analytics.util';
+import { errorCategory, streamHealth } from './elysium-analytics.util';
+import { hypedexerCreditMeter } from '../../utils/hypedexer-credit-meter';
+import { positiveIntEnv } from '../../utils/env';
 import { ELYSIUM_GENESIS } from './elysium-ingest.util';
 import { closedRollupDays, firstKeptDay, rollupKeepDays } from './elysium-rollup.util';
 
@@ -162,6 +164,10 @@ export class ElysiumAnalyticsService {
       rollups: Record<string, unknown>;
       rejects: Array<Record<string, unknown>>;
       completeness: Record<string, unknown>;
+      provider: Record<string, unknown>;
+      upkeep: Array<Record<string, unknown>>;
+      credits: Record<string, unknown> | null;
+      database: Record<string, unknown>;
       views: Array<Record<string, unknown>>;
     }>
   > {
@@ -181,20 +187,25 @@ export class ElysiumAnalyticsService {
     rollups: Record<string, unknown>;
     rejects: Array<Record<string, unknown>>;
     completeness: Record<string, unknown>;
+    provider: Record<string, unknown>;
+    upkeep: Array<Record<string, unknown>>;
+    credits: Record<string, unknown> | null;
+    database: Record<string, unknown>;
   }> {
-    return this.view('status', 'v4', CADENCE.status, async () => {
-      const [all, days, sizes, rejects, checks] = await Promise.all([
+    return this.view('status', 'v5', CADENCE.status, async () => {
+      const [all, days, sizes, rejects, checks, credits] = await Promise.all([
         ElysiumIngestRepository.getInstance().listStates(),
         prismaHistoricalPages.$queryRaw<Array<{ day: string; built_ms: number | null }>>`
           SELECT day::text AS day, (extract(epoch FROM built_at) * 1000)::float8 AS built_ms
           FROM elysium_day_rollup
           WHERE built_at IS NOT NULL AND NOT dirty AND day >= ${firstKeptDay(new Date(), rollupKeepDays())}::date
           ORDER BY day`.catch(() => []),
-        prismaHistoricalPages.$queryRaw<Array<{ rollups: number; tx: number }>>`
+        prismaHistoricalPages.$queryRaw<Array<{ rollups: number; tx: number; database: number }>>`
           SELECT (pg_total_relation_size('elysium_call_day') + pg_total_relation_size('elysium_caller_day')
                   + pg_total_relation_size('elysium_caller_set') + pg_total_relation_size('elysium_method_sender_day')
                   + pg_total_relation_size('elysium_day_rollup'))::float8 AS rollups,
-                 pg_total_relation_size('elysium_tx')::float8 AS tx`.catch(() => []),
+                 pg_total_relation_size('elysium_tx')::float8 AS tx,
+                 pg_database_size(current_database())::float8 AS database`.catch(() => []),
         // What the ingestion read and did not store over the last 7 UTC days, per stream and reason.
         prismaHistoricalPages.$queryRaw<
           Array<{ stream: string; reason: string; today: number; yesterday: number; week: number; last_ms: number }>
@@ -234,6 +245,8 @@ export class ElysiumAnalyticsService {
           FROM elysium_day_check
           WHERE day >= (now() AT TIME ZONE 'UTC')::date - 8
           ORDER BY day`.catch(() => []),
+        // What the provider billed, from the meter's totals in Redis (null when Redis cannot say).
+        hypedexerCreditMeter.summary(),
       ]);
       // Markers (a one-time rebuild, a position in a listing) are not streams: they have no lag to show.
       const rows = all.filter((r) => !ELYSIUM_STATE_MARKERS.has(r.stream));
@@ -244,15 +257,58 @@ export class ElysiumAnalyticsService {
       const txCursor = all.find((r) => r.stream === 'tx')?.cursor ?? null;
       const due = closedRollupDays(txCursor, new Date(now), ELYSIUM_GENESIS);
       const lastBuilt = days.reduce<number | null>((m, d) => (d.built_ms !== null && (m === null || d.built_ms > m) ? d.built_ms : m), null);
+      // The provider's own head, as the ingestion last read it: what tells a stream that waits
+      // for the provider from one that is behind on its own.
+      const provider = all.find((r) => r.stream === 'provider');
+      const providerHead = provider?.cursor ?? null;
+      const volumeBytes = positiveIntEnv('HISTORICAL_DB_VOLUME_BYTES', 0);
+      const databaseBytes = sizes[0] ? Number(sizes[0].database) : null;
       return {
-        streams: rows.map((r) => ({
-          stream: r.stream,
-          cursor: r.cursor ? r.cursor.toISOString() : null,
-          rows: Number(r.rows),
-          backfillDone: r.backfillDone,
-          lastError: errorCategory(r.lastError),
-          lagSeconds: r.cursor ? Math.max(0, Math.round((now - r.cursor.getTime()) / 1000)) : null,
-        })),
+        streams: rows.map((r) => {
+          const health = streamHealth(r, now, providerHead);
+          return {
+            stream: r.stream,
+            cursor: r.cursor ? r.cursor.toISOString() : null,
+            rows: Number(r.rows),
+            backfillDone: r.backfillDone,
+            lastError: errorCategory(r.lastError),
+            // Seconds between the clock and the stream's data; null for a stream whose cursor is the time of its run.
+            lagSeconds: health.lagSeconds,
+            everyS: health.everyS,
+            lastOkAt: r.okAt ? r.okAt.toISOString() : null,
+            state: health.state,
+          };
+        }),
+        provider: {
+          headAt: providerHead ? providerHead.toISOString() : null,
+          lagSeconds: providerHead ? Math.max(0, Math.round((now - providerHead.getTime()) / 1000)) : null,
+          readAt: provider?.okAt ? provider.okAt.toISOString() : null,
+        },
+        // The one-time jobs and the walks that are not streams: whether each is done, and its last error.
+        upkeep: all
+          .filter((r) => ELYSIUM_STATE_MARKERS.has(r.stream) && r.stream !== 'provider' && r.stream !== 'rollup')
+          .map((r) => ({
+            name: r.stream,
+            done: r.backfillDone,
+            at: r.updatedAt.toISOString(),
+            lastError: errorCategory(r.lastError),
+          })),
+        credits:
+          credits === null
+            ? null
+            : {
+                today: credits.days[0]?.credits ?? null,
+                yesterday: credits.days[1]?.credits ?? null,
+                days: credits.days,
+                topPathsToday: credits.topPathsToday,
+                balance: credits.balance,
+              },
+        database: {
+          bytes: databaseBytes,
+          // The size of the volume, when it is given (HISTORICAL_DB_VOLUME_BYTES): the share of it in use.
+          volumeBytes: volumeBytes > 0 ? volumeBytes : null,
+          usedShare: volumeBytes > 0 && databaseBytes !== null ? databaseBytes / volumeBytes : null,
+        },
         rollups: {
           builtDays: built.size,
           waitingDays: due.filter((day) => !built.has(day)).length,

@@ -458,6 +458,8 @@ model ElysiumIngestState {
   backfillDone Boolean   @default(false) @map("backfill_done")
   lastError    String?   @map("last_error") @db.Text
   updatedAt    DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+  /// When the stream last completed a run (updated_at moves on a failure too).
+  okAt         DateTime? @map("ok_at") @db.Timestamptz(3)
 
   @@map("elysium_ingest_state")
 }

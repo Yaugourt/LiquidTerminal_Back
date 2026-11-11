@@ -46,10 +46,12 @@ export type ElysiumStream =
   /** Not a stream of its own: the builder of the day rollups (only its last error is kept here). */
   | 'rollup'
   /** Not a stream of its own: the daily comparison with the provider (only its last error is kept here; its days are in elysium_day_check). */
-  | 'check';
+  | 'check'
+  /** Not a stream of its own: the provider's own head as last read (`cursor` = its last indexed block time). */
+  | 'provider';
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
-export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'kilngrads', 'bridgedeep', 'tokenstail', 'rollup', 'check']);
+export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'kilngrads', 'bridgedeep', 'tokenstail', 'rollup', 'check', 'provider']);
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -76,6 +78,8 @@ export interface ElysiumIngestStateRow {
   backfillDone: boolean;
   lastError: string | null;
   updatedAt: Date;
+  /** When the stream last completed a run; null when it never did. */
+  okAt: Date | null;
 }
 
 /**
@@ -494,10 +498,12 @@ export class ElysiumIngestRepository {
         backfill_done: boolean;
         last_error: string | null;
         updated_ms: number;
+        ok_ms: number | null;
       }>
     >(
       `SELECT stream, (extract(epoch FROM cursor) * 1000)::float8 AS cursor_ms, rows::text AS rows,
-              backfill_done, last_error, (extract(epoch FROM updated_at) * 1000)::float8 AS updated_ms
+              backfill_done, last_error, (extract(epoch FROM updated_at) * 1000)::float8 AS updated_ms,
+              (extract(epoch FROM ok_at) * 1000)::float8 AS ok_ms
        FROM elysium_ingest_state
        WHERE $1::text IS NULL OR stream = $1::text
        ORDER BY stream`,
@@ -510,6 +516,7 @@ export class ElysiumIngestRepository {
       backfillDone: r.backfill_done,
       lastError: r.last_error,
       updatedAt: new Date(Number(r.updated_ms)),
+      okAt: r.ok_ms === null ? null : new Date(Number(r.ok_ms)),
     }));
   }
 
@@ -534,9 +541,10 @@ export class ElysiumIngestRepository {
   ): Promise<void> {
     const rows = String(Math.trunc(patch.setRows ?? patch.addRows ?? 0));
     await prismaHistorical.$executeRawUnsafe(
-      `INSERT INTO elysium_ingest_state (stream, cursor, rows, backfill_done, last_error, updated_at)
-       VALUES ($1::text, $2::timestamptz, $3::bigint, COALESCE($4::boolean, false), NULL, now())
+      `INSERT INTO elysium_ingest_state (stream, cursor, rows, backfill_done, last_error, updated_at, ok_at)
+       VALUES ($1::text, $2::timestamptz, $3::bigint, COALESCE($4::boolean, false), NULL, now(), now())
        ON CONFLICT (stream) DO UPDATE SET
+         ok_at = now(),
          cursor = CASE WHEN EXCLUDED.cursor IS NULL THEN elysium_ingest_state.cursor
                        WHEN elysium_ingest_state.cursor IS NULL THEN EXCLUDED.cursor
                        ELSE GREATEST(elysium_ingest_state.cursor, EXCLUDED.cursor) END,
@@ -861,6 +869,27 @@ export class ElysiumIngestRepository {
          last_at = now(),
          sample = COALESCE(elysium_ingest_reject.sample, EXCLUDED.sample)`,
       JSON.stringify(rows.map((r) => ({ stream: r.stream, reason: r.reason, count: r.count, sample: r.sample === null ? null : storableText(r.sample) })))
+    );
+  }
+
+  /**
+   * Records that a stream completed a run that had nothing to write (a tick with no window to
+   * read, a fallback with nothing to follow): its loop is alive, and its last error is over.
+   */
+  public async touch(stream: ElysiumStream): Promise<void> {
+    await prismaHistorical.$executeRawUnsafe(
+      `INSERT INTO elysium_ingest_state (stream, ok_at, updated_at) VALUES ($1::text, now(), now())
+       ON CONFLICT (stream) DO UPDATE SET ok_at = now(), last_error = NULL`,
+      stream
+    );
+  }
+
+  /** Records the provider's own head as just read (the `provider` row the status route reads). */
+  public async recordProviderHead(head: Date): Promise<void> {
+    await prismaHistorical.$executeRawUnsafe(
+      `INSERT INTO elysium_ingest_state (stream, cursor, ok_at, updated_at) VALUES ('provider', $1::timestamptz, now(), now())
+       ON CONFLICT (stream) DO UPDATE SET cursor = EXCLUDED.cursor, ok_at = now(), updated_at = now(), last_error = NULL`,
+      head.toISOString()
     );
   }
 

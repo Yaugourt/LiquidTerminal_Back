@@ -4,6 +4,8 @@
  */
 const mockCounters = new Map<string, number>();
 const mockExpires = new Map<string, number>();
+const mockHashes = new Map<string, Map<string, number>>();
+const mockStrings = new Map<string, string>();
 const mockClient = {
   incrby: jest.fn(async (key: string, by: number) => {
     const next = (mockCounters.get(key) ?? 0) + by;
@@ -14,6 +16,33 @@ const mockClient = {
     mockExpires.set(key, seconds);
     return 1;
   }),
+  /** The per-path totals are written in one round trip. */
+  pipeline: () => {
+    const ops: Array<() => void> = [];
+    const p = {
+      hincrby: (key: string, field: string, by: number) => {
+        ops.push(() => {
+          const hash = mockHashes.get(key) ?? new Map<string, number>();
+          hash.set(field, (hash.get(field) ?? 0) + by);
+          mockHashes.set(key, hash);
+        });
+        return p;
+      },
+      expire: (key: string, seconds: number) => {
+        ops.push(() => mockExpires.set(key, seconds));
+        return p;
+      },
+      set: (key: string, value: string) => {
+        ops.push(() => mockStrings.set(key, value));
+        return p;
+      },
+      exec: async () => ops.forEach((op) => op()),
+    };
+    return p;
+  },
+  mget: jest.fn(async (keys: string[]) => keys.map((k) => (mockCounters.has(k) ? String(mockCounters.get(k)) : null))),
+  hgetall: jest.fn(async (key: string) => Object.fromEntries([...(mockHashes.get(key) ?? new Map()).entries()].map(([f, v]) => [f, String(v)]))),
+  get: jest.fn(async (key: string) => mockStrings.get(key) ?? null),
 };
 const mockLog = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 
@@ -123,5 +152,56 @@ describe('HypedexerCreditMeter', () => {
     meter.flush();
     expect(mockLog.warn).toHaveBeenCalledWith('HypeDexer credit meter: could not update the daily total', { error: 'down' });
     expect(mockLog.info).toHaveBeenCalledWith('HypeDexer credits (last minute)', expect.objectContaining({ credits: 3 }));
+  });
+});
+
+describe('HypedexerCreditMeter: what was spent, read back', () => {
+  const meter = new HypedexerCreditMeter();
+  beforeEach(() => {
+    jest.useFakeTimers({ now: Date.parse('2026-11-11T12:00:00Z') });
+    mockCounters.clear();
+    mockHashes.clear();
+    mockStrings.clear();
+    meter.reset();
+  });
+  afterEach(() => {
+    meter.reset();
+    jest.useRealTimers();
+  });
+
+  it('keeps the day\'s credits and calls per path, added once a minute, and the balance', async () => {
+    meter.record('https://api.hypedexer.com/elysium/testnet/transactions?limit=1000', '102', '9000000');
+    meter.record('https://api.hypedexer.com/elysium/testnet/transactions?limit=1000&offset=1000', '52', '8999948');
+    meter.record('https://api.hypedexer.com/elysium/testnet/stats', '2', '8999946');
+    meter.flush();
+    await jest.advanceTimersByTimeAsync(10);
+
+    const summary = await meter.summary();
+    expect(summary?.days[0]).toEqual({ day: '2026-11-11', credits: 156 });
+    expect(summary?.topPathsToday).toEqual([
+      { path: '/elysium/testnet/transactions', credits: 154, calls: 2 },
+      { path: '/elysium/testnet/stats', credits: 2, calls: 1 },
+    ]);
+    expect(summary?.balance).toBe(8999946);
+    // Kept as long as the day totals.
+    expect(mockExpires.get('hypedexer:credits:paths:2026-11-11')).toBe(8 * 24 * 60 * 60);
+  });
+
+  it('gives the last 8 days, today first, with null for a day nothing is known of', async () => {
+    mockCounters.set('hypedexer:credits:2026-11-11', 500);
+    mockCounters.set('hypedexer:credits:2026-11-09', 1_200_000);
+    const summary = await meter.summary();
+    expect(summary?.days.slice(0, 3)).toEqual([
+      { day: '2026-11-11', credits: 500 },
+      { day: '2026-11-10', credits: null },
+      { day: '2026-11-09', credits: 1_200_000 },
+    ]);
+    expect(summary?.days).toHaveLength(8);
+    expect(summary?.balance).toBeNull();
+  });
+
+  it('answers null when Redis cannot say', async () => {
+    mockClient.mget.mockRejectedValueOnce(new Error('Connection is closed'));
+    expect(await meter.summary()).toBeNull();
   });
 });

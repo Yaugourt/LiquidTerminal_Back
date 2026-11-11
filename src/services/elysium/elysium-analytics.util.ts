@@ -103,3 +103,75 @@ export function errorCategory(message: string | null): string | null {
   if (/page/i.test(message)) return 'page_cap';
   return 'error';
 }
+
+/**
+ * What each ingestion stream is expected to do: how often it runs, and what its cursor is the
+ * time of. `data`: the data it has stored (a lag is then meaningful). `run`: its last run (the
+ * cursor says nothing of the data). `fallback`: the RPC reading of live transactions, which
+ * only works while the provider lags and is otherwise at rest, whatever its cursor says.
+ */
+export const STREAM_EXPECTATIONS: Readonly<Record<string, { everyS: number; kind: 'data' | 'run' | 'fallback' }>> = {
+  tx: { everyS: 30, kind: 'data' },
+  dex: { everyS: 60, kind: 'data' },
+  launchpad: { everyS: 30, kind: 'data' },
+  bridge: { everyS: 60, kind: 'data' },
+  txlive: { everyS: 60, kind: 'fallback' },
+  tokens: { everyS: 900, kind: 'run' },
+  methods: { everyS: 1800, kind: 'run' },
+  tokenstats: { everyS: 900, kind: 'run' },
+  launchstats: { everyS: 300, kind: 'run' },
+};
+
+/** Behind the clock by more than this, the provider counts as lagging (as the ingestion decides it). */
+const PROVIDER_LAG_S = 120;
+/** A stream whose last completed run is older than this many of its periods (and than 5 minutes) is not running. */
+const STALLED_PERIODS = 3;
+/** Data older than this many periods (and than 5 minutes) is late. */
+const BEHIND_PERIODS = 5;
+
+export type StreamState =
+  /** Running, and its data is current. */
+  | 'ok'
+  /** Its last run failed. */
+  | 'failing'
+  /** No completed run for several periods: its loop is not running. */
+  | 'stalled'
+  /** Its data stops where the provider's index stops: nothing to read until the provider moves on. */
+  | 'waiting-provider'
+  /** Its data is late while the provider is not. */
+  | 'behind';
+
+export interface StreamHealth {
+  /** Seconds between the clock and the stream's data; null for a stream whose cursor is not the time of its data. */
+  lagSeconds: number | null;
+  everyS: number | null;
+  state: StreamState;
+}
+
+/**
+ * How a stream is doing, from its row. The lag shown used to be `now - cursor` for every stream:
+ * near zero for the ones whose cursor is the time of their run even when the provider returned
+ * nothing, and hours for the RPC fallback while it was simply at rest. An alert on that figure
+ * would have rung for nothing, or never.
+ */
+export function streamHealth(
+  row: { stream: string; cursor: Date | null; lastError: string | null; okAt: Date | null },
+  now: number,
+  providerHead: Date | null
+): StreamHealth {
+  const expected = STREAM_EXPECTATIONS[row.stream];
+  const everyS = expected?.everyS ?? null;
+  const kind = expected?.kind ?? 'run';
+  const lagSeconds = kind === 'data' && row.cursor ? Math.max(0, Math.round((now - row.cursor.getTime()) / 1000)) : null;
+  if (row.lastError) return { lagSeconds, everyS, state: 'failing' };
+  const period = (everyS ?? 300) * 1000;
+  if (row.okAt === null || now - row.okAt.getTime() > Math.max(STALLED_PERIODS * period, 300_000)) {
+    return { lagSeconds, everyS, state: 'stalled' };
+  }
+  if (lagSeconds === null || lagSeconds * 1000 <= Math.max(BEHIND_PERIODS * period, 300_000)) return { lagSeconds, everyS, state: 'ok' };
+  // Late data. The provider's own index is late too: the stream has read all there is. (The log
+  // streams read past the provider's head from the RPC, so they have no such excuse.)
+  const providerLate = providerHead !== null && now - providerHead.getTime() > PROVIDER_LAG_S * 1000;
+  const waits = providerLate && (row.stream === 'tx' || row.stream === 'bridge');
+  return { lagSeconds, everyS, state: waits ? 'waiting-provider' : 'behind' };
+}

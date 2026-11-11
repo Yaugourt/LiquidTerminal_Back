@@ -128,6 +128,8 @@ const LOCK_TTL_S = 120;
  * the tick is given up: the stream records it as an error, and runs again.
  */
 const TICK_LIMIT_MS = 5 * MINUTE_MS;
+/** How often, at most, a stream's completed run and the provider's head are written for the status route. */
+const STATE_WRITE_EVERY_MS = 30_000;
 /** A registry run reads 40 pages of a slow listing (about 7 minutes, measured 2026-11-10). */
 const TOKENS_TICK_LIMIT_MS = 20 * MINUTE_MS;
 /** A day's rollups are built in one transaction of up to 15 minutes. */
@@ -224,6 +226,12 @@ const LAUNCHPAD_SETTLE_MS = 15_000;
  */
 const LAUNCH_STATE_HEAL_AFTER_MS = 5 * MINUTE_MS;
 const LAUNCH_STATE_HEAL_WINDOW_MS = 2 * HOUR_MS;
+/** Once both are done this process has nothing more to keep: it looks again this much later. */
+const LAUNCH_STATE_IDLE_MS = 6 * HOUR_MS;
+/** A rebuild that failed is tried again after this long (doubled at each failure, like any stream). */
+const LAUNCH_STATE_RETRY_MS = 10 * MINUTE_MS;
+/** The one-time rebuild reads every trade (up to 10 minutes), then names the launches. */
+const LAUNCH_STATE_TICK_LIMIT_MS = 20 * MINUTE_MS;
 
 const LAUNCH_STATS_INTERVAL_MS = 5 * MINUTE_MS;
 /**
@@ -359,6 +367,9 @@ export class ElysiumIngestionService {
   private readonly rollups = ElysiumRollupService.getInstance();
   /** What the running ticks read and did not store; written to the database as each tick ends. */
   private readonly rejects = new IngestRejects();
+  /** When each stream's last completed run was recorded, and the provider's head last written. */
+  private readonly completedAt = new Map<ElysiumStream, number>();
+  private providerHeadWrittenAt = 0;
   /** Tokens whose holder figures could not be read, per stream (`stream|token`), and when each may be tried again. */
   private readonly asideUntil = new Map<string, number>();
   /** Rows the database refused (`stream|key`): left out of the next writes without being searched for again. */
@@ -406,8 +417,6 @@ export class ElysiumIngestionService {
   private startedAt = 0;
   private launchStateFilled = false;
   private launchStateHealed = false;
-  /** No new attempt at the launch market state before this time (set after a failed one). */
-  private launchStateRetryAt = 0;
   /** The same for the one-time re-read of the Kiln graduations. */
   private kilnHistoryDone = false;
   private kilnHistoryRetryAt = 0;
@@ -444,6 +453,7 @@ export class ElysiumIngestionService {
     this.schedule('methods', 20_000, () => this.methodsTick());
     this.schedule('tokenstats', 90_000, () => this.tokenStatsTick());
     this.schedule('launchpad', 25_000, () => this.launchpadTick());
+    this.schedule('launchstate', 45_000, () => this.launchStateTick());
     this.schedule('launchstats', 120_000, () => this.launchStatsTick());
     if (ElysiumRollupService.isEnabled()) this.schedule('rollup', 60_000, () => this.rollups.tick());
     if (ElysiumIngestionService.isDayCheckEnabled()) this.schedule('check', 150_000, () => this.dayCheck.tick());
@@ -508,6 +518,7 @@ export class ElysiumIngestionService {
         { renew: true }
       );
       if (!ran) next = this.baseInterval(stream);
+      else await this.noteCompleted(stream);
       this.failures.set(stream, 0);
       return next;
     } catch (error) {
@@ -525,6 +536,24 @@ export class ElysiumIngestionService {
         errorType: error instanceof Error ? error.name : typeof error,
       });
       return this.baseInterval(stream) * Math.min(2 ** count, 10);
+    }
+  }
+
+  /**
+   * Records that the stream completed a run, at most every STATE_WRITE_EVERY_MS: what the status
+   * route and the alerts tell a live loop by. A run that wrote something recorded it already
+   * (advance); this is for the ones with nothing to write, a tx tick the provider has no new
+   * block for, a fallback with nothing to follow. The rollup builder keeps its own row.
+   */
+  private async noteCompleted(stream: ElysiumStream): Promise<void> {
+    if (stream === 'rollup') return;
+    const now = Date.now();
+    if (now - (this.completedAt.get(stream) ?? 0) < STATE_WRITE_EVERY_MS) return;
+    this.completedAt.set(stream, now);
+    try {
+      await this.repo.touch(stream);
+    } catch {
+      // The run itself went through: the next one records it.
     }
   }
 
@@ -558,6 +587,7 @@ export class ElysiumIngestionService {
   private tickLimit(stream: ElysiumStream): number {
     if (stream === 'tokens') return TOKENS_TICK_LIMIT_MS;
     if (stream === 'rollup') return ROLLUP_TICK_LIMIT_MS;
+    if (stream === 'launchstate') return LAUNCH_STATE_TICK_LIMIT_MS;
     return TICK_LIMIT_MS;
   }
 
@@ -570,6 +600,7 @@ export class ElysiumIngestionService {
     if (stream === 'tokenstats') return TOKEN_STATS_INTERVAL_MS;
     if (stream === 'launchpad') return LAUNCHPAD_LIVE_INTERVAL_MS;
     if (stream === 'launchstats') return LAUNCH_STATS_INTERVAL_MS;
+    if (stream === 'launchstate') return LAUNCH_STATE_RETRY_MS;
     if (stream === 'rollup') return ROLLUP_RETRY_INTERVAL_MS;
     if (stream === 'check') return DAY_CHECK_RETRY_INTERVAL_MS;
     return TOKENS_INTERVAL_MS;
@@ -592,6 +623,7 @@ export class ElysiumIngestionService {
       try {
         await this.throttle.wait();
         this.head = { at: clock, value: await this.client.fetchIngestHead() };
+        this.noteProviderHead(this.head.value);
       } catch (error) {
         if (!this.head || clock - this.head.at > 5 * HEAD_REFRESH_MS) this.head = { at: clock, value: null };
         logDeduplicator.warn('Elysium ingest: provider head unavailable', {
@@ -602,6 +634,17 @@ export class ElysiumIngestionService {
     const head = this.head?.value ?? null;
     const lagging = head !== null && clock - head.getTime() > HEAD_LAG_MS;
     return { now: lagging && head ? head : new Date(clock), head, lagging };
+  }
+
+  /**
+   * Writes the provider's head where the status route reads it (the `provider` row), so that a
+   * stream waiting at that head is told from one that is behind on its own.
+   */
+  private noteProviderHead(head: Date | null): void {
+    const now = Date.now();
+    if (!head || now - this.providerHeadWrittenAt < STATE_WRITE_EVERY_MS) return;
+    this.providerHeadWrittenAt = now;
+    void this.repo.recordProviderHead(head).catch(() => undefined);
   }
 
   /**
@@ -1517,23 +1560,15 @@ export class ElysiumIngestionService {
    * trade insert moves it; this covers what the insert cannot: the rows that existed before the
    * columns did (one rebuild from every trade, recorded under the `launchstate` marker), and the
    * trades the previous release wrote while a deploy overlapped (a rebuild of the recently traded
-   * tokens, once, a few minutes after each start). Runs inside the launchpad tick, so never
-   * alongside this process's own trade inserts. A failure is logged and tried again later: it
-   * must not hold the launchpad stream itself.
+   * tokens, once, a few minutes after each start).
+   *
+   * A loop of its own, with its own lock and time limit. It ran inside the launchpad tick: a
+   * rebuild of up to 10 minutes under that stream's 2-minute lock, and a failure that was only
+   * logged. A failure is now this loop's error, in the status route like any stream's, and the
+   * launchpad stream never waits for it (a rebuild and a trade insert lock their launches in
+   * the same order, so they can run side by side).
    */
-  private async ensureLaunchState(): Promise<void> {
-    if (Date.now() < this.launchStateRetryAt) return;
-    try {
-      await this.keepLaunchState();
-    } catch (error) {
-      this.launchStateRetryAt = Date.now() + 10 * MINUTE_MS;
-      logDeduplicator.warn('Elysium ingest: launch market state not rebuilt, retrying later', {
-        errorType: error instanceof Error ? error.name : typeof error,
-      });
-    }
-  }
-
-  private async keepLaunchState(): Promise<void> {
+  private async launchStateTick(): Promise<number> {
     if (!this.launchStateFilled) {
       if (!(await this.repo.getState('launchstate'))?.backfillDone) {
         const written = await this.repo.rebuildLaunchState(null);
@@ -1543,11 +1578,15 @@ export class ElysiumIngestionService {
       }
       this.launchStateFilled = true;
     }
-    if (!this.launchStateHealed && Date.now() - this.startedAt >= LAUNCH_STATE_HEAL_AFTER_MS) {
+    if (!this.launchStateHealed) {
+      const wait = this.startedAt + LAUNCH_STATE_HEAL_AFTER_MS - Date.now();
+      if (wait > 0) return wait;
       const written = await this.repo.rebuildLaunchState(new Date(Date.now() - LAUNCH_STATE_HEAL_WINDOW_MS));
       this.launchStateHealed = true;
       if (written > 0) void rawLogger.info('Elysium ingest: launch market state healed', { written });
     }
+    // Nothing more for this process to do: the next start heals again.
+    return LAUNCH_STATE_IDLE_MS;
   }
 
   /**
@@ -1589,7 +1628,6 @@ export class ElysiumIngestionService {
   }
 
   private async launchpadTick(): Promise<number> {
-    await this.ensureLaunchState();
     const deadline = Date.now() + TICK_BUDGET_MS;
     const state = await this.repo.getState('launchpad');
     let cursor = state?.cursor ?? null;

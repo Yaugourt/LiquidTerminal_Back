@@ -15,7 +15,7 @@ import { ElysiumIngestRepository } from '../../../src/repositories/prisma/prisma
 const NOW = Date.parse('2026-11-10T12:00:00.000Z');
 const MIN = 60_000;
 
-type Internals = { ensureLaunchState: () => Promise<void>; startedAt: number };
+type Internals = { launchStateTick: () => Promise<number>; runTick: (stream: string, tick: () => Promise<number>) => Promise<number>; startedAt: number };
 
 describe('launch market state upkeep', () => {
   let svc: Internals;
@@ -39,57 +39,63 @@ describe('launch market state upkeep', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('fills every launch once, then records it', async () => {
-    await svc.ensureLaunchState();
+    await svc.launchStateTick();
     expect(rebuild).toHaveBeenCalledTimes(1);
     expect(rebuild).toHaveBeenCalledWith(null);
     expect(names).toHaveBeenCalledTimes(1);
     expect(advance).toHaveBeenCalledWith('launchstate', { cursor: expect.any(Date), setRows: 7, backfillDone: true });
 
-    // Later ticks of the same process do not look again.
-    await svc.ensureLaunchState();
+    // Later runs of the same process do not look again.
+    await svc.launchStateTick();
     expect(getState).toHaveBeenCalledTimes(1);
     expect(rebuild).toHaveBeenCalledTimes(1);
   });
 
   it('does not fill again on a later start', async () => {
-    getState.mockResolvedValue({ stream: 'launchstate', cursor: new Date(NOW), rows: 7n, backfillDone: true, lastError: null, updatedAt: new Date(NOW) });
-    await svc.ensureLaunchState();
+    getState.mockResolvedValue({ stream: 'launchstate', cursor: new Date(NOW), rows: 7n, backfillDone: true, lastError: null, updatedAt: new Date(NOW), okAt: new Date(NOW) });
+    await svc.launchStateTick();
     expect(rebuild).not.toHaveBeenCalled();
     expect(names).not.toHaveBeenCalled();
     expect(advance).not.toHaveBeenCalled();
   });
 
-  it('heals the recently traded tokens once, five minutes after the start', async () => {
-    getState.mockResolvedValue({ stream: 'launchstate', cursor: new Date(NOW), rows: 7n, backfillDone: true, lastError: null, updatedAt: new Date(NOW) });
+  it('heals the recently traded tokens once, five minutes after the start, then has nothing more to do', async () => {
+    getState.mockResolvedValue({ stream: 'launchstate', cursor: new Date(NOW), rows: 7n, backfillDone: true, lastError: null, updatedAt: new Date(NOW), okAt: new Date(NOW) });
     (Date.now as jest.Mock).mockReturnValue(NOW + 4 * MIN);
-    await svc.ensureLaunchState();
+    // Comes back when the five minutes are up.
+    expect(await svc.launchStateTick()).toBe(MIN);
     expect(rebuild).not.toHaveBeenCalled();
 
     (Date.now as jest.Mock).mockReturnValue(NOW + 5 * MIN);
-    await svc.ensureLaunchState();
+    expect(await svc.launchStateTick()).toBe(6 * 60 * MIN);
     expect(rebuild).toHaveBeenCalledTimes(1);
     expect(rebuild).toHaveBeenCalledWith(new Date(NOW + 5 * MIN - 120 * MIN));
 
     (Date.now as jest.Mock).mockReturnValue(NOW + 30 * MIN);
-    await svc.ensureLaunchState();
+    await svc.launchStateTick();
     expect(rebuild).toHaveBeenCalledTimes(1);
   });
 
-  it('never throws: a failed fill is logged and tried again ten minutes later', async () => {
+  it('a failed rebuild is the loop\'s error (it was only logged, inside the launchpad tick), and the next run does it again', async () => {
     rebuild.mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
-    await expect(svc.ensureLaunchState()).resolves.toBeUndefined();
-    expect(mockLog.warn).toHaveBeenCalledWith('Elysium ingest: launch market state not rebuilt, retrying later', expect.any(Object));
+    await expect(svc.launchStateTick()).rejects.toThrow('statement timeout');
     expect(advance).not.toHaveBeenCalled();
 
-    (Date.now as jest.Mock).mockReturnValue(NOW + 9 * MIN);
-    await svc.ensureLaunchState();
-    expect(rebuild).toHaveBeenCalledTimes(1);
-
     (Date.now as jest.Mock).mockReturnValue(NOW + 10 * MIN);
-    await svc.ensureLaunchState();
+    await svc.launchStateTick();
     // The fill, then (the start is now over five minutes old) the heal.
     expect(rebuild).toHaveBeenCalledTimes(3);
     expect(rebuild).toHaveBeenNthCalledWith(2, null);
     expect(advance).toHaveBeenCalledWith('launchstate', expect.objectContaining({ backfillDone: true }));
+  });
+
+  it('is recorded and tried again like any stream, under a lock and a time limit of its own', async () => {
+    const recordError = jest.spyOn(repo, 'recordError').mockResolvedValue(undefined);
+    jest.spyOn(repo, 'addRejects').mockResolvedValue(undefined);
+    rebuild.mockRejectedValue(new Error('canceling statement due to statement timeout'));
+    const next = await svc.runTick('launchstate', () => svc.launchStateTick());
+    expect(recordError).toHaveBeenCalledWith('launchstate', 'canceling statement due to statement timeout');
+    // Ten minutes, doubled after the first failure.
+    expect(next).toBe(20 * MIN);
   });
 });
