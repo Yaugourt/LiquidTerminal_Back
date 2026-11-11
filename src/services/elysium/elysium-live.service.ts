@@ -22,6 +22,13 @@ type BlocksListener = (blocks: ElysiumLiveBlock[]) => void;
  * per FLUSH_MS instead of a per-block firehose. A dropped socket reconnects
  * with backoff; every callback and frame is guarded so a bad frame or a slow
  * listener can never take the process down.
+ *
+ * A socket that is open is not a stream that works: the handshake has a time
+ * limit, the node's answer to the subscription is read, and a socket that
+ * gives no block for SILENCE_MS is closed and opened again. Before, it could
+ * stay open and silent until the next restart, with nothing to see. The
+ * backoff starts over when a block arrives, not when the socket opens: a node
+ * that accepts and then closes was reconnected to every second, for ever.
  */
 export class ElysiumLiveService {
   private static instance: ElysiumLiveService;
@@ -33,12 +40,19 @@ export class ElysiumLiveService {
   private readonly listeners: BlocksListener[] = [];
   private stopped = false;
   private reconnectAttempts = 0;
+  private watchdog: NodeJS.Timeout | null = null;
+  /** When the current socket last gave a block (or was opened). */
+  private lastBlockAt = 0;
 
   /** One push per second: ~9 blocks batched, not 9 messages. */
   private readonly FLUSH_MS = 1000;
   private readonly MAX_RECONNECT_DELAY_MS = 30_000;
   /** Headers kept between flushes if listeners are briefly slow. */
   private readonly MAX_PENDING = 200;
+  /** The longest the handshake may take. */
+  private readonly HANDSHAKE_TIMEOUT_MS = 10_000;
+  /** No block for this long on an open socket: it is closed and opened again (the chain makes ~9 blocks a second). */
+  private readonly SILENCE_MS = 15_000;
 
   public static getInstance(): ElysiumLiveService {
     if (!ElysiumLiveService.instance) {
@@ -82,7 +96,7 @@ export class ElysiumLiveService {
 
     let ws: WebSocket;
     try {
-      ws = new WebSocket(url);
+      ws = new WebSocket(url, { handshakeTimeout: this.HANDSHAKE_TIMEOUT_MS });
     } catch {
       this.scheduleReconnect();
       return;
@@ -90,15 +104,15 @@ export class ElysiumLiveService {
     this.ws = ws;
 
     ws.on('open', () => {
-      this.reconnectAttempts = 0;
       try {
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_subscribe', params: ['newHeads'] }));
       } catch {
         /* close/error will fire and reconnect */
       }
+      this.watch(ws);
       logDeduplicator.info('ElysiumLiveService: mainnet WS connected');
     });
-    ws.on('message', (data) => this.onMessage(data.toString()));
+    ws.on('message', (data) => this.onMessage(ws, data.toString()));
     // An 'error' with no listener is an uncaughtException: this handler keeps it contained.
     ws.on('error', (error) => {
       logDeduplicator.warn('ElysiumLiveService: WS error', {
@@ -106,22 +120,62 @@ export class ElysiumLiveService {
       });
     });
     ws.on('close', () => {
-      this.ws = null;
+      if (this.ws === ws) this.ws = null;
+      this.unwatch();
       if (!this.stopped) this.scheduleReconnect();
     });
   }
 
-  private onMessage(raw: string): void {
+  /** Closes `ws` when it has given no block for SILENCE_MS; its 'close' then opens another. */
+  private watch(ws: WebSocket): void {
+    this.unwatch();
+    this.lastBlockAt = Date.now();
+    this.watchdog = setInterval(() => {
+      if (Date.now() - this.lastBlockAt < this.SILENCE_MS) return;
+      logDeduplicator.warn('ElysiumLiveService: no block on an open socket, reconnecting', {
+        silentForS: Math.round((Date.now() - this.lastBlockAt) / 1000),
+      });
+      this.drop(ws);
+    }, 5_000);
+    this.watchdog.unref?.();
+  }
+
+  private unwatch(): void {
+    if (this.watchdog) clearInterval(this.watchdog);
+    this.watchdog = null;
+  }
+
+  /** Ends a socket that is of no use, without waiting for the other side. */
+  private drop(ws: WebSocket): void {
+    try {
+      ws.terminate();
+    } catch {
+      /* already gone */
+    }
+  }
+
+  private onMessage(ws: WebSocket, raw: string): void {
     try {
       const msg = JSON.parse(raw) as {
+        id?: number;
+        error?: { message?: string };
         method?: string;
         params?: { result?: { number?: string; timestamp?: string; gasUsed?: string; gasLimit?: string } };
       };
+      // The node's answer to the subscription: refused, this socket will never give a block.
+      if (msg.id === 1 && msg.error) {
+        logDeduplicator.warn('ElysiumLiveService: subscription refused', { error: String(msg.error.message ?? 'unknown').slice(0, 120) });
+        this.drop(ws);
+        return;
+      }
       if (msg.method !== 'eth_subscription') return;
       const h = msg.params?.result;
       if (!h?.number) return;
       const number = parseInt(h.number, 16);
       if (!Number.isFinite(number)) return;
+      // A block: the stream works, so the next reconnection starts from the short wait again.
+      this.lastBlockAt = Date.now();
+      this.reconnectAttempts = 0;
       this.pending.set(number, {
         number,
         timestamp: parseInt(h.timestamp ?? '0x0', 16) || 0,
@@ -157,7 +211,9 @@ export class ElysiumLiveService {
 
   private scheduleReconnect(): void {
     if (this.stopped || this.reconnectTimer) return;
-    const delay = Math.min(1000 * 2 ** this.reconnectAttempts, this.MAX_RECONNECT_DELAY_MS);
+    // Between 80% and 120% of the step, so several processes do not come back together.
+    const step = Math.min(1000 * 2 ** this.reconnectAttempts, this.MAX_RECONNECT_DELAY_MS);
+    const delay = Math.round(step * (0.8 + Math.random() * 0.4));
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -170,6 +226,7 @@ export class ElysiumLiveService {
     this.stopped = true;
     if (this.flushTimer) clearInterval(this.flushTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.unwatch();
     this.flushTimer = null;
     this.reconnectTimer = null;
     try {
