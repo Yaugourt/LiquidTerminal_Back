@@ -21,6 +21,7 @@ import { HLIndexerTopTradersClient } from '../clients/hypedexer/rest/toptraders/
 import { AggregatePositioningClient } from '../clients/hyperliquid/positioning/aggregate-positioning.client';
 import { MetricsSnapshotClient } from '../clients/metrics/metrics-snapshot.client';
 import { ElysiumIngestionService } from '../services/elysium/elysium-ingestion.service';
+import { ElysiumAlertService } from '../services/elysium/elysium-alert.service';
 import { BuilderGrowthService } from '../services/builders/builder-growth.service';
 import { PortfolioMarginService } from '../services/portfolio-margin/portfolio-margin.service';
 import { HypurrSyncService } from '../services/project/hypurr-sync/hypurr-sync.service';
@@ -218,6 +219,9 @@ export class ClientInitializerService {
       ElysiumAnalyticsService.getInstance().registerDefaults();
       ElysiumEcosystemService.getInstance().registerDefaults();
       viewScheduler.start();
+      // Looks at the ingestion's status once a minute and tells someone when it needs a look
+      // (here, where the views are computed, so that a view in error is seen too).
+      ElysiumAlertService.getInstance().start();
       void ElysiumLaunchpadMarketService.getInstance().warm().catch(() => undefined);
       logDeduplicator.info('Elysium ingestion service initialized successfully');
 
@@ -485,6 +489,7 @@ export class ClientInitializerService {
   public async stopAllPolling(): Promise<void> {
     // No new view computation; the ones running end with the process.
     viewScheduler.stop();
+    ElysiumAlertService.getInstance().stop();
 
     // Stop daily backfill timer
     if (this.dailyBackfillTimer) {
