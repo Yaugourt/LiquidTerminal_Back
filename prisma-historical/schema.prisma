@@ -181,6 +181,8 @@ model ElysiumBridgeTransfer {
   @@index([initiatedAt])
   @@index([direction, initiatedAt])
   @@index([fromAddr, initiatedAt])
+  // Plus a partial index Prisma cannot describe (migration 20261111180000):
+  // elysium_bridge_transfer_open_deposit_idx on (initiated_at) for the deposits still waiting.
   @@map("elysium_bridge_transfer")
 }
 

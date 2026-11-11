@@ -247,6 +247,19 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
   }
 
   /**
+   * The bridge transfers a transaction belongs to (HyperEVM or Elysium hash), for the ingestion
+   * service: how it reads again one transfer whose status it is waiting on.
+   */
+  public async fetchIngestBridgeTransfers(txHash: string): Promise<unknown[]> {
+    if (!/^0x[0-9a-f]{64}$/.test(txHash)) throw new Error('Elysium ingest: invalid tx hash');
+    const data = await this.ingestCircuitBreaker.execute(() =>
+      this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}/bridge/transfers/${txHash}`)
+    );
+    if (Array.isArray(data)) return data;
+    return data && typeof data === 'object' ? [data] : [];
+  }
+
+  /**
    * One page of an upstream list for the ingestion service: its rows, and what the provider says
    * of the rest (`has_more`, null when the answer does not carry it). The flag is read before the
    * envelope is peeled; it used to be thrown away with it.

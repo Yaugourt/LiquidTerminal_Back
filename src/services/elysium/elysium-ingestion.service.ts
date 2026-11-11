@@ -150,6 +150,24 @@ const BRIDGE_WIDE_WINDOW_MS = 26 * HOUR_MS;
 /** Withdrawals settle on HyperEVM after hours to days; sweep executed ones over 8d. */
 const BRIDGE_EXECUTED_SWEEP_MS = 8 * 24 * HOUR_MS;
 const BRIDGE_BACKFILL_STEP_MS = 6 * HOUR_MS;
+const DAY_MS = 24 * HOUR_MS;
+/**
+ * Withdrawals are executed by their owner, when they get to it: half within 25 h of the
+ * request, one in ten after more than 8 days, the slowest after 42 (2,611 executed withdrawals,
+ * measured 2026-11-11). The sweep above only covers 8 days: 1,736 of the 35,000 older ones were
+ * executed after it had stopped looking, and were still "initiated" here. So each wide run also
+ * reads one day of older executed withdrawals, walking back to this many days and starting over:
+ * the whole range about once a day, one or two pages a run.
+ */
+const BRIDGE_DEEP_SWEEP_MAX_DAYS = 90;
+/**
+ * A deposit waiting for its retryable ticket (ticket_created, redeem_failed) leaves the 26 h
+ * window still open: the ticket is redeemed or expires within 7 days, and nothing read it again.
+ * These are a handful at any time (2 on 2026-11-11): each is read again by its hash on the wide
+ * runs, until it is 10 days old.
+ */
+const BRIDGE_OPEN_DEPOSIT_MAX_AGE_S = 10 * 24 * 3600;
+const BRIDGE_OPEN_DEPOSITS_PER_SWEEP = 25;
 
 const TOKENS_INTERVAL_MS = 15 * MINUTE_MS;
 /**
@@ -310,6 +328,10 @@ export class ElysiumIngestionService {
   private timers = new Map<ElysiumStream, NodeJS.Timeout>();
   private failures = new Map<ElysiumStream, number>();
   private lastBridgeWideAt = 0;
+  /** Up to where the bridge stream has read what lay between its cursor and its live window (this process). */
+  private bridgeCaughtUpTo = 0;
+  /** Where the walk through the deposits still waiting stands, when there are more than a sweep reads. */
+  private openDepositOffset = 0;
   private backfillWindows = 0;
   /** Current tx window length: halves on a page-cap overflow, grows back after. */
   private txStepMs = TX_STEP_MS;
@@ -819,26 +841,127 @@ export class ElysiumIngestionService {
       return state?.backfillDone ? BRIDGE_LIVE_INTERVAL_MS : 0;
     }
 
-    const now = new Date();
+    const clock = Date.now();
+    // What the provider has indexed: its head while it lags, the clock otherwise. The cursor is
+    // that time, not the time of the run: it used to be the clock, so after a provider outage
+    // longer than the 26 h window the transfers begun in between were never read (the provider
+    // indexes them once it is back, with their own, older, initiation time).
+    const { head, lagging } = await this.ingestHorizon();
+    const horizon = lagging && head ? Math.min(clock, head.getTime()) : clock;
+    const cursorMs = state.cursor ? Math.min(state.cursor.getTime(), clock) : horizon;
     // The live windows re-read transfers of the last hours: only the ones begun since the last run are new.
-    this.countedUpTo.set('bridge', state.cursor ? state.cursor.getTime() : -Infinity);
-    const wide = now.getTime() - this.lastBridgeWideAt >= BRIDGE_WIDE_EVERY_MS;
-    const windowMs = wide ? BRIDGE_WIDE_WINDOW_MS : BRIDGE_LIVE_WINDOW_MS;
-    let changed = await this.ingestBridgeWindow({
-      start_time: toUpstreamTime(new Date(now.getTime() - windowMs)),
-      end_time: toUpstreamTime(now),
-    });
+    this.countedUpTo.set('bridge', state.cursor ? cursorMs : -Infinity);
+    const wide = clock - this.lastBridgeWideAt >= BRIDGE_WIDE_EVERY_MS;
+    const liveStart = clock - (wide ? BRIDGE_WIDE_WINDOW_MS : BRIDGE_LIVE_WINDOW_MS);
+
+    // What lies between the cursor and the live window (the stream did not run for a while, or
+    // the provider lagged): read from the cursor, in steps, before anything else. While the
+    // provider stands still there is nothing more to read past its head: once is enough.
+    const gapEnd = Math.min(liveStart, horizon);
+    if (cursorMs < liveStart && gapEnd > this.bridgeCaughtUpTo) {
+      let from = Math.max(ELYSIUM_GENESIS.getTime(), cursorMs - BRIDGE_LIVE_WINDOW_MS);
+      while (from < gapEnd) {
+        this.ensureRunning();
+        // Out of time: the cursor says where this stopped, the next run goes on from there.
+        if (Date.now() >= deadline) return 0;
+        const to = Math.min(from + BRIDGE_BACKFILL_STEP_MS, gapEnd);
+        const caught = await this.ingestBridgeWindow({
+          start_time: toUpstreamTime(new Date(from)),
+          end_time: toUpstreamTime(new Date(to)),
+        });
+        await this.repo.advance('bridge', { cursor: new Date(to), addRows: caught });
+        from = to;
+      }
+      this.bridgeCaughtUpTo = gapEnd;
+    }
+
+    let changed = 0;
+    // Nothing of the live window is indexed while the provider's head is before it.
+    if (horizon >= liveStart) {
+      changed += await this.ingestBridgeWindow({
+        start_time: toUpstreamTime(new Date(liveStart)),
+        end_time: toUpstreamTime(new Date(clock)),
+      });
+    }
     if (wide) {
       changed += await this.ingestBridgeWindow({
         direction: 'withdrawal',
         status: 'executed',
-        start_time: toUpstreamTime(new Date(now.getTime() - BRIDGE_EXECUTED_SWEEP_MS)),
-        end_time: toUpstreamTime(now),
+        start_time: toUpstreamTime(new Date(clock - BRIDGE_EXECUTED_SWEEP_MS)),
+        end_time: toUpstreamTime(new Date(clock)),
       });
-      this.lastBridgeWideAt = now.getTime();
+      changed += await this.sweepOldWithdrawals(clock);
+      changed += await this.recheckOpenDeposits();
+      this.lastBridgeWideAt = clock;
     }
-    await this.repo.advance('bridge', { cursor: now, addRows: changed });
+    await this.repo.advance('bridge', { cursor: new Date(horizon), addRows: changed });
     return BRIDGE_LIVE_INTERVAL_MS;
+  }
+
+  /**
+   * One day of the executed withdrawals older than the 8-day sweep (see
+   * BRIDGE_DEEP_SWEEP_MAX_DAYS), and moves on to the day before for the next run. Where the walk
+   * stands is kept in the database, so a restart resumes it.
+   */
+  private async sweepOldWithdrawals(clock: number): Promise<number> {
+    const first = Math.ceil(BRIDGE_EXECUTED_SWEEP_MS / DAY_MS);
+    const last = Math.min(BRIDGE_DEEP_SWEEP_MAX_DAYS, Math.ceil((clock - ELYSIUM_GENESIS.getTime()) / DAY_MS));
+    if (first >= last) return 0;
+    const stored = Number((await this.repo.getState('bridgedeep'))?.rows ?? first);
+    const back = stored >= first && stored < last ? stored : first;
+    const changed = await this.ingestBridgeWindow({
+      direction: 'withdrawal',
+      status: 'executed',
+      start_time: toUpstreamTime(new Date(clock - (back + 1) * DAY_MS)),
+      end_time: toUpstreamTime(new Date(clock - back * DAY_MS)),
+    });
+    const next = back + 1 >= last ? first : back + 1;
+    await this.repo.advance('bridgedeep', {
+      cursor: new Date(clock),
+      setRows: next,
+      // True once the walk has reached its end at least once.
+      ...(next === first ? { backfillDone: true } : {}),
+    });
+    return changed;
+  }
+
+  /**
+   * Reads again, by their hash, the deposits still waiting for their ticket that the live
+   * windows no longer cover (see BRIDGE_OPEN_DEPOSIT_MAX_AGE_S). One that cannot be read is
+   * counted and tried again at the next sweep; three in a row fail the run.
+   */
+  private async recheckOpenDeposits(): Promise<number> {
+    const open = await this.repo.listOpenDeposits(
+      BRIDGE_WIDE_WINDOW_MS / 1000,
+      BRIDGE_OPEN_DEPOSIT_MAX_AGE_S,
+      BRIDGE_OPEN_DEPOSITS_PER_SWEEP,
+      this.openDepositOffset
+    );
+    // A full batch: the next sweep reads the ones after it; else start over from the oldest.
+    this.openDepositOffset = open.length >= BRIDGE_OPEN_DEPOSITS_PER_SWEEP ? this.openDepositOffset + open.length : 0;
+    let changed = 0;
+    let failedInARow = 0;
+    for (const deposit of open) {
+      this.ensureRunning();
+      await this.throttle.wait();
+      let raw: unknown[];
+      try {
+        raw = await this.client.fetchIngestBridgeTransfers(deposit.tx_hash);
+        failedInARow = 0;
+      } catch (error) {
+        if (error instanceof IngestStoppedError || ++failedInARow >= TOKEN_FAILURES_IN_A_ROW) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        this.rejects.note('bridge', 'transfer-unreadable', `${deposit.transfer_id} ${message.slice(0, 160)}`);
+        continue;
+      }
+      // Without a status filter the answer can hold other transfers of the same transaction: all are stored.
+      const rows = dedupeBy(
+        raw.map((r) => normalizeBridgeTransfer(r)).filter((r): r is BridgeRow => r !== null),
+        (r) => r.transfer_id
+      );
+      changed += await this.writeRows('bridge', rows, (part) => this.repo.upsertBridgeTransfers(part), (r) => r.transfer_id);
+    }
+    return changed;
   }
 
   // ---------------------------------------------------------------------------

@@ -32,13 +32,15 @@ export type ElysiumStream =
   | 'launchstate'
   /** Not a stream of its own: the marker of the one-time re-read of the Kiln graduations (`rows` = launches marked). */
   | 'kilngrads'
+  /** Not a stream of its own: where the walk through the old executed withdrawals stands (`rows` = days back of the next slice). */
+  | 'bridgedeep'
   /** Not a stream of its own: where the walk through the tail of the token listing stands (`rows` = next page). */
   | 'tokenstail'
   /** Not a stream of its own: the builder of the day rollups (only its last error is kept here). */
   | 'rollup';
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
-export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'kilngrads', 'tokenstail', 'rollup']);
+export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'kilngrads', 'bridgedeep', 'tokenstail', 'rollup']);
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -214,6 +216,34 @@ export class ElysiumIngestRepository {
       JSON.stringify(rows)
     );
     return result[0]?.n ?? 0;
+  }
+
+  /**
+   * The deposits still waiting for their retryable ticket that the live windows no longer
+   * cover (older than `minAgeS`) and that can still change (younger than `maxAgeS`: a ticket is
+   * redeemed or expires within 7 days), oldest first, with the hash to read each again by.
+   * `offset` lets the caller walk through them when there are more than `limit`.
+   */
+  public async listOpenDeposits(
+    minAgeS: number,
+    maxAgeS: number,
+    limit: number,
+    offset = 0
+  ): Promise<Array<{ transfer_id: string; tx_hash: string }>> {
+    return prismaHistorical.$queryRawUnsafe<Array<{ transfer_id: string; tx_hash: string }>>(
+      `SELECT transfer_id, COALESCE(l1_tx_hash, l2_tx_hash) AS tx_hash
+       FROM elysium_bridge_transfer
+       WHERE direction = 'deposit' AND status IN ('initiated', 'ticket_created', 'redeem_failed')
+         AND initiated_at < now() - make_interval(secs => $1::int)
+         AND initiated_at >= now() - make_interval(secs => $2::int)
+         AND COALESCE(l1_tx_hash, l2_tx_hash) IS NOT NULL
+       ORDER BY initiated_at, transfer_id
+       LIMIT $3::int OFFSET $4::int`,
+      minAgeS,
+      maxAgeS,
+      limit,
+      offset
+    );
   }
 
   /**

@@ -31,6 +31,8 @@ export type RejectReason =
   | 'window-truncated'
   /** A token whose holder figures could not be read; it goes back in the queue. */
   | 'token-unreadable'
+  /** A bridge transfer that could not be read again by its hash; it is tried again at the next sweep. */
+  | 'transfer-unreadable'
   /** A closed day whose transaction count differs from the provider's. */
   | 'day-gap'
   /** A block that is no longer on the chain: the rows after the last common block were removed and read again. */
