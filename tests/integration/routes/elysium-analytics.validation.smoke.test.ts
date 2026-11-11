@@ -172,3 +172,28 @@ describe('Elysium analytics failure mapping', () => {
     expect(res.body).toMatchObject({ success: false, code: 'ELYSIUM_ANALYTICS_BRIDGE_ERROR' });
   });
 });
+
+describe('Elysium analytics scheduled views', () => {
+  it('answers a scheduled view with the time it is as of and how often it is computed', async () => {
+    const { ViewResult } = jest.requireActual('../../../src/core/viewScheduler') as typeof import('../../../src/core/viewScheduler');
+    mockService.getEconomics.mockResolvedValueOnce(new ViewResult({ daily: [1, 2] }, '2026-11-11T13:00:00.000Z', 60));
+    const res = await request(app).get('/elysium/analytics/economics');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { daily: [1, 2] }, computedAt: '2026-11-11T13:00:00.000Z', refreshEveryS: 60 });
+  });
+
+  it('keeps the plain envelope for a read that is not a scheduled view', async () => {
+    const res = await request(app).get(`/elysium/analytics/address/0x${'ab'.repeat(20)}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, data: { tags: [] } });
+  });
+
+  it('answers 503 with Retry-After while a view has no value yet, without calling it an error of the database', async () => {
+    const { ViewWarmingError } = jest.requireActual('../../../src/core/viewScheduler') as typeof import('../../../src/core/viewScheduler');
+    mockService.getDex.mockRejectedValueOnce(new ViewWarmingError(5));
+    const res = await request(app).get('/elysium/analytics/dex');
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('5');
+    expect(res.body).toEqual({ success: false, error: 'Analytics warming up', code: 'ELYSIUM_ANALYTICS_DEX_ERROR' });
+  });
+});

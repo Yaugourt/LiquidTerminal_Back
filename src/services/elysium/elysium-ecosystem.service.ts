@@ -1,17 +1,20 @@
-import { prismaHistoricalRead } from '../../core/prisma.historical.service';
-import { cacheService } from '../../core/cache.service';
+import { prismaHistoricalAggregate } from '../../core/prisma.historical.service';
 import { redisService } from '../../core/redis.service';
+import { ViewResult, viewScheduler, type ViewCadence, type ViewDef } from '../../core/viewScheduler';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { ELYSIUM_PROJECTS, ElysiumProject } from '../../constants/elysium-projects';
 import { HYPE_QUOTES, quoteDecimals, USD_QUOTES } from './elysium-launchpad.util';
 
-const CACHE_TTL_S = 60;
-/** How long a computed value is kept to be served while it refreshes. */
-const KEEP_S = 6 * 3600;
 const PROJECTS_KEY = 'elysium:ecosystem:projects:v5';
 const ALL_TIME_KEY = 'elysium:ecosystem:alltime:v1';
-/** All-time counts scan every tx ever sent to a project: refreshed every 10 min, not every minute. */
-const ALL_TIME_TTL_S = 600;
+/**
+ * Computed by the view scheduler, never by a visit. The directory takes about
+ * 23 s on prod (measured 2026-11-11) and its page polls every 2 min: every 2
+ * min while watched, every 30 min otherwise. The all-time counts scan every tx
+ * ever sent to a project: every 10 min while the directory is watched.
+ */
+const PROJECTS_CADENCE: ViewCadence = { activeS: 120, idleS: 1800, heavy: true };
+const ALL_TIME_CADENCE: ViewCadence = { activeS: 600, idleS: 3600, heavy: true };
 const VERIFIED_KEY = 'elysium:ecosystem:verified:v1';
 const VERIFIED_TTL_MS = 6 * 3600_000;
 /** Etherscan-style API of the Kinetiq explorer (testnet), where Elysium contracts get verified. */
@@ -104,21 +107,40 @@ export class ElysiumEcosystemService {
     return ElysiumEcosystemService.instance;
   }
 
-  public getProjects(): Promise<{ projects: ElysiumProjectView[]; activityGap: ElysiumActivityGap | null; computedAt: string }> {
-    return cacheService.getOrRefresh(PROJECTS_KEY, () => this.computeProjects(), CACHE_TTL_S, KEEP_S);
+  public getProjects(): Promise<ViewResult<{ projects: ElysiumProjectView[]; activityGap: ElysiumActivityGap | null; computedAt: string }>> {
+    // The directory shows the all-time counts: while it is watched, so are they.
+    viewScheduler.watch(this.allTimeView());
+    return viewScheduler.read(this.projectsView());
+  }
+
+  private projectsView(): ViewDef<{ projects: ElysiumProjectView[]; activityGap: ElysiumActivityGap | null; computedAt: string }> {
+    return { key: PROJECTS_KEY, cadence: PROJECTS_CADENCE, compute: () => this.computeProjects() };
+  }
+
+  private allTimeView(): ViewDef<AllTimeRow[]> {
+    return { key: ALL_TIME_KEY, cadence: ALL_TIME_CADENCE, compute: () => this.computeAllTime() };
+  }
+
+  /** Hands the scheduler the directory and its all-time counts, to be kept computed. */
+  public registerDefaults(): void {
+    viewScheduler.register(this.projectsView());
+    viewScheduler.register(this.allTimeView());
   }
 
   private verifying = false;
 
-  /** All-time activity per project, cached apart from the 60s refresh. */
+  /**
+   * All-time activity per project, a view of its own. Read from inside the
+   * directory's computation: its last value, or computed there the first time.
+   */
   private getAllTime(): Promise<AllTimeRow[]> {
-    return cacheService.getOrRefresh(ALL_TIME_KEY, () => this.computeAllTime(), ALL_TIME_TTL_S, KEEP_S);
+    return viewScheduler.readOrCompute(this.allTimeView());
   }
 
   private async computeAllTime(): Promise<AllTimeRow[]> {
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
     const cursor = (await this.readTxCursor())?.toISOString() ?? null;
-    return prismaHistoricalRead.$queryRaw<AllTimeRow[]>`
+    return prismaHistoricalAggregate.$queryRaw<AllTimeRow[]>`
       WITH reg AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
       ),
@@ -203,7 +225,7 @@ export class ElysiumEcosystemService {
 
   /** The provider's tx cursor: elysium_tx is complete up to it, elysium_tx_live takes over after. */
   private async readTxCursor(): Promise<Date | null> {
-    const rows = await prismaHistoricalRead.$queryRaw<Array<{ cursor: Date | null }>>`
+    const rows = await prismaHistoricalAggregate.$queryRaw<Array<{ cursor: Date | null }>>`
       SELECT cursor FROM elysium_ingest_state WHERE stream = 'tx'`;
     return rows[0]?.cursor ?? null;
   }
@@ -223,7 +245,7 @@ export class ElysiumEcosystemService {
     const cursorIso = txCursor?.toISOString() ?? null;
 
     const [activity, daily, pads, padVolumes, hypeUsd, allTime, verified] = await Promise.all([
-      prismaHistoricalRead.$queryRaw<ActivityRow[]>`
+      prismaHistoricalAggregate.$queryRaw<ActivityRow[]>`
         WITH reg AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
         )
@@ -245,7 +267,7 @@ export class ElysiumEcosystemService {
         ) t ON t.to_addr = reg.addr
         GROUP BY reg.slug`,
       // Bucket 0 is the last 24h; buckets are rolling so the latest one is never a partial day.
-      prismaHistoricalRead.$queryRaw<Array<{ slug: string; bucket: number; users: number }>>`
+      prismaHistoricalAggregate.$queryRaw<Array<{ slug: string; bucket: number; users: number }>>`
         WITH reg AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
         )
@@ -262,12 +284,12 @@ export class ElysiumEcosystemService {
             AND block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
         ) t ON t.to_addr = reg.addr
         GROUP BY 1, 2`,
-      prismaHistoricalRead.$queryRaw<Array<{ launchpad: string; launches: number }>>`
+      prismaHistoricalAggregate.$queryRaw<Array<{ launchpad: string; launches: number }>>`
         SELECT l.launchpad, count(*) FILTER (WHERE l.created_at >= ${since7}::timestamptz)::int AS launches
         FROM elysium_launch l
         GROUP BY l.launchpad`,
       // Per quote, since a launchpad can price tokens in HYPE and in test USDC (Neuriio).
-      prismaHistoricalRead.$queryRaw<Array<{ launchpad: string; quote: string; volume: string | null }>>`
+      prismaHistoricalAggregate.$queryRaw<Array<{ launchpad: string; quote: string; volume: string | null }>>`
         SELECT l.launchpad, l.quote, sum(tr.quote_amount)::text AS volume
         FROM elysium_launch_trade tr
         JOIN elysium_launch l ON l.token = tr.token
@@ -327,7 +349,7 @@ export class ElysiumEcosystemService {
   /** The window with no activity data: from the provider's tx cursor to where the live fallback began. */
   private async readActivityGap(txCursor: Date | null, now: Date): Promise<ElysiumActivityGap | null> {
     if (!txCursor || now.getTime() - txCursor.getTime() < GAP_MIN_MS) return null;
-    const rows = await prismaHistoricalRead.$queryRaw<Array<{ start: Date | null }>>`
+    const rows = await prismaHistoricalAggregate.$queryRaw<Array<{ start: Date | null }>>`
       SELECT min(block_time) AS start FROM elysium_tx_live WHERE block_time > ${txCursor.toISOString()}::timestamptz`;
     const start = rows[0]?.start ?? null;
     return { from: txCursor.toISOString(), to: start ? start.toISOString() : null };

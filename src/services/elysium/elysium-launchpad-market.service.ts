@@ -1,5 +1,5 @@
 import { Prisma } from '../../../prisma-historical/generated/client';
-import { prismaHistoricalRead } from '../../core/prisma.historical.service';
+import { prismaHistoricalPages } from '../../core/prisma.historical.service';
 import { redisService } from '../../core/redis.service';
 import { LAUNCHPAD_MAX_ROWS, LAUNCHPAD_PAGE_MAX, type LaunchpadSort } from '../../schemas/elysium-analytics.schema';
 import { FairGate, GateBusyError } from '../../utils/fairGate';
@@ -35,8 +35,8 @@ const SNAPSHOT_TIMEOUT_MS = 30_000;
 const ORDER_CACHE_MAX = 48;
 const PAGE_CACHE_MAX = 96;
 /**
- * Reads of the launches computed at once, out of the 10 connections these
- * reads share with the analytics (each read holds one connection at a time).
+ * Reads of the launches computed at once, on the 8 connections of the pages'
+ * pool, which they share with the status (each read holds one connection at a time).
  * Every ceiling has a share per client (its IP, or /64): without one, the
  * client that asks fastest takes every slot and every place in the queue.
  * - pages: 3 at once, 2 per client, 8 waiting per client;
@@ -360,7 +360,7 @@ export class ElysiumLaunchpadMarketService {
   /** One statement on its own connection with a time limit: a slow plan ends instead of holding the pool. */
   private timed<T>(ms: number, query: Prisma.Sql): Promise<T[]> {
     // Prisma's own transaction limit (5 s by default) is set just past the statement's.
-    return prismaHistoricalRead.$transaction(
+    return prismaHistoricalPages.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${Math.trunc(ms)}`);
         return tx.$queryRaw<T[]>(query);

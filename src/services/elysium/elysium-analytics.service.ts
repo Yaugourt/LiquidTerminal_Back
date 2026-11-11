@@ -1,6 +1,7 @@
 import { Prisma } from '../../../prisma-historical/generated/client';
-import { prismaHistoricalRead } from '../../core/prisma.historical.service';
+import { prismaHistoricalAggregate, prismaHistoricalPages, prismaHistoricalRead } from '../../core/prisma.historical.service';
 import { cacheService } from '../../core/cache.service';
+import { ViewResult, viewScheduler, type ViewCadence, type ViewDef } from '../../core/viewScheduler';
 import { ELYSIUM_STATE_MARKERS, ElysiumIngestRepository } from '../../repositories/prisma/prisma.elysium.repository';
 import {
   fillDays,
@@ -18,9 +19,37 @@ import { ELYSIUM_GENESIS } from './elysium-ingest.util';
 import { closedRollupDays, firstKeptDay, rollupKeepDays } from './elysium-rollup.util';
 
 const CACHE_TTL_S = 60;
-/** How long a computed value is kept to be served while it refreshes. */
-const KEEP_S = 6 * 3600;
 const CACHE_PREFIX = 'elysium:analytics';
+/** The scheduled views run on the aggregates' pool; only the address and contract profiles stay on the read pool. */
+const agg = prismaHistoricalAggregate;
+
+/**
+ * How often each kind of view is computed by the view scheduler: while someone
+ * is watching it, and when nobody is. Sized on what a computation takes on
+ * prod (measured 2026-11-11, one view at a time): 2 to 6 s for the windows of
+ * a day and the daily series, 25 to 38 s over 7 days, 97 s for fees over 30
+ * days. A visit never starts one.
+ */
+const CADENCE = {
+  /** Windows of 24h and the 14-day daily series the pages open on. */
+  day: { activeS: 60, idleS: 600 },
+  /** Windows of 7 days. */
+  week: { activeS: 300, idleS: 1800, heavy: true },
+  /** Fees over 30 days. */
+  month: { activeS: 1800, idleS: 3600, heavy: true },
+  /** The ingestion's own state: cheap, and looked at when something is wrong. */
+  status: { activeS: 15, idleS: 60 },
+} as const satisfies Record<string, ViewCadence>;
+
+/**
+ * A daily series over `days`. The pages ask for 14, kept warm; the other
+ * lengths the route accepts are computed only while someone asks for them,
+ * the longer ones as heavy views.
+ */
+function dailyCadence(days: number): ViewCadence {
+  if (days === 14) return CADENCE.day;
+  return days < 14 ? { activeS: 60, idleS: 0 } : { activeS: 300, idleS: 0, heavy: true };
+}
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -46,7 +75,10 @@ export interface MethodRef {
 /**
  * Elysium analytics computed in SQL over the ingested tables (historical DB).
  * Spam txs are excluded unless a metric says otherwise. Days are UTC and the
- * current day is flagged `partial: true`. Each result is cached 60s in Redis.
+ * current day is flagged `partial: true`. The views are computed by the view
+ * scheduler at their own period (see CADENCE) and requests only read them; the
+ * address and contract profiles, one per address, are computed on request and
+ * cached 60 s.
  *
  * The windows wider than a day read the whole UTC days that are built from the
  * day rollups and the rest of the window (its partial first day, today, a day
@@ -64,42 +96,43 @@ export class ElysiumAnalyticsService {
   }
 
   /**
-   * Served from the last computed value and refreshed in the background once
-   * older than CACHE_TTL_S: the heavier aggregates take seconds over the full
-   * tx table, and no visitor should wait for them.
+   * A view the scheduler computes at `cadence` and that requests only read
+   * (see ViewScheduler): the heavier aggregates take seconds to minutes over
+   * the tx table, and no visit should start one or wait for one.
    */
-  private cached<T>(name: string, params: string, fn: () => Promise<T>): Promise<T> {
-    return cacheService.getOrRefresh<T>(`${CACHE_PREFIX}:${name}:${params}`, fn, CACHE_TTL_S, KEEP_S);
+  private view<T>(name: string, params: string, cadence: ViewCadence, compute: () => Promise<T>): ViewDef<T> {
+    return { key: `${CACHE_PREFIX}:${name}:${params}`, cadence, compute };
   }
 
-  /** Plain 60s cache for cheap or per-address reads, where a stale answer would mislead. */
+  /** Plain 60s cache for per-address reads, where a stale answer would mislead. */
   private cachedFresh<T>(name: string, params: string, fn: () => Promise<T>): Promise<T> {
     return cacheService.getOrSet<T>(`${CACHE_PREFIX}:${name}:${params}`, fn, CACHE_TTL_S);
   }
 
   /**
-   * Computes the views the Elysium pages open on, so the first visitor after a
-   * deploy does not wait for them. Sequential to keep the DB load flat.
+   * Hands the scheduler the views the Elysium pages open on, so that they are
+   * kept computed whether or not anyone is looking: every window of the
+   * contracts, methods and fees pages, the 14-day series, and the status.
    */
-  public async warmDefaults(): Promise<void> {
-    const jobs: Array<() => Promise<unknown>> = [
-      () => this.getDeployments(14),
-      () => this.getContracts('24h'),
-      () => this.getContracts('7d'),
-      () => this.getUsers(14),
-      () => this.getBridge(14),
-      () => this.getEconomics(14),
-      () => this.getMethods('24h'),
-      () => this.getDex(14),
-      () => this.getTokens(14),
-      () => this.getFees('7d'),
-    ];
-    for (const job of jobs) {
-      try {
-        await job();
-      } catch {
-        // A failed warm-up only means the first visitor computes it.
-      }
+  public registerDefaults(): void {
+    for (const view of [
+      this.statusView(),
+      this.deploymentsView(14),
+      this.contractsView('24h'),
+      this.contractsView('7d'),
+      this.usersView(14),
+      this.bridgeView(14),
+      this.economicsView(14),
+      this.methodsView('24h'),
+      this.methodsView('7d'),
+      this.dexView(14),
+      this.tokensView(14),
+      this.feesView('24h'),
+      this.feesView('7d'),
+      this.feesView('30d'),
+      this.networkTxs24hView(),
+    ]) {
+      viewScheduler.register(view);
     }
   }
 
@@ -120,16 +153,30 @@ export class ElysiumAnalyticsService {
    * disk (indexes included). The only view of the rollups from outside the
    * database.
    */
-  public getStatus(): Promise<{ streams: Array<Record<string, unknown>>; rollups: Record<string, unknown> }> {
-    return this.cachedFresh('status', 'v2', async () => {
+  public async getStatus(): Promise<
+    ViewResult<{ streams: Array<Record<string, unknown>>; rollups: Record<string, unknown>; views: Array<Record<string, unknown>> }>
+  > {
+    const status = await viewScheduler.read(this.statusView());
+    // Where the scheduled views stand is read from this process as the request comes, never stored.
+    return new ViewResult({ ...status.data, views: viewScheduler.describe() }, status.computedAt, status.refreshEveryS);
+  }
+
+  /**
+   * Computed by the scheduler like the other views, on the pages' pool, and
+   * served from memory: the route answers whatever the database is doing. It
+   * used to read the analytics pool on request and did not answer for 20 s
+   * while that pool was full of aggregates.
+   */
+  private statusView(): ViewDef<{ streams: Array<Record<string, unknown>>; rollups: Record<string, unknown> }> {
+    return this.view('status', 'v2', CADENCE.status, async () => {
       const [all, days, sizes] = await Promise.all([
         ElysiumIngestRepository.getInstance().listStates(),
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; built_ms: number | null }>>`
+        prismaHistoricalPages.$queryRaw<Array<{ day: string; built_ms: number | null }>>`
           SELECT day::text AS day, (extract(epoch FROM built_at) * 1000)::float8 AS built_ms
           FROM elysium_day_rollup
           WHERE built_at IS NOT NULL AND NOT dirty AND day >= ${firstKeptDay(new Date(), rollupKeepDays())}::date
           ORDER BY day`.catch(() => []),
-        prismaHistoricalRead.$queryRaw<Array<{ rollups: number; tx: number }>>`
+        prismaHistoricalPages.$queryRaw<Array<{ rollups: number; tx: number }>>`
           SELECT (pg_total_relation_size('elysium_call_day') + pg_total_relation_size('elysium_caller_day')
                   + pg_total_relation_size('elysium_caller_set') + pg_total_relation_size('elysium_method_sender_day')
                   + pg_total_relation_size('elysium_day_rollup'))::float8 AS rollups,
@@ -172,27 +219,31 @@ export class ElysiumAnalyticsService {
   // 2. deployments
   // ---------------------------------------------------------------------------
 
-  public getDeployments(days: number): Promise<unknown> {
-    return this.cached('deployments', `d${days}`, async () => {
+  public getDeployments(days: number): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.deploymentsView(days));
+  }
+
+  private deploymentsView(days: number): ViewDef<unknown> {
+    return this.view('deployments', `d${days}`, dailyCadence(days), async () => {
       const now = new Date();
       const { keys, start } = this.rangeStart(now, days);
       const since7d = new Date(now.getTime() - 7 * DAY_MS);
       const since24h = new Date(now.getTime() - DAY_MS);
 
       const [daily, top, trending] = await Promise.all([
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; deployments: number; deployers: number }>>`
+        agg.$queryRaw<Array<{ day: string; deployments: number; deployers: number }>>`
           SELECT (deployed_at AT TIME ZONE 'UTC')::date::text AS day,
                  count(*)::int AS deployments, count(DISTINCT deployer)::int AS deployers
           FROM elysium_contract WHERE deployed_at >= ${ts(start)}::timestamptz
           GROUP BY 1`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{ address: string; deployments: number; first_deploy: number; last_deploy: number }>
         >`
           SELECT deployer AS address, count(*)::int AS deployments,
                  (extract(epoch FROM min(deployed_at)) * 1000)::float8 AS first_deploy, (extract(epoch FROM max(deployed_at)) * 1000)::float8 AS last_deploy
           FROM elysium_contract WHERE deployed_at >= ${ts(since7d)}::timestamptz
           GROUP BY deployer ORDER BY deployments DESC, address LIMIT 15`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{
             address: string;
             deployer: string;
@@ -248,8 +299,12 @@ export class ElysiumAnalyticsService {
    * equal preceding window. Only known contracts are ranked: deployed ones,
    * registry tokens, and 0x0000…00XX precompiles (plain EOA targets excluded).
    */
-  public getContracts(window: ContractsWindow): Promise<unknown> {
-    return this.cached('contracts', window, async () => {
+  public getContracts(window: ContractsWindow): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.contractsView(window));
+  }
+
+  private contractsView(window: ContractsWindow): ViewDef<unknown> {
+    return this.view('contracts', window, window === '7d' ? CADENCE.week : CADENCE.day, async () => {
       const spanMs = window === '7d' ? 7 * DAY_MS : DAY_MS;
       const now = new Date();
       const curStart = new Date(now.getTime() - spanMs);
@@ -259,7 +314,7 @@ export class ElysiumAnalyticsService {
       const prev = planRollupWindow(prevStart, curStart, coverage);
       const curRaw = rawRanges(Prisma.sql`t.block_time`, cur);
 
-      const top = await prismaHistoricalRead.$queryRaw<Array<{ address: string; txs: number; gas_used: string }>>`
+      const top = await agg.$queryRaw<Array<{ address: string; txs: number; gas_used: string }>>`
         WITH agg AS (
           -- Rollup rows and raw rows go to one aggregation: grouping each side first, then
           -- again together, sorted the rollup rows twice.
@@ -282,7 +337,7 @@ export class ElysiumAnalyticsService {
       const addrs = top.map((r) => r.address);
       const [meta, prevTxs, callers, callersPrev, methodRows, names] = await Promise.all([
         addrs.length
-          ? prismaHistoricalRead.$queryRaw<
+          ? agg.$queryRaw<
               Array<{
                 address: string;
                 deployer: string | null;
@@ -299,7 +354,7 @@ export class ElysiumAnalyticsService {
               LEFT JOIN elysium_token tk ON tk.address = a.address`
           : Promise.resolve([]),
         addrs.length
-          ? prismaHistoricalRead.$queryRaw<Array<{ address: string; txs: number }>>`
+          ? agg.$queryRaw<Array<{ address: string; txs: number }>>`
               SELECT address, sum(txs)::int AS txs FROM (
                 SELECT d.to_addr AS address, sum(d.txs)::bigint AS txs
                 FROM elysium_call_day d
@@ -315,7 +370,7 @@ export class ElysiumAnalyticsService {
         distinctCallers(addrs, curStart, now, coverage),
         distinctCallers(addrs, prevStart, curStart, coverage),
         addrs.length
-          ? prismaHistoricalRead.$queryRaw<Array<{ address: string; method_id: string | null; txs: number }>>`
+          ? agg.$queryRaw<Array<{ address: string; method_id: string | null; txs: number }>>`
               SELECT address, method_id, txs FROM (
                 SELECT address, method_id, sum(txs)::int AS txs,
                        row_number() OVER (PARTITION BY address ORDER BY sum(txs) DESC, method_id) AS rk
@@ -391,21 +446,25 @@ export class ElysiumAnalyticsService {
    * Senders are user txs only: non-spam and not a bridge-driven tx type
    * (0x64/0x68/0x69, sent from aliased L1 addresses).
    */
-  public getUsers(days: number): Promise<unknown> {
-    return this.cached('users', `d${days}`, async () => {
+  public getUsers(days: number): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.usersView(days));
+  }
+
+  private usersView(days: number): ViewDef<unknown> {
+    return this.view('users', `d${days}`, dailyCadence(days), async () => {
       const now = new Date();
       const { keys } = this.rangeStart(now, days);
       const startDay = keys[0];
       const since24h = new Date(now.getTime() - DAY_MS);
 
       const [active, fresh, cohorts, senders] = await Promise.all([
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; n: number }>>`
+        agg.$queryRaw<Array<{ day: string; n: number }>>`
           SELECT day::text AS day, count(*)::int AS n FROM elysium_address_day
           WHERE day >= ${startDay}::date GROUP BY day`,
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; n: number }>>`
+        agg.$queryRaw<Array<{ day: string; n: number }>>`
           SELECT first_day::text AS day, count(*)::int AS n FROM elysium_address
           WHERE first_day >= ${startDay}::date GROUP BY first_day`,
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; size: number; d1: number; d7: number }>>`
+        agg.$queryRaw<Array<{ day: string; size: number; d1: number; d7: number }>>`
           SELECT a.first_day::text AS day, count(*)::int AS size,
                  count(d1.address)::int AS d1, count(d7.address)::int AS d7
           FROM elysium_address a
@@ -413,7 +472,7 @@ export class ElysiumAnalyticsService {
           LEFT JOIN elysium_address_day d7 ON d7.address = a.address AND d7.day = a.first_day + 7
           WHERE a.first_day >= ${startDay}::date
           GROUP BY a.first_day`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{ address: string; txs: number; targets: number; senders: number; total: number }>
         >`
           WITH s AS (
@@ -477,13 +536,17 @@ export class ElysiumAnalyticsService {
    * is counted when initiated); finality uses completed transfers only.
    * HYPE = symbol 'HYPE' on the native route.
    */
-  public getBridge(days: number): Promise<unknown> {
-    return this.cached('bridge', `d${days}`, async () => {
+  public getBridge(days: number): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.bridgeView(days));
+  }
+
+  private bridgeView(days: number): ViewDef<unknown> {
+    return this.view('bridge', `d${days}`, dailyCadence(days), async () => {
       const now = new Date();
       const { keys, start } = this.rangeStart(now, days);
 
       const [daily, tokens, finality, bridgers] = await Promise.all([
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{ day: string; deposits: number; withdrawals: number; hype_in: number; hype_out: number }>
         >`
           SELECT (initiated_at AT TIME ZONE 'UTC')::date::text AS day,
@@ -493,7 +556,7 @@ export class ElysiumAnalyticsService {
                  COALESCE(sum(amount) FILTER (WHERE direction = 'withdrawal' AND symbol = 'HYPE' AND route = 'native'), 0)::float8 AS hype_out
           FROM elysium_bridge_transfer WHERE initiated_at >= ${ts(start)}::timestamptz
           GROUP BY 1`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{
             symbol: string | null;
             route: string;
@@ -511,7 +574,7 @@ export class ElysiumAnalyticsService {
           FROM elysium_bridge_transfer WHERE initiated_at >= ${ts(start)}::timestamptz
           GROUP BY symbol, route
           ORDER BY count(*) DESC, symbol LIMIT 25`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{ direction: string; completed: number; median_s: number | null; p90_s: number | null }>
         >`
           SELECT direction, count(*)::int AS completed,
@@ -520,7 +583,7 @@ export class ElysiumAnalyticsService {
           FROM elysium_bridge_transfer
           WHERE initiated_at >= ${ts(start)}::timestamptz AND completed_at IS NOT NULL AND duration_s IS NOT NULL
           GROUP BY direction ORDER BY direction`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{ address: string; transfers: number; hype_in: number; hype_out: number }>
         >`
           SELECT from_addr AS address, count(*)::int AS transfers,
@@ -584,13 +647,19 @@ export class ElysiumAnalyticsService {
    * registry tokens; precompile calls (bridge retryables, system) are totalled
    * apart as "system" but still listed; plain transfers to EOAs count in the
    * total only. Fees include the parent
-   * posting part (fee_wei is the full receipt fee). Cached 5 min (24h), 10 min
-   * (7d) and 30 min (30d). The built days of the window come from the day
-   * rollups; the durations date from when 30d read every tx of the month.
+   * posting part (fee_wei is the full receipt fee). Computed every minute
+   * (24h), 5 min (7d) and 30 min (30d) while watched. The built days of the
+   * window come from the day rollups.
    */
-  public getFees(window: FeesWindow): Promise<unknown> {
-    return cacheService.getOrRefresh(
-      `${CACHE_PREFIX}:fees:${window}`,
+  public getFees(window: FeesWindow): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.feesView(window));
+  }
+
+  private feesView(window: FeesWindow): ViewDef<unknown> {
+    return this.view(
+      'fees',
+      window,
+      window === '30d' ? CADENCE.month : window === '7d' ? CADENCE.week : CADENCE.day,
       async () => {
         const spanMs = (window === '30d' ? 30 : window === '7d' ? 7 : 1) * DAY_MS;
         const now = new Date();
@@ -600,7 +669,7 @@ export class ElysiumAnalyticsService {
         const cur = planRollupWindow(start, now, coverage);
         const prevPlan = planRollupWindow(prevStart, start, coverage);
 
-        const rows = await prismaHistoricalRead.$queryRaw<
+        const rows = await agg.$queryRaw<
           Array<{ kind: string; key: string | null; fees: number; txs: number; gas: string | null; n: number }>
         >`
           WITH f AS (
@@ -643,14 +712,14 @@ export class ElysiumAnalyticsService {
 
         const [meta, prev, callers] = addrs.length
           ? await Promise.all([
-              prismaHistoricalRead.$queryRaw<
+              agg.$queryRaw<
                 Array<{ address: string; deployer: string | null; name: string | null; symbol: string | null; is_token: boolean }>
               >`
                 SELECT a.address, c.deployer, tk.name, tk.symbol, (tk.address IS NOT NULL) AS is_token
                 FROM unnest(${addrs}::text[]) AS a(address)
                 LEFT JOIN elysium_contract c ON c.address = a.address
                 LEFT JOIN elysium_token tk ON tk.address = a.address`,
-              prismaHistoricalRead.$queryRaw<Array<{ address: string; fees: number }>>`
+              agg.$queryRaw<Array<{ address: string; fees: number }>>`
                 SELECT address, (sum(fee) / 1e18)::float8 AS fees FROM (
                   SELECT d.to_addr AS address, sum(d.fee_wei) AS fee
                   FROM elysium_call_day d
@@ -717,10 +786,7 @@ export class ElysiumAnalyticsService {
             gasUsed: num(r.gas),
           })),
         };
-      },
-      // Longer for the wider windows: a 30-day figure moves little in half an hour.
-      window === '30d' ? 1800 : window === '7d' ? 600 : 300,
-      24 * 3600
+      }
     );
   }
 
@@ -737,15 +803,19 @@ export class ElysiumAnalyticsService {
    * `totals.txs` counts every ingested tx (same basis as `totals.feesHype`).
    * No fee split is applied here.
    */
-  public getEconomics(days: number): Promise<unknown> {
-    return this.cached('economics', `d${days}`, async () => {
+  public getEconomics(days: number): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.economicsView(days));
+  }
+
+  private economicsView(days: number): ViewDef<unknown> {
+    return this.view('economics', `d${days}`, dailyCadence(days), async () => {
       const now = new Date();
       const { keys, start } = this.rangeStart(now, days);
       // Up to the end of today: a built day is one row, the others are counted from the raw table.
       const end = new Date(new Date(`${keys[keys.length - 1]}T00:00:00Z`).getTime() + DAY_MS);
       const plan = planRollupWindow(start, end, await readRollupCoverage(now));
 
-      const rows = await prismaHistoricalRead.$queryRaw<
+      const rows = await agg.$queryRaw<
         Array<{ day: string; txs: number; spam: number; failed: number; bridge: number; fees: number }>
       >`
         SELECT r.day::text AS day, r.txs, r.spam_txs AS spam, r.failed_txs AS failed, r.bridge_txs AS bridge,
@@ -803,7 +873,7 @@ export class ElysiumAnalyticsService {
     return cacheService.getOrSet<Record<string, string>>(
       `${CACHE_PREFIX}:method-names:v1`,
       async () => {
-        const rows = await prismaHistoricalRead.$queryRaw<Array<{ method_id: string; signature: string }>>`
+        const rows = await agg.$queryRaw<Array<{ method_id: string; signature: string }>>`
           SELECT method_id, signature FROM elysium_method_sig WHERE signature IS NOT NULL`;
         return Object.fromEntries(rows.map((r) => [r.method_id, r.signature]));
       },
@@ -823,8 +893,12 @@ export class ElysiumAnalyticsService {
    * contract creations and plain transfers are counted apart), plus the full
    * selector -> signature map so clients can label any tx.
    */
-  public getMethods(window: ContractsWindow): Promise<unknown> {
-    return this.cached('methods', window, async () => {
+  public getMethods(window: ContractsWindow): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.methodsView(window));
+  }
+
+  private methodsView(window: ContractsWindow): ViewDef<unknown> {
+    return this.view('methods', window, window === '7d' ? CADENCE.week : CADENCE.day, async () => {
       const spanMs = window === '7d' ? 7 * DAY_MS : DAY_MS;
       const now = new Date();
       const start = new Date(now.getTime() - spanMs);
@@ -836,7 +910,7 @@ export class ElysiumAnalyticsService {
         // Top selectors first, then distinct senders / contracts via two-level
         // hash aggregates (count(DISTINCT) per group sorts and takes ~40s here).
         // The raw part of the window is read once (`edge`) and shared by the three.
-        prismaHistoricalRead.$queryRaw<Array<{ method_id: string; txs: number; senders: number; contracts: number }>>`
+        agg.$queryRaw<Array<{ method_id: string; txs: number; senders: number; contracts: number }>>`
           WITH edge AS MATERIALIZED (
             SELECT t.method_id, t.from_addr, t.to_addr FROM elysium_tx t
             WHERE ${raw} AND NOT t.is_spam AND t.to_addr IS NOT NULL AND t.method_id IS NOT NULL
@@ -870,7 +944,7 @@ export class ElysiumAnalyticsService {
           SELECT top.method_id, top.txs, COALESCE(s.n, 0) AS senders, COALESCE(c.n, 0) AS contracts
           FROM top LEFT JOIN s USING (method_id) LEFT JOIN c USING (method_id)
           ORDER BY top.txs DESC, top.method_id`,
-        prismaHistoricalRead.$queryRaw<Array<{ calls: number; transfers: number; creations: number }>>`
+        agg.$queryRaw<Array<{ calls: number; transfers: number; creations: number }>>`
           SELECT sum(calls)::int AS calls, sum(transfers)::int AS transfers, sum(creations)::int AS creations FROM (
             SELECT r.calls::bigint AS calls, r.transfers::bigint AS transfers, r.creations::bigint AS creations
             FROM elysium_day_rollup r WHERE r.day = ANY(${rollupDays(plan)})
@@ -882,7 +956,7 @@ export class ElysiumAnalyticsService {
             WHERE ${raw} AND NOT t.is_spam
           ) u`,
         this.methodNames(),
-        prismaHistoricalRead.$queryRaw<Array<{ looked_up: number; found: number }>>`
+        agg.$queryRaw<Array<{ looked_up: number; found: number }>>`
           SELECT count(*)::int AS looked_up, count(signature)::int AS found FROM elysium_method_sig`,
       ]);
       const t = totals[0] ?? { calls: 0, transfers: 0, creations: 0 };
@@ -912,21 +986,25 @@ export class ElysiumAnalyticsService {
    * the swap txs (the log's own `sender` is usually a router), falling back to
    * the log sender when the tx is not indexed.
    */
-  public getDex(days: number): Promise<unknown> {
-    return this.cached('dex', `d${days}`, async () => {
+  public getDex(days: number): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.dexView(days));
+  }
+
+  private dexView(days: number): ViewDef<unknown> {
+    return this.view('dex', `d${days}`, dailyCadence(days), async () => {
       const now = new Date();
       const { keys, start } = this.rangeStart(now, days);
       const since24h = new Date(now.getTime() - DAY_MS);
 
       const [pools, swaps, factories, top, fresh, totals] = await Promise.all([
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; n: number }>>`
+        agg.$queryRaw<Array<{ day: string; n: number }>>`
           SELECT (created_at AT TIME ZONE 'UTC')::date::text AS day, count(*)::int AS n
           FROM elysium_dex_pool WHERE created_at >= ${ts(start)}::timestamptz GROUP BY 1`,
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; swaps: number; active: number }>>`
+        agg.$queryRaw<Array<{ day: string; swaps: number; active: number }>>`
           SELECT (block_time AT TIME ZONE 'UTC')::date::text AS day, count(*)::int AS swaps,
                  count(DISTINCT pool)::int AS active
           FROM elysium_dex_swap WHERE block_time >= ${ts(start)}::timestamptz GROUP BY 1`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{ address: string; versions: string; pools: number; swaps24h: number; last_pool: number }>
         >`
           SELECT p.factory AS address, string_agg(DISTINCT p.version, ',') AS versions,
@@ -935,7 +1013,7 @@ export class ElysiumAnalyticsService {
                    WHERE q.factory = p.factory AND s.block_time >= ${ts(since24h)}::timestamptz)::int AS swaps24h,
                  (extract(epoch FROM max(p.created_at)) * 1000)::float8 AS last_pool
           FROM elysium_dex_pool p GROUP BY p.factory ORDER BY pools DESC, address LIMIT 15`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{
             pool: string;
             version: string;
@@ -958,7 +1036,7 @@ export class ElysiumAnalyticsService {
           WHERE s.block_time >= ${ts(since24h)}::timestamptz
           GROUP BY s.pool, s.version, p.fee, p.token0, p.token1, k0.symbol, k1.symbol
           ORDER BY swaps DESC, s.pool LIMIT 15`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{
             pool: string;
             factory: string;
@@ -980,7 +1058,7 @@ export class ElysiumAnalyticsService {
           LEFT JOIN elysium_token k0 ON k0.address = p.token0
           LEFT JOIN elysium_token k1 ON k1.address = p.token1
           ORDER BY p.created_at DESC, p.pool LIMIT 30`,
-        prismaHistoricalRead.$queryRaw<
+        agg.$queryRaw<
           Array<{ pools: number; swaps: number; swaps24h: number; traders24h: number; pools24h: number }>
         >`
           SELECT (SELECT count(*) FROM elysium_dex_pool)::int AS pools,
@@ -1054,8 +1132,12 @@ export class ElysiumAnalyticsService {
    * with a symbol). Ranked lists only show tokens with a symbol; `holders` is
    * the latest /tokens/{address} snapshot (top tokens only, null otherwise).
    */
-  public getTokens(days: number): Promise<unknown> {
-    return this.cached('tokens', `d${days}`, async () => {
+  public getTokens(days: number): Promise<ViewResult<unknown>> {
+    return viewScheduler.read(this.tokensView(days));
+  }
+
+  private tokensView(days: number): ViewDef<unknown> {
+    return this.view('tokens', `d${days}`, dailyCadence(days), async () => {
       const now = new Date();
       const { keys, start } = this.rangeStart(now, days);
       const since24h = new Date(now.getTime() - DAY_MS);
@@ -1073,25 +1155,25 @@ export class ElysiumAnalyticsService {
       };
 
       const [daily, fresh, top, totals] = await Promise.all([
-        prismaHistoricalRead.$queryRaw<Array<{ day: string; launched: number; named: number }>>`
+        agg.$queryRaw<Array<{ day: string; launched: number; named: number }>>`
           SELECT (first_seen AT TIME ZONE 'UTC')::date::text AS day, count(*)::int AS launched,
                  count(*) FILTER (WHERE symbol IS NOT NULL)::int AS named
           FROM elysium_token WHERE standard = 'erc20' AND first_seen >= ${ts(start)}::timestamptz GROUP BY 1`,
-        prismaHistoricalRead.$queryRaw<TokenOut[]>`
+        agg.$queryRaw<TokenOut[]>`
           SELECT k.address, k.name, k.symbol, k.decimals, k.origin,
                  (extract(epoch FROM k.first_seen) * 1000)::float8 AS first_seen, k.transfer_count::text AS transfers,
                  s.holders, (extract(epoch FROM s.fetched_at) * 1000)::float8 AS holders_at
           FROM elysium_token k LEFT JOIN elysium_token_stat s ON s.address = k.address
           WHERE k.standard = 'erc20' AND k.symbol IS NOT NULL AND k.first_seen >= ${ts(since24h)}::timestamptz
           ORDER BY k.transfer_count DESC, k.address LIMIT 25`,
-        prismaHistoricalRead.$queryRaw<TokenOut[]>`
+        agg.$queryRaw<TokenOut[]>`
           SELECT k.address, k.name, k.symbol, k.decimals, k.origin,
                  (extract(epoch FROM k.first_seen) * 1000)::float8 AS first_seen, k.transfer_count::text AS transfers,
                  s.holders, (extract(epoch FROM s.fetched_at) * 1000)::float8 AS holders_at
           FROM elysium_token k LEFT JOIN elysium_token_stat s ON s.address = k.address
           WHERE k.standard = 'erc20' AND k.symbol IS NOT NULL
           ORDER BY k.transfer_count DESC, k.address LIMIT 25`,
-        prismaHistoricalRead.$queryRaw<Array<{ tokens: number; named: number; launched24h: number; named24h: number }>>`
+        agg.$queryRaw<Array<{ tokens: number; named: number; launched24h: number; named24h: number }>>`
           SELECT count(*)::int AS tokens, count(*) FILTER (WHERE symbol IS NOT NULL)::int AS named,
                  count(*) FILTER (WHERE first_seen >= ${ts(since24h)}::timestamptz)::int AS launched24h,
                  count(*) FILTER (WHERE first_seen >= ${ts(since24h)}::timestamptz AND symbol IS NOT NULL)::int AS named24h
@@ -1134,10 +1216,14 @@ export class ElysiumAnalyticsService {
    * the address, and running it inside every address profile let each fresh
    * address (an unbounded key space) trigger a full 24h count.
    */
-  private networkTxs24h(): Promise<number> {
-    return this.cached('network-txs-24h', 'v1', async () => {
+  private async networkTxs24h(): Promise<number> {
+    return (await viewScheduler.read(this.networkTxs24hView())).data;
+  }
+
+  private networkTxs24hView(): ViewDef<number> {
+    return this.view('network-txs-24h', 'v1', CADENCE.day, async () => {
       const since24h = new Date(Date.now() - DAY_MS);
-      const rows = await prismaHistoricalRead.$queryRaw<Array<{ total: number }>>`
+      const rows = await agg.$queryRaw<Array<{ total: number }>>`
         SELECT count(*)::int AS total FROM elysium_tx WHERE block_time >= ${ts(since24h)}::timestamptz
           AND NOT is_spam AND COALESCE(tx_type, '') NOT IN ('0x64', '0x68', '0x69')`;
       return rows[0]?.total ?? 0;
@@ -1232,7 +1318,8 @@ export class ElysiumAnalyticsService {
     return this.cachedFresh('contract', a, async () => {
       const now = new Date();
       const since7d = new Date(now.getTime() - 7 * DAY_MS);
-      const coverage = await readRollupCoverage(now);
+      // One contract's own rows: bounded whatever the plan, so an unreadable list of built days reads them raw.
+      const coverage = await readRollupCoverage(now, { db: prismaHistoricalRead, onFailure: 'raw' });
       const week = planRollupWindow(since7d, now, coverage);
       const weekRaw = rawRanges(Prisma.sql`t.block_time`, week);
       const [dep, token, usage, callers7d, allTime, methods, asPool, asFactory, inPools, names, launch] = await Promise.all([
@@ -1249,7 +1336,7 @@ export class ElysiumAnalyticsService {
             SELECT count(*)::bigint, count(*) FILTER (WHERE NOT t.success)::bigint
             FROM elysium_tx t WHERE t.to_addr = ${a} AND ${weekRaw} AND NOT t.is_spam
           ) u`,
-        distinctCallers([a], since7d, now, coverage),
+        distinctCallers([a], since7d, now, coverage, prismaHistoricalRead),
         // First and last call through the (to_addr, block_time) index: an all-time count is too slow on busy contracts.
         prismaHistoricalRead.$queryRaw<Array<{ first: number | null; last: number | null }>>`
           SELECT (SELECT (extract(epoch FROM block_time) * 1000)::float8 FROM elysium_tx WHERE to_addr = ${a} ORDER BY block_time ASC LIMIT 1) AS first,

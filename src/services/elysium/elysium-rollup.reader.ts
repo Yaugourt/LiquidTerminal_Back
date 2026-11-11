@@ -1,5 +1,5 @@
-import { Prisma } from '../../../prisma-historical/generated/client';
-import { prismaHistoricalRead } from '../../core/prisma.historical.service';
+import { Prisma, type PrismaClient } from '../../../prisma-historical/generated/client';
+import { prismaHistoricalAggregate } from '../../core/prisma.historical.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { planRollupWindow, rollupKeepDays, firstKeptDay } from './elysium-rollup.util';
 import type { RollupDayCoverage, RollupPlan } from './elysium-rollup.util';
@@ -15,20 +15,43 @@ export function rollupsEnabled(): boolean {
   return (process.env.ELYSIUM_ROLLUPS_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
 }
 
+/** The list of built days could not be read: the computation that needed it is given up. */
+export class RollupCoverageUnreadableError extends Error {
+  constructor() {
+    super('ELYSIUM_ROLLUP_COVERAGE_UNREADABLE');
+    this.name = 'RollupCoverageUnreadableError';
+  }
+}
+
 /**
  * The built, non-dirty days. Read at the start of every computation, never
- * cached: a day marked dirty stops being used by the next one. Any failure
- * answers "no day built", which sends the whole window to elysium_tx.
+ * cached: a day marked dirty stops being used by the next one.
+ *
+ * A read that fails throws by default. It used to answer "no day built", which
+ * sent the whole window to elysium_tx: when the pool was saturated the read
+ * failed, fees over 30 days went back to 38 million rows for minutes, and the
+ * overload fed itself. A scheduled view that cannot read the list is given up
+ * and keeps its last value. `onFailure: 'raw'` keeps the old answer for a read
+ * that is bounded whatever the plan (one contract's own rows).
  */
-export async function readRollupCoverage(now: Date): Promise<Map<string, RollupDayCoverage>> {
+export async function readRollupCoverage(
+  now: Date,
+  options: { db?: PrismaClient; onFailure?: 'throw' | 'raw' } = {}
+): Promise<Map<string, RollupDayCoverage>> {
   const coverage = new Map<string, RollupDayCoverage>();
   if (!rollupsEnabled()) return coverage;
   try {
-    const rows = await prismaHistoricalRead.$queryRaw<Array<{ day: string; callers_built: boolean; senders_built: boolean }>>`
+    const rows = await (options.db ?? prismaHistoricalAggregate).$queryRaw<Array<{ day: string; callers_built: boolean; senders_built: boolean }>>`
       SELECT day::text AS day, callers_built, senders_built FROM elysium_day_rollup
       WHERE built_at IS NOT NULL AND NOT dirty AND day >= ${firstKeptDay(now, rollupKeepDays())}::date`;
     for (const r of rows) coverage.set(r.day.slice(0, 10), { callers: r.callers_built, senders: r.senders_built });
   } catch (error) {
+    if (options.onFailure !== 'raw') {
+      logDeduplicator.warn('Elysium rollups: coverage unreadable, computation given up', {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+      throw new RollupCoverageUnreadableError();
+    }
     logDeduplicator.warn('Elysium rollups: coverage unreadable, reading the raw table', {
       errorType: error instanceof Error ? error.name : typeof error,
     });
@@ -67,12 +90,15 @@ const DAY_MS = 86_400_000;
  * second reads elysium_tx one explicit (target, time range) at a time. As one
  * statement the planner probed elysium_tx by target only and filtered the day
  * afterwards: every transaction the target ever received, once per day.
+ *
+ * `db`: the pool the statements run on, the scheduled aggregates' by default.
  */
 export async function distinctCallers(
   addresses: string[],
   start: Date,
   end: Date,
-  coverage: ReadonlyMap<string, RollupDayCoverage>
+  coverage: ReadonlyMap<string, RollupDayCoverage>,
+  db: PrismaClient = prismaHistoricalAggregate
 ): Promise<Map<string, number>> {
   if (addresses.length === 0) return new Map();
   const plan = planRollupWindow(start, end, coverage, 'callers');
@@ -80,7 +106,7 @@ export async function distinctCallers(
 
   // Built days on which a target was called but has no caller list.
   const quiet = plan.days.length
-    ? await prismaHistoricalRead.$queryRaw<Array<{ address: string; day: string }>>`
+    ? await db.$queryRaw<Array<{ address: string; day: string }>>`
         SELECT a.address, d.day::text AS day
         FROM unnest(${addresses}::text[]) AS a(address)
         CROSS JOIN unnest(${days}) AS d(day)
@@ -105,7 +131,7 @@ export async function distinctCallers(
   const probeFrom = probes.map((p) => new Date(p.from).toISOString());
   const probeTo = probes.map((p) => new Date(p.to).toISOString());
 
-  const rows = await prismaHistoricalRead.$queryRaw<Array<{ address: string; callers: number }>>`
+  const rows = await db.$queryRaw<Array<{ address: string; callers: number }>>`
     SELECT address, count(DISTINCT from_addr)::int AS callers FROM (
       SELECT p.to_addr AS address, p.from_addr
       FROM elysium_caller_day p

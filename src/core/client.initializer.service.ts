@@ -38,6 +38,7 @@ import { TelegramFillAlertDispatcherService } from '../services/telegram/telegra
 import { MarketAlertsService } from '../services/alerts/market-alerts.service';
 import { TwapLiveService } from '../services/twap/twap-live.service';
 import { enabledUnlessFalseEnv, isElysiumWorker } from '../utils/env';
+import { viewScheduler } from './viewScheduler';
 import { logDeduplicator } from '../utils/logDeduplicator';
 
 export type StartupStatus = 'booting' | 'ready' | 'degraded';
@@ -47,6 +48,7 @@ export class ClientInitializerService {
   private clients: Map<string, any> = new Map();
   private startupStatus: StartupStatus = 'booting';
   private dailyBackfillTimer: NodeJS.Timeout | null = null;
+  private elysiumViewsTimer: NodeJS.Timeout | null = null;
 
   private constructor() {}
 
@@ -211,12 +213,16 @@ export class ClientInitializerService {
       // startPolling() is a no-op when ELYSIUM_INGEST_ENABLED=false.
       const elysiumIngestion = ElysiumIngestionService.getInstance();
       this.clients.set('elysiumIngestion', elysiumIngestion);
-      // Warm the Elysium analytics caches once the server is up (served stale-while-revalidate after that).
-      setTimeout(() => {
-        void ElysiumEcosystemService.getInstance().getProjects().catch(() => undefined);
+      // The Elysium views are computed by the view scheduler from here on: what the previous
+      // process left in Redis is served meanwhile, and only what is overdue is computed, two
+      // views at a time. Requests never compute one.
+      ElysiumAnalyticsService.getInstance().registerDefaults();
+      ElysiumEcosystemService.getInstance().registerDefaults();
+      this.elysiumViewsTimer = setTimeout(() => {
+        viewScheduler.start();
         void ElysiumLaunchpadMarketService.getInstance().warm().catch(() => undefined);
-        void ElysiumAnalyticsService.getInstance().warmDefaults();
-      }, 30_000).unref?.();
+      }, 10_000);
+      this.elysiumViewsTimer.unref?.();
       logDeduplicator.info('Elysium ingestion service initialized successfully');
 
       // Builder code growth (Hyperliquid per-builder daily fill files -> historical DB).
@@ -481,6 +487,10 @@ export class ClientInitializerService {
   }
 
   public async stopAllPolling(): Promise<void> {
+    // No new view computation; the ones running end with the process.
+    if (this.elysiumViewsTimer) clearTimeout(this.elysiumViewsTimer);
+    viewScheduler.stop();
+
     // Stop daily backfill timer
     if (this.dailyBackfillTimer) {
       clearTimeout(this.dailyBackfillTimer);

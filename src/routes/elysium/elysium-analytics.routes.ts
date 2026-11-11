@@ -19,6 +19,7 @@ import {
   LaunchpadBusyError,
   LaunchpadSearchBusyError,
 } from '../../services/elysium/elysium-launchpad-market.service';
+import { ViewResult, ViewWarmingError } from '../../core/viewScheduler';
 import { rateLimitKeyForIp } from '../../utils/client-ip';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { sendUpstreamError } from '../../utils/upstream-error-response';
@@ -41,6 +42,11 @@ function isDatabaseError(error: unknown): boolean {
  * get coerced values and defaults (validateGetRequest does not mutate
  * req.query). Logs carry a fixed message + fixed code only. The handler also
  * gets the client's key (IP, or /64), for the reads that keep a share per client.
+ *
+ * Most handlers return a scheduled view (ViewResult): the answer then carries
+ * `computedAt` (the time the figures are as of) and `refreshEveryS` next to
+ * `data`. No request computes such a view; one that has no value yet answers
+ * 503 with Retry-After.
  */
 function register<S extends QuerySchema>(
   path: string,
@@ -61,8 +67,19 @@ function register<S extends QuerySchema>(
         const query = querySchema.parse(req.query) as z.infer<S['shape']['query']>;
         const params = paramsSchema.parse(req.params) as z.infer<S['shape']['params']>;
         const data = await handler(query, params, rateLimitKeyForIp(req.ip ?? ''));
-        res.json({ success: true, data });
+        // A scheduled view says when its value was computed and how often it is.
+        if (data instanceof ViewResult) {
+          res.json({ success: true, data: data.data, computedAt: data.computedAt, refreshEveryS: data.refreshEveryS });
+        } else {
+          res.json({ success: true, data });
+        }
       } catch (error) {
+        if (error instanceof ViewWarmingError) {
+          // No value yet (first computation after a start with an empty store): shortly.
+          res.setHeader('Retry-After', String(error.retryAfterS));
+          res.status(503).json({ success: false, error: 'Analytics warming up', code });
+          return;
+        }
         if (error instanceof LaunchpadBusyError) {
           const search = error instanceof LaunchpadSearchBusyError;
           res.setHeader('Retry-After', String(error.retryAfterS));

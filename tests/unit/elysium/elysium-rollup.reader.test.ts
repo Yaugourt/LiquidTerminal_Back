@@ -4,13 +4,25 @@
  * target's whole history).
  */
 const queryRaw = jest.fn();
-jest.mock('../../../src/core/prisma.historical.service', () => ({ prismaHistoricalRead: { $queryRaw: queryRaw } }));
+const profileQueryRaw = jest.fn();
+jest.mock('../../../src/core/prisma.historical.service', () => ({
+  // The scheduled aggregates' pool, the default; the read pool is what the contract profile passes.
+  prismaHistoricalAggregate: { $queryRaw: queryRaw },
+  prismaHistoricalRead: { $queryRaw: profileQueryRaw },
+}));
 jest.mock('../../../src/utils/logDeduplicator', () => ({
   logDeduplicator: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
 import { Prisma } from '../../../prisma-historical/generated/client';
-import { distinctCallers, rawRanges, readRollupCoverage, rollupDays } from '../../../src/services/elysium/elysium-rollup.reader';
+import {
+  distinctCallers,
+  rawRanges,
+  readRollupCoverage,
+  rollupDays,
+  RollupCoverageUnreadableError,
+} from '../../../src/services/elysium/elysium-rollup.reader';
+import { prismaHistoricalRead } from '../../../src/core/prisma.historical.service';
 import type { RollupDayCoverage } from '../../../src/services/elysium/elysium-rollup.util';
 
 const at = (iso: string): Date => new Date(iso);
@@ -25,7 +37,10 @@ function boundValues(call: number): unknown[] {
 }
 
 describe('rollup reader', () => {
-  beforeEach(() => queryRaw.mockReset());
+  beforeEach(() => {
+    queryRaw.mockReset();
+    profileQueryRaw.mockReset();
+  });
   afterEach(() => {
     delete process.env.ELYSIUM_ROLLUPS_ENABLED;
   });
@@ -46,9 +61,17 @@ describe('rollup reader', () => {
       expect(boundValues(0)).toEqual(['2026-09-08']);
     });
 
-    it('answers "nothing built" when the table cannot be read: the windows then read the raw table', async () => {
-      queryRaw.mockRejectedValue(new Error('relation "elysium_day_rollup" does not exist'));
-      await expect(readRollupCoverage(now)).resolves.toEqual(new Map());
+    it('gives the computation up when the list cannot be read: "nothing built" would send the whole window to the raw table', async () => {
+      queryRaw.mockRejectedValue(new Error('timeout exceeded when trying to connect'));
+      await expect(readRollupCoverage(now)).rejects.toBeInstanceOf(RollupCoverageUnreadableError);
+    });
+
+    it('answers "nothing built" on a failed read only where the caller says its read is bounded anyway', async () => {
+      profileQueryRaw.mockRejectedValue(new Error('timeout exceeded when trying to connect'));
+      await expect(readRollupCoverage(now, { db: prismaHistoricalRead, onFailure: 'raw' })).resolves.toEqual(new Map());
+      // On the pool it was given, not on the aggregates'.
+      expect(profileQueryRaw).toHaveBeenCalledTimes(1);
+      expect(queryRaw).not.toHaveBeenCalled();
     });
 
     it('answers "nothing built" without a query when the rollups are switched off', async () => {
