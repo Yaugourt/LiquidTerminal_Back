@@ -16,10 +16,10 @@ curl -s "$BACK/elysium/analytics/status" | jq '.data | {partial, streams: [.stre
 
 The same with how the service is run is for an admin (a Privy token of an account whose role is
 ADMIN, as the admin pages send it): what the provider bills, the size of the database and of
-the tables, the position and the row count of each stream, how long each view takes.
+the tables, the row count of each stream, how long each view takes.
 
 ```bash
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$BACK/elysium/analytics/status/ops" | jq '.data | {credits, database, rollups, streams: [.streams[] | {stream, cursor, rows}], views: [.views[] | {view, lastDurationMs}]}'
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$BACK/elysium/analytics/status/ops" | jq '.data | {credits, database, rollups, streams: [.streams[] | {stream, rows}], views: [.views[] | {view, lastDurationMs}]}'
 ```
 
 | Field | What it says |
@@ -36,7 +36,8 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$BACK/elysium/analytics/status/
 | `credits` (admin route) | HypeDexer credits per UTC day (8 days), today's most expensive paths, the balance |
 | `database` (admin route) | size of the historical database, and its share of the volume when `HISTORICAL_DB_VOLUME_BYTES` is set (the database alone: the write-ahead log and anything else on the volume are not counted, so the real share is a little higher) |
 | `views` | each scheduled view: last computation, its last error (admin route: its duration, whether it is being watched or running) |
-| `streams[].cursor`, `streams[].rows` (admin route) | where each stream stands, and how many rows it has written |
+| `streams[].cursor` | the time each stream's data goes up to (the pages show it while the history loads) |
+| `streams[].rows` (admin route) | how many rows each stream has written |
 
 `GET $BACK/api/health` answers the process's uptime: after a deploy, a small uptime is the proof
 the new image runs (the deploy status GitHub shows can be wrong, see section 10).

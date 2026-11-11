@@ -181,9 +181,10 @@ export class ElysiumAnalyticsService {
    * What the public route serves: whether the data is fresh and complete, and nothing of how
    * the service is run. Left to the admin route (the alerts read the same figures in-process):
    * what the provider bills and what is left on the account, the size of the database, of the
-   * transaction table and of the rollups, the position and the row count of each stream, how
-   * long each view takes to compute. On a public route these tell anyone when the credits or
-   * the disk are about to run out, and which view is the slow one.
+   * transaction table and of the rollups, the row count of each stream, how long each view
+   * takes to compute. On a public route these tell anyone when the credits or the disk are
+   * about to run out, and which view is the slow one. The time each stream's data goes up to
+   * stays: it is the lag said another way, and the pages show it while the history loads.
    */
   public async getPublicStatus(): Promise<ViewResult<Omit<ElysiumStatus, 'credits' | 'database'> & { views: Array<Record<string, unknown>> }>> {
     const full = await this.getStatus();
@@ -193,7 +194,7 @@ export class ElysiumAnalyticsService {
     return new ViewResult(
       {
         ...rest,
-        streams: rest.streams.map((s) => without(s, ['cursor', 'rows'])),
+        streams: rest.streams.map((s) => without(s, ['rows'])),
         rollups: without(rest.rollups, ['sizeBytes', 'txTableBytes', 'keepDays']),
         views: rest.views.map((v) => without(v, ['lastDurationMs', 'watched', 'running'])),
       },

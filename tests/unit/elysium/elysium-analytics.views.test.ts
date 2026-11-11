@@ -122,7 +122,7 @@ describe('Elysium scheduled views', () => {
     const open = await ElysiumAnalyticsService.getInstance().getPublicStatus();
     expect(open.data).toEqual({
       partial: [],
-      streams: [{ stream: 'tx', backfillDone: true, lastError: null, lagSeconds: 20, everyS: 30, lastOkAt: '2026-11-11T17:59:50.000Z', state: 'ok' }],
+      streams: [{ stream: 'tx', cursor: '2026-11-11T17:59:40.000Z', backfillDone: true, lastError: null, lagSeconds: 20, everyS: 30, lastOkAt: '2026-11-11T17:59:50.000Z', state: 'ok' }],
       rollups: { builtDays: 61, waitingDays: 0, lastBuiltAt: '2026-11-11T00:12:00.000Z', lastError: null },
       rejects: [],
       completeness: { differing: 0, days: [] },
@@ -130,8 +130,9 @@ describe('Elysium scheduled views', () => {
       upkeep: [],
       views: [{ view: 'elysium:analytics:status:v5' }],
     });
-    // Neither the spend, nor a size, nor a position, nor a count of rows, nor a duration.
-    expect(JSON.stringify(open.data)).not.toMatch(/credits|balance|database|Bytes|cursor|"rows"|lastDurationMs|keepDays/);
+    // Neither the spend, nor a size, nor a count of rows, nor a duration. (The time the data goes
+    // up to stays: the pages show it while the history loads.)
+    expect(JSON.stringify(open.data)).not.toMatch(/credits|balance|database|Bytes|"rows"|lastDurationMs|keepDays/);
     expect(open.computedAt).toBe('2026-11-11T18:00:00.000Z');
     expect(open.refreshEveryS).toBe(15);
   });
