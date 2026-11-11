@@ -48,7 +48,6 @@ export class ClientInitializerService {
   private clients: Map<string, any> = new Map();
   private startupStatus: StartupStatus = 'booting';
   private dailyBackfillTimer: NodeJS.Timeout | null = null;
-  private elysiumViewsTimer: NodeJS.Timeout | null = null;
 
   private constructor() {}
 
@@ -218,11 +217,8 @@ export class ClientInitializerService {
       // views at a time. Requests never compute one.
       ElysiumAnalyticsService.getInstance().registerDefaults();
       ElysiumEcosystemService.getInstance().registerDefaults();
-      this.elysiumViewsTimer = setTimeout(() => {
-        viewScheduler.start();
-        void ElysiumLaunchpadMarketService.getInstance().warm().catch(() => undefined);
-      }, 10_000);
-      this.elysiumViewsTimer.unref?.();
+      viewScheduler.start();
+      void ElysiumLaunchpadMarketService.getInstance().warm().catch(() => undefined);
       logDeduplicator.info('Elysium ingestion service initialized successfully');
 
       // Builder code growth (Hyperliquid per-builder daily fill files -> historical DB).
@@ -488,7 +484,6 @@ export class ClientInitializerService {
 
   public async stopAllPolling(): Promise<void> {
     // No new view computation; the ones running end with the process.
-    if (this.elysiumViewsTimer) clearTimeout(this.elysiumViewsTimer);
     viewScheduler.stop();
 
     // Stop daily backfill timer

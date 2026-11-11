@@ -11,6 +11,12 @@ export interface ViewCadence {
   idleS: number;
   /** Takes tens of seconds: at most one such view is computed at a time. */
   heavy?: boolean;
+  /**
+   * Takes milliseconds: a request that finds it without a value computes it
+   * on the spot instead of waiting for the scheduler (a status must answer in
+   * the first seconds of a process too).
+   */
+  cheap?: boolean;
 }
 
 /** A view and how to compute it. `key` is also where its value is stored. */
@@ -39,6 +45,14 @@ export class ViewWarmingError extends Error {
   }
 }
 
+/** A computation did not end within its deadline: its slot is given back, its result (if any ever comes) is still kept. */
+export class ViewDeadlineError extends Error {
+  constructor() {
+    super('VIEW_COMPUTATION_DEADLINE');
+    this.name = 'ViewDeadlineError';
+  }
+}
+
 interface Waiter {
   resolve: () => void;
   timer: NodeJS.Timeout;
@@ -52,6 +66,10 @@ interface ViewState {
   /** Whether the stored value was looked for (once, and again when the held one is overdue). */
   loaded: boolean;
   checkedAt: number;
+  /** Looks at the store that failed in a row: after two, the view is computed without it. */
+  loadFailures: number;
+  /** A cheap view being computed for the requests that found it without a value. */
+  inline: Promise<void> | null;
   /** Last request for it, in this process. */
   askedAt: number;
   running: boolean;
@@ -81,6 +99,21 @@ const TICK_MS = 1_000;
 const RECHECK_MS = 5_000;
 const RETRY_MIN_MS = 15_000;
 const RETRY_MAX_MS = 600_000;
+/**
+ * The least time between the end of a computation and the start of the next one of the same
+ * view: as long as it took, 5 s at least, never more than its period. A view that takes longer
+ * than its period (a slow database) would otherwise be due again the moment it ends and run
+ * back to back, which is the overload feeding itself.
+ */
+const MIN_GAP_MS = 5_000;
+/**
+ * The longest a computation may hold its slot. Past it the slot and the lock are given back
+ * and the view is retried later; a query that never answers (a connection gone silent) must
+ * not take one of the two slots for good, and with it every other view. Above what the
+ * statements themselves are allowed (10 min on the aggregates' pool) for the heavy ones.
+ */
+const LIGHT_DEADLINE_MS = 180_000;
+const HEAVY_DEADLINE_MS = 720_000;
 
 const RELEASE_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
 const RENEW_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end`;
@@ -98,8 +131,10 @@ const RENEW_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.c
  * Here a request never starts a computation. It reads the last value, with
  * the time it is as of, and marks the view as watched. The scheduler computes
  * each view at its own period (shorter while watched), at most MAX_CONCURRENT
- * at once and one heavy view at a time, the most overdue first. A view that
- * fails keeps its last value and is retried later.
+ * at once and one heavy view at a time. Order: a view someone is waiting for
+ * with nothing to show, then the views kept warm, the most overdue first, then
+ * the ones computed only while asked (they never delay the others). A view
+ * that fails or passes its deadline keeps its last value and is retried later.
  *
  * The value lives in this process and in Redis (`<key>:swr`, the format the
  * views were stored in before: a deploy finds them there). Redis down: the
@@ -149,18 +184,27 @@ export class ViewScheduler {
   }
 
   /**
-   * The view's last value. Never computes: a view without a value waits for
-   * the scheduler's first computation, COLD_WAIT_MS at most, then answers
-   * ViewWarmingError.
+   * The view's last value. Never computes (a cheap view apart, when it has no
+   * value): a view without a value waits for the scheduler's first
+   * computation, COLD_WAIT_MS at most, then answers ViewWarmingError.
    */
   public async read<T>(def: ViewDef<T>): Promise<ViewResult<T>> {
     const view = this.ensure(def);
     const now = Date.now();
     view.askedAt = now;
+    this.expire(view, now);
     await this.refreshFromStore(view, now);
     if (view.at === null) {
-      this.pump();
-      await this.waitForValue(view);
+      if (view.def.cadence.cheap) {
+        await this.computeInline(view);
+      } else {
+        // Its computation just failed and waits for its retry: said at once, not after a wait that cannot succeed.
+        if (view.failures > 0 && !view.running && now < view.retryAt) {
+          throw new ViewWarmingError(Math.min(60, Math.max(1, Math.ceil((view.retryAt - now) / 1000))));
+        }
+        this.pump();
+        await this.waitForValue(view);
+      }
       if (view.at === null) throw new ViewWarmingError(5);
     }
     return new ViewResult(view.value as T, new Date(view.at).toISOString(), view.def.cadence.activeS);
@@ -209,6 +253,8 @@ export class ViewScheduler {
         at: null,
         loaded: false,
         checkedAt: 0,
+        loadFailures: 0,
+        inline: null,
         askedAt: 0,
         running: false,
         lastDurationMs: null,
@@ -241,15 +287,30 @@ export class ViewScheduler {
     const overdue = view.at !== null && now - view.at > this.period(view, now);
     if (!force && view.loaded && !(overdue && !view.running && now - view.checkedAt >= RECHECK_MS)) return;
     view.checkedAt = now;
-    try {
-      if (!redisService.isHealthy()) {
-        // Nothing can be found there: the view is computed rather than waited for.
-        view.loaded = true;
-        return;
-      }
-      const raw = await redisService.get(`${view.def.key}:swr`);
+    if (!redisService.isHealthy()) {
+      // Nothing can be found there: the view is computed rather than waited for.
       view.loaded = true;
-      if (!raw) return;
+      return;
+    }
+    let raw: string | null;
+    try {
+      // The client itself: the service's own get answers "no value" for a failed read too,
+      // and a view the store does hold would be taken for one that was never computed.
+      raw = await redisService.getClient().get(`${view.def.key}:swr`);
+      view.loadFailures = 0;
+    } catch (error) {
+      view.loadFailures += 1;
+      // Looked for again shortly; after two failed looks the view is computed without the store.
+      if (view.loadFailures >= 2) view.loaded = true;
+      logDeduplicator.warn('View scheduler: stored value unreadable', {
+        view: view.def.key,
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+      return;
+    }
+    view.loaded = true;
+    if (!raw) return;
+    try {
       const entry = JSON.parse(raw) as { at?: unknown; value?: unknown };
       if (typeof entry.at !== 'number' || !('value' in entry)) return;
       if (view.at === null || entry.at > view.at) {
@@ -258,12 +319,37 @@ export class ViewScheduler {
         // Whoever was waiting for a first value has one.
         this.release(view);
       }
-    } catch (error) {
-      logDeduplicator.warn('View scheduler: stored value unreadable', {
-        view: view.def.key,
-        errorType: error instanceof Error ? error.name : typeof error,
-      });
+    } catch {
+      // Not a value of ours: as if there were none.
     }
+  }
+
+  /**
+   * A view computed only while asked keeps no value past what its stored copy
+   * lasts: left alone for hours, it is computed again before it is served, not
+   * served hours old from this process's memory.
+   */
+  private expire(view: ViewState, now: number): void {
+    if (view.def.cadence.idleS > 0 || view.at === null || view.running) return;
+    if (now - view.at <= KEEP_ON_DEMAND_S * 1000) return;
+    view.value = undefined;
+    view.at = null;
+    view.loaded = false;
+    view.checkedAt = 0;
+  }
+
+  /** Computes a cheap view for the requests that found it without a value, once for all of them. */
+  private computeInline(view: ViewState): Promise<void> {
+    view.inline ??= (async () => {
+      const startedAt = Date.now();
+      try {
+        const data = await view.def.compute();
+        if (view.at === null || view.at < startedAt) await this.keep(view, data, startedAt);
+      } finally {
+        view.inline = null;
+      }
+    })();
+    return view.inline;
   }
 
   /** Holds a computed value here and stores it; a failed store leaves it served from memory. */
@@ -306,22 +392,25 @@ export class ViewScheduler {
   }
 
   /**
-   * How overdue a view is, as a multiple of its period; 0 when it is not due.
-   * A view without a value is due at once when someone waits for it or it is
-   * to be kept warm, ahead of every view that only needs a newer value.
+   * Whether a view is due, and how it ranks: `tier` 0 for a view someone is
+   * waiting for with nothing to show, 1 for a view kept warm, 2 for one
+   * computed only while asked; `score` is how overdue it is, as a multiple of
+   * its period. Null when it is not due.
    */
-  private urgency(view: ViewState, now: number): number {
-    if (view.running || now < view.retryAt) return 0;
+  private rank(view: ViewState, now: number): { tier: number; score: number } | null {
+    if (view.running || view.inline || now < view.retryAt) return null;
     const period = this.period(view, now);
+    const keptWarm = view.def.cadence.idleS > 0;
     if (view.at === null) {
-      if (view.waiters.length > 0) return Number.MAX_VALUE;
-      return Number.isFinite(period) && view.loaded ? Number.MAX_VALUE / 2 : 0;
+      if (view.waiters.length > 0) return { tier: 0, score: 1 };
+      // Without a value and to be kept warm or watched: due as soon as the store was looked at.
+      return Number.isFinite(period) && view.loaded ? { tier: keptWarm ? 1 : 2, score: Number.MAX_VALUE } : null;
     }
     const overdue = (now - view.at) / period;
-    return overdue >= 1 ? overdue : 0;
+    return overdue >= 1 ? { tier: keptWarm ? 1 : 2, score: overdue } : null;
   }
 
-  /** Starts as many due views as there are free slots, the most overdue first. */
+  /** Starts as many due views as there are free slots, in the order `rank` gives. */
   private pump(): void {
     if (!this.started) return;
     const now = Date.now();
@@ -329,16 +418,31 @@ export class ViewScheduler {
     for (const view of this.views.values()) {
       if (!view.loaded && now - view.checkedAt >= RECHECK_MS) void this.refreshFromStore(view, now);
     }
+    // Until the store has been looked at for every view kept warm, it is not known which of them
+    // are due: the views computed only while asked wait for that, they come after them.
+    let warmUnknown = false;
+    for (const view of this.views.values()) {
+      if (view.def.cadence.idleS > 0 && !view.loaded) warmUnknown = true;
+    }
     while (this.running < MAX_CONCURRENT) {
       let next: ViewState | null = null;
-      let nextUrgency = 0;
+      let best: { tier: number; score: number } | null = null;
       for (const view of this.views.values()) {
-        if (view.def.cadence.heavy && this.heavyRunning > 0) continue;
-        const urgency = this.urgency(view, now);
-        // Equally overdue: the light one first, it frees its slot sooner.
-        if (urgency > nextUrgency || (urgency === nextUrgency && urgency > 0 && next?.def.cadence.heavy && !view.def.cadence.heavy)) {
+        const rank = this.rank(view, now);
+        if (!rank) continue;
+        if (rank.tier === 2 && warmUnknown) continue;
+        // One heavy view at a time, unless someone is waiting on this one with nothing to show.
+        if (view.def.cadence.heavy && this.heavyRunning > 0 && rank.tier > 0) continue;
+        const better =
+          !best ||
+          rank.tier < best.tier ||
+          (rank.tier === best.tier &&
+            (rank.score > best.score ||
+              // Equally due: the light one first, it frees its slot sooner.
+              (rank.score === best.score && Boolean(next?.def.cadence.heavy) && !view.def.cadence.heavy)));
+        if (better) {
           next = view;
-          nextUrgency = urgency;
+          best = rank;
         }
       }
       if (!next) return;
@@ -362,13 +466,15 @@ export class ViewScheduler {
       if (redisService.isHealthy()) {
         try {
           locked = Boolean(await redisService.getClient().set(lockKey, token, 'EX', LOCK_TTL_S, 'NX'));
+          // Refused, not failed: another instance holds it and is computing the view.
+          elsewhere = !locked;
         } catch {
-          // Redis unusable: computed without the lock rather than not at all.
+          // The lock cannot be taken at all (Redis refusing writes, a failover): computed
+          // without it rather than not at all.
           locked = false;
         }
-        if (!locked && redisService.isHealthy()) {
-          // Another instance is computing it: its value is looked for shortly.
-          elsewhere = true;
+        if (elsewhere) {
+          // Its value is looked for shortly.
           view.retryAt = startedAt + RECHECK_MS;
           view.loaded = false;
           view.checkedAt = 0;
@@ -388,12 +494,39 @@ export class ViewScheduler {
         await this.refreshFromStore(view, startedAt, true);
         if (view.at !== null && view.at !== known && startedAt - view.at < this.period(view, startedAt)) return;
       }
-      const data = await view.def.compute();
+      const computing = view.def.compute();
+      let deadline: NodeJS.Timeout | undefined;
+      let data: unknown;
+      try {
+        data = await Promise.race([
+          computing,
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new ViewDeadlineError()), heavy ? HEAVY_DEADLINE_MS : LIGHT_DEADLINE_MS);
+            deadline.unref?.();
+          }),
+        ]);
+      } catch (error) {
+        if (error instanceof ViewDeadlineError) {
+          // Left behind, not cancelled: if it does end, its value is still the newest there is.
+          computing.then(
+            (late) => {
+              if (view.at === null || view.at < startedAt) void this.keep(view, late, startedAt).then(() => this.release(view));
+            },
+            () => undefined
+          );
+        }
+        throw error;
+      } finally {
+        if (deadline) clearTimeout(deadline);
+      }
       await this.keep(view, data, startedAt);
-      view.lastDurationMs = Date.now() - startedAt;
+      const ended = Date.now();
+      view.lastDurationMs = ended - startedAt;
       view.failures = 0;
-      view.retryAt = 0;
       view.lastError = null;
+      // Not again before a pause as long as it took (see MIN_GAP_MS).
+      const period = this.period(view, ended);
+      view.retryAt = ended + Math.min(Number.isFinite(period) ? period : RETRY_MAX_MS, Math.max(MIN_GAP_MS, view.lastDurationMs));
     } catch (error) {
       view.failures += 1;
       view.lastDurationMs = Date.now() - startedAt;

@@ -7,6 +7,7 @@ const mockRedis = {
   healthy: true,
   store: new Map<string, string>(),
   failGet: false,
+  failSet: false,
 };
 jest.mock('../../../src/core/redis.service', () => ({
   redisService: {
@@ -19,7 +20,12 @@ jest.mock('../../../src/core/redis.service', () => ({
       mockRedis.store.set(key, value);
     },
     getClient: () => ({
+      get: async (key: string) => {
+        if (mockRedis.failGet) throw new Error('redis get failed');
+        return mockRedis.store.get(key) ?? null;
+      },
       set: async (key: string, value: string, _ex: string, _ttl: number, nx?: string) => {
+        if (mockRedis.failSet) throw new Error('OOM command not allowed when used memory > maxmemory');
         if (nx === 'NX' && mockRedis.store.has(key)) return null;
         mockRedis.store.set(key, value);
         return 'OK';
@@ -35,7 +41,7 @@ jest.mock('../../../src/core/redis.service', () => ({
 const mockLog = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 jest.mock('../../../src/utils/logDeduplicator', () => ({ logDeduplicator: mockLog }));
 
-import { ViewScheduler, ViewWarmingError, type ViewCadence } from '../../../src/core/viewScheduler';
+import { ViewDeadlineError, ViewScheduler, ViewWarmingError, type ViewCadence } from '../../../src/core/viewScheduler';
 
 const T0 = Date.parse('2026-11-11T12:00:00.000Z');
 const LIGHT: ViewCadence = { activeS: 60, idleS: 600 };
@@ -72,6 +78,7 @@ describe('ViewScheduler', () => {
     jest.useFakeTimers({ now: T0 });
     mockRedis.healthy = true;
     mockRedis.failGet = false;
+    mockRedis.failSet = false;
     mockRedis.store.clear();
     for (const m of Object.values(mockLog)) m.mockReset();
     scheduler = fresh();
@@ -250,17 +257,39 @@ describe('ViewScheduler', () => {
     expect(mockRedis.store.size).toBe(0);
   });
 
-  it('survives a Redis read that fails: the view is looked for again, then computed', async () => {
+  it('does not take a failed look at the store for "never computed": it looks again and finds the value', async () => {
+    const v = view('a', HEAVY, 'manual');
+    mockRedis.store.set('a:swr', JSON.stringify({ at: T0 - 60_000, value: { stored: true } }));
     mockRedis.failGet = true;
-    const v = view('a', LIGHT);
+    scheduler.register(v.def);
     scheduler.start();
-    const first = scheduler.read(v.def).catch((e: Error) => e);
     await seconds(3);
+    // One failed look: nothing is computed on the strength of it.
+    expect(v.compute).not.toHaveBeenCalled();
     mockRedis.failGet = false;
-    await seconds(10);
+    await seconds(6);
+    expect((await scheduler.read(v.def)).data).toEqual({ stored: true });
+    expect(v.compute).not.toHaveBeenCalled();
+  });
+
+  it('computes a view without the store once two looks at it have failed', async () => {
+    const v = view('a', LIGHT);
+    mockRedis.failGet = true;
+    scheduler.register(v.def);
+    scheduler.start();
+    await seconds(12);
     expect(v.compute).toHaveBeenCalled();
     expect((await scheduler.read(v.def)).data).toMatchObject({ key: 'a' });
-    await first;
+  });
+
+  it('computes without the lock when the lock cannot be taken at all', async () => {
+    const v = view('a', LIGHT);
+    // Redis answers reads and refuses writes (out of memory with no eviction, a failover).
+    mockRedis.failSet = true;
+    scheduler.register(v.def);
+    scheduler.start();
+    await seconds(3);
+    expect(v.compute).toHaveBeenCalledTimes(1);
   });
 
   it('leaves a view another instance is computing to that instance, and takes its value', async () => {
@@ -338,5 +367,127 @@ describe('ViewScheduler', () => {
     scheduler.stop();
     await seconds(3600);
     expect(v.compute).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives a slot back when a computation passes its deadline, and still keeps its value if it ever ends', async () => {
+    const hung = view('hung', LIGHT, 'manual');
+    const other = view('other', LIGHT, 'manual');
+    const third = view('third', LIGHT);
+    scheduler.register(hung.def);
+    scheduler.register(other.def);
+    scheduler.start();
+    await seconds(2);
+    // Both slots are taken by computations that do not answer.
+    expect(scheduler.describe().filter((d) => d.running)).toHaveLength(2);
+    scheduler.register(third.def);
+    await seconds(170);
+    expect(third.compute).not.toHaveBeenCalled();
+
+    // Past three minutes the light views give their slots back: the third one runs.
+    await seconds(15);
+    expect(third.compute).toHaveBeenCalled();
+    expect(scheduler.describe().find((d) => d.view === 'hung')).toMatchObject({ running: false, lastError: 'ViewDeadlineError' });
+    expect(mockLog.warn).toHaveBeenCalledWith('View scheduler: computation failed', expect.objectContaining({ view: 'hung', errorType: 'ViewDeadlineError' }));
+    expect([...mockRedis.store.keys()].filter((k) => k === 'lock:hung:swr' || k === 'lock:other:swr')).toEqual([]);
+
+    // The first computation of 'hung' ends after all: its value is kept.
+    hung.pending[0].resolve({ late: true });
+    await seconds(0);
+    expect((await scheduler.read(hung.def)).data).toEqual({ late: true });
+    expect(new ViewDeadlineError().name).toBe('ViewDeadlineError');
+  });
+
+  it('pauses after a computation as long as it took: a view slower than its period does not run back to back', async () => {
+    const slow = view('slow', LIGHT, 'manual');
+    scheduler.register(slow.def);
+    scheduler.start();
+    await seconds(1);
+    expect(slow.compute).toHaveBeenCalledTimes(1);
+    // 90 s to compute a view due every 60 s (watched): already overdue when it ends.
+    await seconds(89);
+    scheduler.watch(slow.def);
+    slow.pending[0].resolve({ n: 1 });
+    await seconds(0);
+    // Not at once, and not within the next 59 s: the pause is its period at most.
+    await seconds(58);
+    expect(slow.compute).toHaveBeenCalledTimes(1);
+    await seconds(3);
+    expect(slow.compute).toHaveBeenCalledTimes(2);
+  });
+
+  it('never lets the views computed only while asked delay the ones kept warm', async () => {
+    const warm = view('warm', HEAVY, 'manual');
+    const variants = [view('variant-1', { activeS: 300, idleS: 0, heavy: true }, 'manual'), view('variant-2', { activeS: 300, idleS: 0, heavy: true }, 'manual')];
+    // All three have a value, all three are overdue, the variants far more than the warm one.
+    mockRedis.store.set('warm:swr', JSON.stringify({ at: T0 - 2_000_000, value: 'w' }));
+    for (const v of variants) mockRedis.store.set(`${v.def.key}:swr`, JSON.stringify({ at: T0 - 20_000_000, value: 'v' }));
+    scheduler.register(warm.def);
+    for (const v of variants) await scheduler.read(v.def);
+    scheduler.start();
+    await seconds(6);
+    expect(scheduler.describe().filter((d) => d.running).map((d) => d.view)).toEqual(['warm']);
+    warm.pending[0].resolve('w2');
+    await seconds(1);
+    // The warm view is up to date: now the variants, one heavy view at a time.
+    expect(scheduler.describe().filter((d) => d.running).map((d) => d.view)).toEqual(['variant-1']);
+  });
+
+  it('computes at once a view someone is waiting for with nothing to show, a heavy one running or not', async () => {
+    const running = view('heavy-running', HEAVY, 'manual');
+    scheduler.register(running.def);
+    scheduler.start();
+    await seconds(2);
+    expect(scheduler.describe().find((d) => d.view === 'heavy-running')).toMatchObject({ running: true });
+
+    const cold = view('heavy-cold', { activeS: 300, idleS: 0, heavy: true });
+    const first = scheduler.read(cold.def);
+    await seconds(1);
+    expect((await first).data).toEqual({ key: 'heavy-cold', n: 1 });
+  });
+
+  it('says at once that a view without a value just failed, instead of making each request wait', async () => {
+    const v = view('broken', LIGHT, 'manual');
+    scheduler.start();
+    const first = scheduler.read(v.def).then(
+      () => 'value',
+      (e: Error) => e
+    );
+    await seconds(2);
+    v.pending[0].reject(new Error('relation does not exist'));
+    await seconds(0);
+    expect(await first).toBeInstanceOf(ViewWarmingError);
+
+    // The retry is 15 s away: the next request is told so, without waiting 20 s for nothing.
+    const started = Date.now();
+    const refused = await scheduler.read(v.def).catch((e: Error) => e);
+    expect(refused).toBeInstanceOf(ViewWarmingError);
+    expect((refused as ViewWarmingError).retryAfterS).toBeGreaterThanOrEqual(10);
+    expect(Date.now() - started).toBeLessThan(100);
+  });
+
+  it('computes a view kept only while asked again before serving it, once it is older than its kept copy', async () => {
+    const v = view('variant', ON_DEMAND);
+    scheduler.start();
+    const first = scheduler.read(v.def);
+    await seconds(1);
+    expect((await first).data).toEqual({ key: 'variant', n: 1 });
+    // Left alone for 7 hours: the stored copy is gone (6 h), and so is the one held here.
+    await seconds(7 * 3600);
+    mockRedis.store.delete('variant:swr');
+    const calls = v.compute.mock.calls.length;
+    const later = scheduler.read(v.def);
+    await seconds(1);
+    const value = await later;
+    expect(v.compute.mock.calls.length).toBe(calls + 1);
+    expect(Date.now() - Date.parse(value.computedAt)).toBeLessThan(5_000);
+  });
+
+  it('computes a cheap view on the spot for the request that finds it without a value, started or not', async () => {
+    const status = view('status', { activeS: 15, idleS: 60, cheap: true });
+    // Not started: the first seconds of a process.
+    const results = await Promise.all([scheduler.read(status.def), scheduler.read(status.def), scheduler.read(status.def)]);
+    expect(results.map((r) => r.data)).toEqual([{ key: 'status', n: 1 }, { key: 'status', n: 1 }, { key: 'status', n: 1 }]);
+    expect(status.compute).toHaveBeenCalledTimes(1);
+    expect(stored('status')?.value).toEqual({ key: 'status', n: 1 });
   });
 });

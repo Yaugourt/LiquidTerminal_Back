@@ -37,8 +37,11 @@ const CADENCE = {
   week: { activeS: 300, idleS: 1800, heavy: true },
   /** Fees over 30 days. */
   month: { activeS: 1800, idleS: 3600, heavy: true },
-  /** The ingestion's own state: cheap, and looked at when something is wrong. */
-  status: { activeS: 15, idleS: 60 },
+  /**
+   * The ingestion's own state: looked at when something is wrong, so a request that finds no
+   * value (the first seconds of a process) computes it on the spot, it takes milliseconds.
+   */
+  status: { activeS: 15, idleS: 60, cheap: true },
 } as const satisfies Record<string, ViewCadence>;
 
 /**
@@ -869,11 +872,13 @@ export class ElysiumAnalyticsService {
   // ---------------------------------------------------------------------------
 
   /** Every resolved selector (top ~200 by frequency), cached 5 min. */
-  private methodNames(): Promise<Record<string, string>> {
+  private methodNames(db: typeof agg = agg): Promise<Record<string, string>> {
     return cacheService.getOrSet<Record<string, string>>(
       `${CACHE_PREFIX}:method-names:v1`,
       async () => {
-        const rows = await agg.$queryRaw<Array<{ method_id: string; signature: string }>>`
+        // On the caller's own pool: a profile, computed on request, must not queue behind the
+        // scheduled views on the aggregates' pool for a lookup it waits for.
+        const rows = await db.$queryRaw<Array<{ method_id: string; signature: string }>>`
           SELECT method_id, signature FROM elysium_method_sig WHERE signature IS NOT NULL`;
         return Object.fromEntries(rows.map((r) => [r.method_id, r.signature]));
       },
@@ -1265,7 +1270,7 @@ export class ElysiumAnalyticsService {
                  (to_addr IS NULL) AS to_null, count(*)::int AS txs
           FROM elysium_tx WHERE from_addr = ${a} AND NOT is_spam
           GROUP BY 1, 2 ORDER BY txs DESC LIMIT 6`,
-        this.methodNames(),
+        this.methodNames(prismaHistoricalRead),
       ]);
 
       const txs24h = act[0]?.txs24h ?? 0;
@@ -1358,7 +1363,7 @@ export class ElysiumAnalyticsService {
         prismaHistoricalRead.$queryRaw<Array<{ pool: string; version: string; other: string }>>`
           SELECT pool, version, CASE WHEN token0 = ${a} THEN token1 ELSE token0 END AS other
           FROM elysium_dex_pool WHERE token0 = ${a} OR token1 = ${a} ORDER BY created_at DESC LIMIT 10`,
-        this.methodNames(),
+        this.methodNames(prismaHistoricalRead),
         // Launchpad origin and holder spread, for tokens born on a launchpad we decode.
         prismaHistoricalRead.$queryRaw<
           Array<{ launchpad: string; kind: string; creator: string | null; created_at: number; graduated: boolean; holders: number | null; top10_pct: number | null; dev_pct: number | null }>

@@ -51,7 +51,7 @@ describe('Elysium scheduled views', () => {
     const day = { activeS: 60, idleS: 600 };
     const week = { activeS: 300, idleS: 1800, heavy: true };
     expect(Object.fromEntries(registered.map((d) => [d.key, d.cadence]))).toEqual({
-      'elysium:analytics:status:v2': { activeS: 15, idleS: 60 },
+      'elysium:analytics:status:v2': { activeS: 15, idleS: 60, cheap: true },
       'elysium:analytics:deployments:d14': day,
       'elysium:analytics:users:d14': day,
       'elysium:analytics:bridge:d14': day,
