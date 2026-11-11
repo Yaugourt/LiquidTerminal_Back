@@ -1,4 +1,4 @@
-import { prismaHistorical } from '../../core/prisma.historical.service';
+import { prismaHistorical, prismaHistoricalAggregate } from '../../core/prisma.historical.service';
 import { BRIDGE_TX_TYPES } from '../../services/elysium/elysium-ingest.util';
 import type { TxRow } from '../../services/elysium/elysium-ingest.util';
 
@@ -36,6 +36,17 @@ export interface DayCheckRow {
 
 type Tx = Parameters<Parameters<typeof prismaHistorical.$transaction>[0]>[0];
 
+/**
+ * A user transaction entering or leaving a sender's counts: `at` is its block time, `day` its UTC
+ * day. A row that changes is a leave of what it was and an enter of what it is.
+ */
+interface SenderEvent {
+  from_addr: string;
+  kind: 'enter' | 'leave';
+  day: string;
+  at: string;
+}
+
 function assertDay(day: string): void {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('Elysium check: invalid day');
 }
@@ -46,8 +57,8 @@ function assertDay(day: string): void {
  * no longer lists. Rows the provider lists and we lack go through the stream's own insert.
  *
  * The per-address tables (elysium_address_day, elysium_address) are maintained by that insert
- * from the rows it adds. A row that changes or leaves afterwards is not something an increment
- * can follow, so here they are recomputed, exactly, from elysium_tx, for the senders concerned.
+ * from the rows it adds. A row that changes or leaves afterwards moves them here, by exactly
+ * what it changed (adjustSenders).
  */
 export class ElysiumCheckRepository {
   private static instance: ElysiumCheckRepository;
@@ -70,7 +81,9 @@ export class ElysiumCheckRepository {
       day
     );
     if (built[0]) return { txs: Number(built[0].txs), spam: Number(built[0].spam), bridge: Number(built[0].bridge) };
-    const rows = await prismaHistorical.$queryRawUnsafe<Array<{ txs: number; spam: number; bridge: number }>>(
+    // A pass over a whole day of transactions: on the aggregates' pool, like every other one
+    // (its own connections and a time limit per statement), not on the writers'.
+    const rows = await prismaHistoricalAggregate.$queryRawUnsafe<Array<{ txs: number; spam: number; bridge: number }>>(
       `SELECT count(*) FILTER (WHERE NOT is_spam)::int AS txs,
               count(*) FILTER (WHERE is_spam)::int AS spam,
               count(*) FILTER (WHERE NOT is_spam AND tx_type IN (${BRIDGE_TYPES_SQL}))::int AS bridge
@@ -88,7 +101,7 @@ export class ElysiumCheckRepository {
    */
   public async slotCounts(day: string): Promise<DayCounts[]> {
     assertDay(day);
-    const rows = await prismaHistorical.$queryRawUnsafe<Array<{ slot: number; txs: number; spam: number; bridge: number }>>(
+    const rows = await prismaHistoricalAggregate.$queryRawUnsafe<Array<{ slot: number; txs: number; spam: number; bridge: number }>>(
       `SELECT floor(extract(epoch FROM (block_time - (($1::date)::timestamp AT TIME ZONE 'UTC'))) / 600)::int AS slot,
               count(*) FILTER (WHERE NOT is_spam)::int AS txs,
               count(*) FILTER (WHERE is_spam)::int AS spam,
@@ -233,10 +246,11 @@ export class ElysiumCheckRepository {
 
   /**
    * Brings the rows we hold in line with what the provider says of them now: the spam flag (the
-   * provider classifies after the fact), the outcome, and the gas of a row first read before its
-   * receipt was there (stored as 0). Returns how many rows changed. The senders of the rows
-   * whose spam flag changed are recounted, and the days concerned are marked for their rollups
-   * to be rebuilt.
+   * provider classifies after the fact), the outcome, the block a transaction sits in (a chain
+   * reorganisation puts the same transaction in another block, sometimes another day), and the
+   * gas of a row first read before its receipt was there (stored as 0). Returns how many rows
+   * changed. The counts of the senders concerned follow, and the days concerned are marked for
+   * their rollups to be rebuilt.
    *
    * The stream's insert leaves a row it already holds as it is (ON CONFLICT DO NOTHING): it had
    * no way to apply any of this.
@@ -246,37 +260,63 @@ export class ElysiumCheckRepository {
     return prismaHistorical.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${FIX_TIMEOUT_MS}`);
-        const changed = await tx.$queryRawUnsafe<Array<{ from_addr: string; day: string; spam_changed: boolean }>>(
+        const changed = await tx.$queryRawUnsafe<
+          Array<{ from_addr: string; old_day: string; new_day: string; old_at: string; new_at: string; was_user: boolean; is_user: boolean }>
+        >(
           `WITH src AS (
              SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(
-               tx_hash text, gas_used bigint, fee_wei numeric, success boolean, is_spam boolean)
+               tx_hash text, block_number bigint, block_time timestamptz, gas_used bigint, fee_wei numeric,
+               success boolean, is_spam boolean)
            ),
            old AS (
-             SELECT t.tx_hash, t.is_spam FROM elysium_tx t JOIN src s ON s.tx_hash = t.tx_hash
+             SELECT t.tx_hash, t.block_time, (${IS_USER_SQL}) AS was_user
+             FROM elysium_tx t JOIN src s ON s.tx_hash = t.tx_hash
              WHERE t.is_spam IS DISTINCT FROM s.is_spam OR t.success IS DISTINCT FROM s.success
+                OR t.block_number IS DISTINCT FROM s.block_number OR t.block_time IS DISTINCT FROM s.block_time
                 OR (t.gas_used = 0 AND s.gas_used > 0)
            ),
            upd AS (
              UPDATE elysium_tx t SET
                is_spam = s.is_spam,
                success = s.success,
+               block_number = s.block_number,
+               block_time = s.block_time,
                -- Never the other way round: a known gas figure is not replaced by a missing one.
                gas_used = CASE WHEN t.gas_used = 0 AND s.gas_used > 0 THEN s.gas_used ELSE t.gas_used END,
                fee_wei = CASE WHEN t.gas_used = 0 AND s.gas_used > 0 THEN s.fee_wei ELSE t.fee_wei END
              FROM src s
              WHERE t.tx_hash = s.tx_hash AND t.tx_hash IN (SELECT tx_hash FROM old)
-             RETURNING t.tx_hash, t.from_addr, (t.block_time AT TIME ZONE 'UTC')::date AS day
+             RETURNING t.tx_hash, t.from_addr, t.block_time, (${IS_USER_SQL}) AS is_user
            )
-           SELECT u.from_addr, u.day::text AS day, (o.is_spam IS DISTINCT FROM s.is_spam) AS spam_changed
-           FROM upd u JOIN old o ON o.tx_hash = u.tx_hash JOIN src s ON s.tx_hash = u.tx_hash`,
-          JSON.stringify(rows.map((r) => ({ tx_hash: r.tx_hash, gas_used: r.gas_used, fee_wei: r.fee_wei, success: r.success, is_spam: r.is_spam })))
+           SELECT u.from_addr,
+                  ((o.block_time AT TIME ZONE 'UTC')::date)::text AS old_day,
+                  ((u.block_time AT TIME ZONE 'UTC')::date)::text AS new_day,
+                  to_char(o.block_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS old_at,
+                  to_char(u.block_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS new_at,
+                  o.was_user, u.is_user
+           FROM upd u JOIN old o ON o.tx_hash = u.tx_hash`,
+          JSON.stringify(
+            rows.map((r) => ({
+              tx_hash: r.tx_hash,
+              block_number: r.block_number,
+              block_time: r.block_time,
+              gas_used: r.gas_used,
+              fee_wei: r.fee_wei,
+              success: r.success,
+              is_spam: r.is_spam,
+            }))
+          )
         );
         if (changed.length === 0) return 0;
-        await this.recountSenders(
-          tx,
-          changed.filter((c) => c.spam_changed).map((c) => ({ from_addr: c.from_addr, day: c.day.slice(0, 10) }))
-        );
-        await this.markDaysDirty(tx, [...new Set(changed.map((c) => c.day.slice(0, 10)))]);
+        const events: SenderEvent[] = [];
+        for (const c of changed) {
+          // Nothing of the sender's counts moves when the row is a user transaction of the same time before and after.
+          if (c.was_user === c.is_user && c.old_at === c.new_at) continue;
+          if (c.was_user) events.push({ from_addr: c.from_addr, kind: 'leave', day: c.old_day.slice(0, 10), at: c.old_at });
+          if (c.is_user) events.push({ from_addr: c.from_addr, kind: 'enter', day: c.new_day.slice(0, 10), at: c.new_at });
+        }
+        await this.adjustSenders(tx, events);
+        await this.markDaysDirty(tx, [...new Set(changed.flatMap((c) => [c.old_day.slice(0, 10), c.new_day.slice(0, 10)]))]);
         return changed.length;
       },
       { timeout: FIX_TIMEOUT_MS + 20_000, maxWait: 15_000 }
@@ -297,9 +337,20 @@ export class ElysiumCheckRepository {
     return prismaHistorical.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${FIX_TIMEOUT_MS}`);
-        const gone = await tx.$queryRawUnsafe<Array<{ from_addr: string; day: string }>>(
-          `DELETE FROM elysium_tx WHERE tx_hash = ANY($1::text[])
-           RETURNING from_addr, ((block_time AT TIME ZONE 'UTC')::date)::text AS day`,
+        // The launches whose trades or creation go with these transactions, locked first and in
+        // one order, as every writer of a launch's state does.
+        const touched = await tx.$queryRawUnsafe<Array<{ token: string }>>(
+          `SELECT token FROM elysium_launch
+           WHERE token IN (SELECT token FROM elysium_launch_trade WHERE tx_hash = ANY($1::text[]))
+              OR tx_hash = ANY($1::text[])
+           ORDER BY token FOR UPDATE`,
+          hashes
+        );
+        const gone = await tx.$queryRawUnsafe<Array<{ from_addr: string; day: string; at: string; was_user: boolean }>>(
+          `DELETE FROM elysium_tx t WHERE t.tx_hash = ANY($1::text[])
+           RETURNING t.from_addr, ((t.block_time AT TIME ZONE 'UTC')::date)::text AS day,
+                     to_char(t.block_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
+                     (${IS_USER_SQL}) AS was_user`,
           hashes
         );
         await tx.$executeRawUnsafe(`DELETE FROM elysium_tx_live WHERE tx_hash = ANY($1::text[])`, hashes);
@@ -320,15 +371,10 @@ export class ElysiumCheckRepository {
         }
         await tx.$executeRawUnsafe(`DELETE FROM elysium_dex_swap WHERE tx_hash = ANY($1::text[])`, hashes);
         await tx.$executeRawUnsafe(`DELETE FROM elysium_dex_pool WHERE tx_hash = ANY($1::text[])`, hashes);
-        const traded = await tx.$queryRawUnsafe<Array<{ token: string }>>(
-          `DELETE FROM elysium_launch_trade WHERE tx_hash = ANY($1::text[]) RETURNING token`,
-          hashes
-        );
+        await tx.$executeRawUnsafe(`DELETE FROM elysium_launch_trade WHERE tx_hash = ANY($1::text[])`, hashes);
         await tx.$executeRawUnsafe(`DELETE FROM elysium_launch WHERE tx_hash = ANY($1::text[])`, hashes);
-        const tokens = [...new Set(traded.map((t) => t.token))].sort();
+        const tokens = touched.map((t) => t.token);
         if (tokens.length > 0) {
-          // Locked in one order first, as every writer of the launches' state does.
-          await tx.$queryRawUnsafe(`SELECT token FROM elysium_launch WHERE token = ANY($1::text[]) ORDER BY token FOR UPDATE`, tokens);
           // The market state of these launches, exactly, from the trades that are left.
           await tx.$executeRawUnsafe(
             `WITH scope AS (SELECT unnest($1::text[]) AS token),
@@ -355,7 +401,10 @@ export class ElysiumCheckRepository {
             tokens
           );
         }
-        await this.recountSenders(tx, gone.map((g) => ({ from_addr: g.from_addr, day: g.day.slice(0, 10) })));
+        await this.adjustSenders(
+          tx,
+          gone.filter((g) => g.was_user).map((g) => ({ from_addr: g.from_addr, kind: 'leave' as const, day: g.day.slice(0, 10), at: g.at }))
+        );
         await this.markDaysDirty(tx, [...new Set(gone.map((g) => g.day.slice(0, 10)))]);
         return gone.length;
       },
@@ -364,54 +413,75 @@ export class ElysiumCheckRepository {
   }
 
   /**
-   * Recounts, from elysium_tx, the user transactions of each (sender, day) given and the first
-   * user transaction of each sender: what elysium_address_day and elysium_address hold. A sender
-   * left with no user transaction on a day, or at all, loses its row.
+   * Moves the per-sender tables by what changed: elysium_address_day by the user transactions
+   * that entered or left each (sender, day), elysium_address when a sender's first user
+   * transaction left (its next one is then looked up, once) or when one entered before it.
+   *
+   * By what changed, not by a recount: a sender reclassified as spam after the fact has its
+   * rows in every page of the day, and recounting its day and its history for each page was a
+   * scan of all its rows each time.
    */
-  private async recountSenders(tx: Tx, pairs: Array<{ from_addr: string; day: string }>): Promise<void> {
-    if (pairs.length === 0) return;
-    const json = JSON.stringify(pairs);
+  private async adjustSenders(tx: Tx, events: SenderEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    const json = JSON.stringify(events);
     await tx.$executeRawUnsafe(
-      `WITH p AS (SELECT DISTINCT from_addr, day FROM jsonb_to_recordset($1::jsonb) AS r(from_addr text, day date)),
-       c AS (
-         SELECT p.from_addr, p.day, (
-           SELECT count(*) FROM elysium_tx t
-           WHERE t.from_addr = p.from_addr
-             AND t.block_time >= ((p.day)::timestamp AT TIME ZONE 'UTC')
-             AND t.block_time < ((p.day + 1)::timestamp AT TIME ZONE 'UTC')
-             AND ${IS_USER_SQL}
-         )::int AS n
-         FROM p
-       ),
-       del AS (
-         DELETE FROM elysium_address_day d USING c WHERE d.address = c.from_addr AND d.day = c.day AND c.n = 0 RETURNING 1
+      `WITH ev AS (SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(from_addr text, kind text, day date, at timestamptz)),
+       d AS (
+         SELECT from_addr, day, sum(CASE kind WHEN 'enter' THEN 1 ELSE -1 END)::int AS delta
+         FROM ev GROUP BY from_addr, day
        ),
        up AS (
          INSERT INTO elysium_address_day (address, day, tx_count)
-         SELECT from_addr, day, n FROM c WHERE n > 0
-         ON CONFLICT (address, day) DO UPDATE SET tx_count = EXCLUDED.tx_count
+         SELECT from_addr, day, delta FROM d WHERE delta > 0
+         ON CONFLICT (address, day) DO UPDATE SET tx_count = elysium_address_day.tx_count + EXCLUDED.tx_count
+         RETURNING 1
+       ),
+       down AS (
+         UPDATE elysium_address_day a SET tx_count = a.tx_count + d.delta
+         FROM d WHERE d.delta < 0 AND a.address = d.from_addr AND a.day = d.day
          RETURNING 1
        )
-       SELECT (SELECT count(*) FROM del) + (SELECT count(*) FROM up)`,
+       SELECT (SELECT count(*) FROM up) + (SELECT count(*) FROM down)`,
       json
     );
+    // A sender left with no user transaction on a day has no row for it.
     await tx.$executeRawUnsafe(
-      `WITH a AS (SELECT DISTINCT from_addr FROM jsonb_to_recordset($1::jsonb) AS r(from_addr text)),
+      `DELETE FROM elysium_address_day a
+       USING (SELECT DISTINCT from_addr, day FROM jsonb_to_recordset($1::jsonb) AS r(from_addr text, day date)) e
+       WHERE a.address = e.from_addr AND a.day = e.day AND a.tx_count <= 0`,
+      json
+    );
+    // The senders whose first user transaction is one of those that left: their next one, from
+    // the table (the rows of this transaction are already changed), or no row at all.
+    await tx.$executeRawUnsafe(
+      `WITH ev AS (SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(from_addr text, kind text, at timestamptz)),
+       lost AS (
+         SELECT DISTINCT e.from_addr FROM ev e JOIN elysium_address a ON a.address = e.from_addr
+         WHERE e.kind = 'leave' AND e.at <= a.first_seen
+       ),
        f AS (
-         SELECT a.from_addr, (
-           SELECT min(t.block_time) FROM elysium_tx t WHERE t.from_addr = a.from_addr AND ${IS_USER_SQL}
+         SELECT l.from_addr, (
+           SELECT min(t.block_time) FROM elysium_tx t WHERE t.from_addr = l.from_addr AND ${IS_USER_SQL}
          ) AS first
-         FROM a
+         FROM lost l
        ),
        del AS (DELETE FROM elysium_address x USING f WHERE x.address = f.from_addr AND f.first IS NULL RETURNING 1),
-       up AS (
-         INSERT INTO elysium_address (address, first_seen, first_day)
-         SELECT from_addr, first, (first AT TIME ZONE 'UTC')::date FROM f WHERE first IS NOT NULL
-         ON CONFLICT (address) DO UPDATE SET first_seen = EXCLUDED.first_seen, first_day = EXCLUDED.first_day
-           WHERE elysium_address.first_seen IS DISTINCT FROM EXCLUDED.first_seen
+       upd AS (
+         UPDATE elysium_address x SET first_seen = f.first, first_day = (f.first AT TIME ZONE 'UTC')::date
+         FROM f WHERE x.address = f.from_addr AND f.first IS NOT NULL AND x.first_seen IS DISTINCT FROM f.first
          RETURNING 1
        )
-       SELECT (SELECT count(*) FROM del) + (SELECT count(*) FROM up)`,
+       SELECT (SELECT count(*) FROM del) + (SELECT count(*) FROM upd)`,
+      json
+    );
+    // The senders with a user transaction that entered before the first one they had, or who had none.
+    await tx.$executeRawUnsafe(
+      `INSERT INTO elysium_address (address, first_seen, first_day)
+       SELECT from_addr, min(at), (min(at) AT TIME ZONE 'UTC')::date
+       FROM jsonb_to_recordset($1::jsonb) AS r(from_addr text, kind text, at timestamptz)
+       WHERE kind = 'enter' GROUP BY from_addr
+       ON CONFLICT (address) DO UPDATE SET first_seen = EXCLUDED.first_seen, first_day = EXCLUDED.first_day
+         WHERE EXCLUDED.first_seen < elysium_address.first_seen`,
       json
     );
   }
