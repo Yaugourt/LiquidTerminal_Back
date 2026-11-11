@@ -2,8 +2,8 @@
  * ElysiumLaunchpadMarketService with the database replaced by a small in-memory
  * one (the SQL itself is checked against a real Postgres by
  * ~/lt-perf-tests/elysium-audit-2026-11-10/step2/equiv.ts): what a page is
- * assembled from, in which order, and how the snapshot, the page cache and the
- * search slots behave.
+ * assembled from, in which order, how the list is walked by offset, and how
+ * the snapshot, the bounded caches and the per-client shares behave.
  */
 jest.mock('../../../src/core/prisma.historical.service', () => ({ prismaHistorical: {} }));
 jest.mock('../../../src/core/redis.service', () => ({ redisService: { get: jest.fn().mockResolvedValue(null) } }));
@@ -12,6 +12,7 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({ logDeduplicator: mockLo
 
 import {
   ElysiumLaunchpadMarketService,
+  LaunchpadBusyError,
   LaunchpadSearchBusyError,
   launchTokenSorter,
   toLaunchTokenView,
@@ -131,7 +132,13 @@ type Internals = {
   timed: ReturnType<typeof fakeDb>['timed'];
   readHypeUsd: () => Promise<number | null>;
   snapshot: { at: number } | null;
+  orders: Map<string, unknown>;
+  pages: Map<string, unknown>;
+  pageGate: { stats: { running: number; waiting: number } };
+  searchGate: { stats: { running: number; waiting: number } };
 };
+
+const turn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 function service(launches: Launch[]) {
   (ElysiumLaunchpadMarketService as unknown as { instance?: unknown }).instance = undefined;
@@ -329,9 +336,9 @@ describe('ElysiumLaunchpadMarketService', () => {
     const reads = calls.length;
     await Promise.all([svc.getPage({ sort: 'new', limit: 50 }), svc.getPage({ sort: 'new', limit: 50 })]);
     expect(calls.length).toBe(reads);
-    // Another limit is another page.
-    await svc.getPage({ sort: 'new', limit: 100 });
-    expect(calls.length).toBeGreaterThan(reads);
+    // Another size is the same page, cut shorter or longer: no read.
+    expect((await svc.getPage({ sort: 'new', limit: 100 })).tokens).toHaveLength(8);
+    expect(calls.length).toBe(reads);
 
     const working = internals.timed;
     internals.timed = jest.fn().mockRejectedValue(new Error('boom'));
@@ -340,38 +347,192 @@ describe('ElysiumLaunchpadMarketService', () => {
     expect(ids((await svc.getPage({ sort: 'mcap', limit: 50 })).tokens)).toEqual([4, 3, 1, 2, 6, 5, 7, 8]);
   });
 
-  it('runs three searches at a time, queues thirty, refuses the rest', async () => {
-    const { svc, internals } = service(market());
-    await svc.getPage({ sort: 'hot', limit: 50 });
+  // 450 tokens over two launchpads; 1..30 traded over 24h, 31..300 priced but quiet, the rest never traded.
+  const large = (): Launch[] =>
+    Array.from({ length: 450 }, (_, i) => {
+      const n = i + 1;
+      const pad = n % 3 === 0 ? 'Signal' : 'CorePad';
+      if (n <= 30) return launch(n, { launchpad: pad, price: 1 + (n % 7), day: day(100 - n, n % 5, n % 4 === 0 ? null : 1 + (n % 3)) });
+      if (n <= 300) return launch(n, { launchpad: pad, price: (n * 37) % 11, quote: n % 10 === 0 ? USDC : HYPE });
+      return launch(n, { launchpad: pad });
+    });
+
+  it.each(['hot', 'new', 'gainers', 'mcap'] as const)('%s: the pages are the order cut in 200s, each at most 200 rows', async (sort) => {
+    // The whole order, as one list: what the page of 5,000 rows used to return.
+    const whole = service(large()).svc as unknown as {
+      getSnapshot: () => Promise<unknown>;
+      orderFor: (snap: unknown, key: string, query: object, need: number) => Promise<{ tokens: string[] }>;
+    };
+    const reference = await whole.orderFor(await whole.getSnapshot(), 'ref', { sort, limit: 200 }, 5000);
+    expect(reference.tokens).toHaveLength(450);
+    expect(new Set(reference.tokens).size).toBe(450);
+
+    const { svc } = service(large());
+    const first = await svc.getPage({ sort, limit: 50 });
+    const second = await svc.getPage({ sort, limit: 200, offset: 200 });
+    const third = await svc.getPage({ sort, limit: 200, offset: 400 });
+    const beyond = await svc.getPage({ sort, limit: 200, offset: 600 });
+    const head = await svc.getPage({ sort, limit: 200 });
+    expect(first.tokens.map((t) => t.address)).toEqual(reference.tokens.slice(0, 50));
+    expect(head.tokens.map((t) => t.address)).toEqual(reference.tokens.slice(0, 200));
+    expect(second.tokens.map((t) => t.address)).toEqual(reference.tokens.slice(200, 400));
+    expect(third.tokens.map((t) => t.address)).toEqual(reference.tokens.slice(400, 450));
+    expect(beyond.tokens).toEqual([]);
+    for (const page of [first, second, third, beyond]) expect(page.total).toBe(450);
+    // More than a page is never returned, whatever is asked.
+    expect((await svc.getPage({ sort, limit: 5000 })).tokens).toHaveLength(200);
+    // An offset inside a page is read as the page it falls in.
+    expect((await svc.getPage({ sort, limit: 50, offset: 250 })).tokens.map((t) => t.address)).toEqual(reference.tokens.slice(200, 250));
+  });
+
+  it('a launchpad and a search are walked the same way, the search read once for all its pages', async () => {
+    const { svc, calls } = service(large());
+    const pad = await svc.getPage({ sort: 'new', pad: 'CorePad', limit: 200, offset: 200 });
+    expect(pad.total).toBe(300);
+    expect(ids(pad.tokens)).toEqual(Array.from({ length: 450 }, (_, i) => i + 1).filter((n) => n % 3 !== 0).slice(200, 300));
+
+    // Every symbol starts with "S": 450 matches, three pages.
+    const pages = [
+      await svc.getPage({ sort: 'new', q: 'S', limit: 200 }),
+      await svc.getPage({ sort: 'new', q: 'S', limit: 200, offset: 200 }),
+      await svc.getPage({ sort: 'new', q: 'S', limit: 200, offset: 400 }),
+    ];
+    expect(pages.flatMap((p) => ids(p.tokens))).toEqual(Array.from({ length: 450 }, (_, i) => i + 1));
+    expect(pages.map((p) => p.total)).toEqual([450, 450, 450]);
+    expect(calls.filter((c) => c === 'search')).toHaveLength(1);
+  });
+
+  it('reads an order further only when a deeper page asks, and not past its end', async () => {
+    const { svc, calls } = service(large());
+    await svc.getPage({ sort: 'new', limit: 50 });
+    const orderReads = (): number => calls.filter((c) => c === 'newest').length;
+    // The snapshot's "just launched" list reads the newest too: count from here.
+    const base = orderReads();
+    await svc.getPage({ sort: 'new', limit: 200 });
+    expect(orderReads()).toBe(base);
+    await svc.getPage({ sort: 'new', limit: 200, offset: 200 });
+    expect(orderReads()).toBe(base + 1);
+    // That read went 1,000 tokens far and found the end at 450: the last page needs no other.
+    await svc.getPage({ sort: 'new', limit: 200, offset: 400 });
+    await svc.getPage({ sort: 'new', limit: 200, offset: 1000 });
+    expect(orderReads()).toBe(base + 1);
+  });
+
+  it('keeps a bounded number of orders and pages, whatever is asked', async () => {
+    const { svc, internals } = service(large());
+    const pads = [undefined, 'CorePad', 'Signal'];
+    const sorts = ['hot', 'new', 'gainers', 'mcap'] as const;
+    for (let i = 0; i < 40; i++) {
+      for (const pad of pads) {
+        for (const sort of sorts) await svc.getPage({ sort, pad, limit: 200, offset: (i % 3) * 200, q: i < 2 ? undefined : `s${i}` });
+      }
+    }
+    expect(internals.orders.size).toBeLessThanOrEqual(48);
+    expect(internals.pages.size).toBeLessThanOrEqual(96);
+    // The page asked last is still there; the first ones left.
+    expect(internals.pages.size).toBe(96);
+  });
+
+  /** Holds every statement matching `hold` until released; counts how many run at once. */
+  function blocking(internals: Internals, hold: (sql: string) => boolean) {
     const working = internals.timed;
-    const release: Array<() => void> = [];
-    let running = 0;
-    let peak = 0;
+    const state = { running: 0, peak: 0, release: [] as Array<() => void> };
     internals.timed = (async (ms: number, query: { sql: string; values: unknown[] }) => {
-      if (!query.sql.includes('ILIKE')) return working(ms, query);
-      running += 1;
-      peak = Math.max(peak, running);
-      await new Promise<void>((resolve) => release.push(resolve));
-      running -= 1;
+      if (!hold(query.sql)) return working(ms, query);
+      state.running += 1;
+      state.peak = Math.max(state.peak, state.running);
+      await new Promise<void>((resolve) => state.release.push(resolve));
+      state.running -= 1;
       return working(ms, query);
     }) as Internals['timed'];
+    const drain = async (): Promise<void> => {
+      while (state.release.length > 0 || state.running > 0) {
+        state.release.shift()?.();
+        await turn();
+      }
+    };
+    return { state, drain };
+  }
 
-    const pending = Array.from({ length: 33 }, (_, i) => svc.getPage({ sort: 'hot', limit: 50, q: `q${i}` }));
-    await new Promise((r) => setImmediate(r));
-    expect(running).toBe(3);
-    await expect(svc.getPage({ sort: 'hot', limit: 50, q: 'one-too-many' })).rejects.toBeInstanceOf(LaunchpadSearchBusyError);
+  it('runs three searches at a time over all clients, queues thirty, refuses the rest', async () => {
+    const { svc, internals } = service(market());
+    await svc.getPage({ sort: 'hot', limit: 50 });
+    const { state, drain } = blocking(internals, (sql) => sql.includes('ILIKE'));
+
+    const pending = Array.from({ length: 33 }, (_, i) => svc.getPage({ sort: 'hot', limit: 50, q: `q${i}` }, `client-${i}`));
+    await turn();
+    expect(state.running).toBe(3);
+    await expect(svc.getPage({ sort: 'hot', limit: 50, q: 'one-too-many' }, 'client-late')).rejects.toBeInstanceOf(LaunchpadSearchBusyError);
 
     // Each finished search hands its slot to the next in line.
-    while (release.length > 0 || running > 0) {
-      release.shift()?.();
-      await new Promise((r) => setImmediate(r));
-    }
+    await drain();
     await Promise.all(pending);
-    expect(peak).toBe(3);
+    expect(state.peak).toBe(3);
     // The queue has drained: a new search runs.
-    const last = svc.getPage({ sort: 'hot', limit: 50, q: 's1' });
-    await new Promise((r) => setImmediate(r));
-    release.shift()?.();
+    const last = svc.getPage({ sort: 'hot', limit: 50, q: 's1' }, 'client-late');
+    await turn();
+    state.release.shift()?.();
     expect(ids((await last).tokens)).toEqual([1]);
+  });
+
+  it('runs one search at a time per client: a newer text replaces the one waiting, the others are not delayed', async () => {
+    const { svc, internals } = service(market());
+    await svc.getPage({ sort: 'hot', limit: 50 });
+    const { state, drain } = blocking(internals, (sql) => sql.includes('ILIKE'));
+
+    // One client types: its first text runs, the second waits, the third takes the second's place.
+    const typed = ['pe', 'pep', 'pepe'].map((q) => svc.getPage({ sort: 'hot', limit: 50, q }, 'typing'));
+    const outcomes = typed.map((p) => p.then(() => 'ok', (e: Error) => e.name));
+    await turn();
+    expect(state.running).toBe(1);
+    await expect(typed[1]).rejects.toBeInstanceOf(LaunchpadSearchBusyError);
+
+    // Twenty more texts from the same client change nothing for anyone else.
+    const flood = Array.from({ length: 20 }, (_, i) => svc.getPage({ sort: 'hot', limit: 50, q: `f${i}` }, 'typing').then(() => 'ok', (e: Error) => e.name));
+    const other = svc.getPage({ sort: 'hot', limit: 50, q: 's2' }, 'someone-else');
+    await turn();
+    // 'typing' still runs one; 'someone-else' got a slot at once.
+    expect(state.running).toBe(2);
+
+    await drain();
+    expect(ids((await other).tokens)).toEqual([2]);
+    expect(await Promise.all(outcomes)).toEqual(['ok', 'LaunchpadSearchBusyError', 'LaunchpadSearchBusyError']);
+    // Of the flood, only the last text was computed.
+    expect((await Promise.all(flood)).filter((o) => o === 'ok')).toHaveLength(1);
+    expect(state.peak).toBe(2);
+  });
+
+  it('gives each client a share of the page reads: a flood of new pages only delays itself', async () => {
+    const { svc, internals } = service(large());
+    await svc.getPage({ sort: 'hot', limit: 50 });
+    // Pages nobody has asked for yet: each needs a read of the launches.
+    const { state, drain } = blocking(internals, (sql) => sql.includes('ORDER BY l.created_at DESC') || sql.includes('l.token = ANY'));
+    // Fourteen pages nobody has asked for, all different.
+    const wanted = (['new', 'hot', 'gainers'] as const)
+      .flatMap((sort) => [undefined, 'CorePad', 'Signal'].flatMap((pad) => [0, 200].map((offset) => ({ sort, pad, offset, limit: 200 }))))
+      .slice(0, 14);
+    const flood = wanted.map((query) => svc.getPage(query, 'flood').then(() => 'ok', (e: Error) => e.name));
+    await turn();
+    // Two reads at once for this client and eight waiting, however many pages it asks for.
+    expect(internals.pageGate.stats).toMatchObject({ running: 2, waiting: 8 });
+
+    // A visitor asks for a page the flood has waiting in its own queue: the visitor's
+    // share starts the read, it does not wait behind the flood.
+    const other = svc.getPage({ sort: 'new', limit: 200 }, 'visitor');
+    await turn();
+    expect(internals.pageGate.stats).toMatchObject({ running: 3, waiting: 8 });
+
+    await drain();
+    expect((await other).tokens).toHaveLength(200);
+    const results = await Promise.all(flood);
+    // One of the fourteen was already built (the first hot page, above): it took no slot. Of the
+    // other thirteen, two ran and eight waited; three were refused. Nobody else was.
+    expect(results.filter((r) => r === 'ok')).toHaveLength(11);
+    expect(results.filter((r) => r === 'LaunchpadBusyError')).toHaveLength(3);
+    // Never more statements at once than the gate has slots.
+    expect(state.peak).toBeLessThanOrEqual(3);
+    expect(internals.pageGate.stats).toMatchObject({ running: 0, waiting: 0 });
+    await expect(svc.getPage({ sort: 'new', limit: 200 }, 'flood')).resolves.toMatchObject({ total: 450 });
+    expect(new LaunchpadBusyError().retryAfterS).toBe(1);
   });
 });

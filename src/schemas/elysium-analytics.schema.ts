@@ -58,32 +58,51 @@ export const elysiumAnalyticsFeesSchema = z.object({
 export const LAUNCHPAD_SORTS = ['hot', 'new', 'gainers', 'mcap'] as const;
 export type LaunchpadSort = (typeof LAUNCHPAD_SORTS)[number];
 export const LAUNCHPAD_NAMES = ['Chainzy', 'CorePad', 'Signal', 'Neuriio', 'aka.fun', 'BunnyPad', 'Kiln'] as const satisfies readonly Launchpad[];
-/** Rows a request asks for: a multiple of the step, up to the ceiling. */
+/** Rows a request asks for: a multiple of the step, one page at most. */
 export const LAUNCHPAD_PAGE_STEP = 50;
+/** Rows of one page: the most a request gets. */
+export const LAUNCHPAD_PAGE_MAX = 200;
+/** How far into an order the pages go. */
 export const LAUNCHPAD_MAX_ROWS = 5_000;
+/** A search starts at this many characters: a single one matches almost every token. */
+export const LAUNCHPAD_SEARCH_MIN_CHARS = 2;
 
 /**
- * GET /elysium/analytics/launchpads?pad=&sort=hot|new|gainers|mcap&q=&limit=
- * The first `limit` tokens of an order: 50 by default, in steps of 50 up to 5,000
- * (the page asks for 50 more each time). `q` matches symbol, name or address.
+ * GET /elysium/analytics/launchpads?pad=&sort=hot|new|gainers|mcap&q=&limit=&offset=
+ * `limit` tokens of an order from `offset`: 50 by default, in steps of 50, 200 at most per
+ * request; `offset` is a multiple of 200, up to 5,000 rows into the order. The page shows 50
+ * more each time and asks for the pages it shows. `q` matches symbol, name or address.
+ *
+ * Tolerated from pages loaded before the list was paged this way: a `limit` above 200 (they
+ * asked for up to 5,000 rows in one call) is served as 200, and a `q` of one character as no
+ * search, rather than refused.
  */
 export const elysiumAnalyticsLaunchpadsSchema = z.object({
-  query: z.object({
-    pad: z.enum(LAUNCHPAD_NAMES).optional(),
-    sort: z.enum(LAUNCHPAD_SORTS).default('hot'),
-    q: z
-      .string()
-      .trim()
-      .max(64)
-      .optional()
-      .transform((v) => v || undefined),
-    limit: z.coerce
-      .number()
-      .int()
-      .min(LAUNCHPAD_PAGE_STEP)
-      .max(LAUNCHPAD_MAX_ROWS)
-      .refine((n) => n % LAUNCHPAD_PAGE_STEP === 0, { message: `limit must be a multiple of ${LAUNCHPAD_PAGE_STEP}` })
-      .default(LAUNCHPAD_PAGE_STEP),
-  }),
+  query: z
+    .object({
+      pad: z.enum(LAUNCHPAD_NAMES).optional(),
+      sort: z.enum(LAUNCHPAD_SORTS).default('hot'),
+      q: z
+        .string()
+        .trim()
+        .max(64)
+        .optional()
+        .transform((v) => (v && v.length >= LAUNCHPAD_SEARCH_MIN_CHARS ? v : undefined)),
+      limit: z.coerce
+        .number()
+        .int()
+        .min(LAUNCHPAD_PAGE_STEP)
+        .max(LAUNCHPAD_MAX_ROWS)
+        .refine((n) => n % LAUNCHPAD_PAGE_STEP === 0, { message: `limit must be a multiple of ${LAUNCHPAD_PAGE_STEP}` })
+        .default(LAUNCHPAD_PAGE_STEP)
+        .transform((n) => Math.min(n, LAUNCHPAD_PAGE_MAX)),
+      offset: z.coerce
+        .number()
+        .int()
+        .min(0)
+        .max(LAUNCHPAD_MAX_ROWS - LAUNCHPAD_PAGE_MAX)
+        .refine((n) => n % LAUNCHPAD_PAGE_MAX === 0, { message: `offset must be a multiple of ${LAUNCHPAD_PAGE_MAX}` })
+        .default(0),
+    }),
   params: noParams,
 });

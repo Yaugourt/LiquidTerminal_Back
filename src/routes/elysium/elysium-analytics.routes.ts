@@ -10,10 +10,16 @@ import {
   elysiumAnalyticsFeesSchema,
   elysiumAnalyticsLaunchpadsSchema,
   elysiumAnalyticsStatusSchema,
+  LAUNCHPAD_SEARCH_MIN_CHARS,
 } from '../../schemas/elysium-analytics.schema';
 import { ElysiumAnalyticsService } from '../../services/elysium/elysium-analytics.service';
 import { ElysiumEcosystemService } from '../../services/elysium/elysium-ecosystem.service';
-import { ElysiumLaunchpadMarketService, LaunchpadSearchBusyError } from '../../services/elysium/elysium-launchpad-market.service';
+import {
+  ElysiumLaunchpadMarketService,
+  LaunchpadBusyError,
+  LaunchpadSearchBusyError,
+} from '../../services/elysium/elysium-launchpad-market.service';
+import { rateLimitKeyForIp } from '../../utils/client-ip';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { sendUpstreamError } from '../../utils/upstream-error-response';
 
@@ -33,13 +39,14 @@ function isDatabaseError(error: unknown): boolean {
 /**
  * Registers a read-only analytics route. The handler re-parses the query to
  * get coerced values and defaults (validateGetRequest does not mutate
- * req.query). Logs carry a fixed message + fixed code only.
+ * req.query). Logs carry a fixed message + fixed code only. The handler also
+ * gets the client's key (IP, or /64), for the reads that keep a share per client.
  */
 function register<S extends QuerySchema>(
   path: string,
   schema: S,
   code: string,
-  handler: (query: z.infer<S['shape']['query']>, params: z.infer<S['shape']['params']>) => Promise<unknown>,
+  handler: (query: z.infer<S['shape']['query']>, params: z.infer<S['shape']['params']>, client: string) => Promise<unknown>,
   extraLimiter?: RequestHandler
 ): void {
   const querySchema = schema.shape.query;
@@ -53,12 +60,17 @@ function register<S extends QuerySchema>(
       try {
         const query = querySchema.parse(req.query) as z.infer<S['shape']['query']>;
         const params = paramsSchema.parse(req.params) as z.infer<S['shape']['params']>;
-        const data = await handler(query, params);
+        const data = await handler(query, params, rateLimitKeyForIp(req.ip ?? ''));
         res.json({ success: true, data });
       } catch (error) {
-        if (error instanceof LaunchpadSearchBusyError) {
+        if (error instanceof LaunchpadBusyError) {
+          const search = error instanceof LaunchpadSearchBusyError;
           res.setHeader('Retry-After', String(error.retryAfterS));
-          res.status(429).json({ success: false, error: 'Too many searches, retry shortly', code });
+          res.status(429).json({
+            success: false,
+            error: search ? 'Too many searches, retry shortly' : 'Too many requests for the token list, retry shortly',
+            code,
+          });
           return;
         }
         const db = isDatabaseError(error);
@@ -108,15 +120,18 @@ register('/ecosystem', elysiumAnalyticsStatusSchema, 'ELYSIUM_ANALYTICS_ECOSYSTE
   ecosystem.getProjects()
 );
 
-// A search is a scan of the launches for every new text: its own, tighter per-IP limit.
+// A search is a read of the launches for every new text: its own, tighter per-IP limit.
+// (A text under the minimum length is not searched: see the schema.)
 const searchLimiter: RequestHandler = (req, res, next) =>
-  typeof req.query.q === 'string' && req.query.q.trim() !== '' ? elysiumSearchRateLimiter(req, res, next) : next();
+  typeof req.query.q === 'string' && req.query.q.trim().length >= LAUNCHPAD_SEARCH_MIN_CHARS
+    ? elysiumSearchRateLimiter(req, res, next)
+    : next();
 
 register(
   '/launchpads',
   elysiumAnalyticsLaunchpadsSchema,
   'ELYSIUM_ANALYTICS_LAUNCHPADS_ERROR',
-  (q) => launchpadMarket.getPage(q),
+  (q, _p, client) => launchpadMarket.getPage(q, client),
   searchLimiter
 );
 

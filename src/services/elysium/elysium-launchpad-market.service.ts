@@ -1,7 +1,8 @@
 import { Prisma } from '../../../prisma-historical/generated/client';
 import { prismaHistoricalRead } from '../../core/prisma.historical.service';
 import { redisService } from '../../core/redis.service';
-import type { LaunchpadSort } from '../../schemas/elysium-analytics.schema';
+import { LAUNCHPAD_MAX_ROWS, LAUNCHPAD_PAGE_MAX, type LaunchpadSort } from '../../schemas/elysium-analytics.schema';
+import { FairGate, GateBusyError } from '../../utils/fairGate';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { CURVE_SALE_SUPPLY, HYPE_QUOTES, LAUNCH_TOTAL_SUPPLY, Launchpad, quoteDecimals, USD_QUOTES } from './elysium-launchpad.util';
 
@@ -14,15 +15,43 @@ const SNAPSHOT_FRESH_MS = 60_000;
 const TOP_N = 5;
 /** A $1 trade moves a near-empty curve by four digits: gainers need real volume to count. */
 const GAINER_MIN_VOLUME = 100;
+/** Rows of one page of an order; a request gets the first `limit` of them. */
+const PAGE_ROWS = LAUNCHPAD_PAGE_MAX;
+/** How far into an order the pages go. */
+const ORDER_MAX_ROWS = LAUNCHPAD_MAX_ROWS;
 /** Matches a search sorts; past it the newest matches are kept and the total says so. */
-const SEARCH_MAX_MATCHES = 5_000;
-/** Searches computed at once, and how many may wait for a turn. */
-const SEARCH_CONCURRENCY = 3;
-const SEARCH_MAX_WAITING = 30;
+const SEARCH_MAX_MATCHES = ORDER_MAX_ROWS;
+/** How far an order is read: a page's worth for its first page, this far for the next few, then to the end. */
+const ORDER_MID_ROWS = 1_000;
 const PAGE_TIMEOUT_MS = 8_000;
 const SNAPSHOT_TIMEOUT_MS = 30_000;
-/** Pages kept for the snapshot they were built from. */
-const PAGE_CACHE_MAX = 300;
+/**
+ * What is kept for the snapshot it was built from, both dropped when the
+ * snapshot changes and both bounded: the orders are lists of token addresses
+ * (at most ORDER_MAX_ROWS each, about 0.4 MB), the pages hold PAGE_ROWS rows
+ * each (about 0.1 MB). 48 orders and 96 pages are at most about 30 MB; the
+ * least recently used leaves first.
+ */
+const ORDER_CACHE_MAX = 48;
+const PAGE_CACHE_MAX = 96;
+/**
+ * Reads of the launches computed at once, out of the 10 connections these
+ * reads share with the analytics (each read holds one connection at a time).
+ * Every ceiling has a share per client (its IP, or /64): without one, the
+ * client that asks fastest takes every slot and every place in the queue.
+ * - pages: 3 at once, 2 per client, 8 waiting per client;
+ * - searches: 3 at once, 1 per client. A client's newer search takes the place
+ *   of its waiting one (the page only shows the last text typed).
+ */
+const PAGE_GATE = { max: 3, maxPerClient: 2, maxWaiting: 64, maxWaitingPerClient: 8, maxWaitMs: 10_000 } as const;
+const SEARCH_GATE = {
+  max: 3,
+  maxPerClient: 1,
+  maxWaiting: 30,
+  maxWaitingPerClient: 1,
+  whenClientQueueFull: 'replace-oldest',
+  maxWaitMs: 10_000,
+} as const;
 /** After a failed snapshot refresh, the next attempt waits this long (the last snapshot is served meanwhile). */
 const SNAPSHOT_RETRY_MS = 15_000;
 
@@ -64,7 +93,7 @@ export interface ElysiumLaunchpadSummary {
 }
 
 export interface ElysiumLaunchpadPage {
-  /** The first `limit` tokens of the requested order. */
+  /** `limit` tokens of the requested order, from its `offset`. */
   tokens: ElysiumLaunchTokenView[];
   /** Tokens the filters match in all. */
   total: number;
@@ -80,15 +109,82 @@ export interface ElysiumLaunchpadQuery {
   pad?: string;
   sort: LaunchpadSort;
   q?: string;
+  /** Rows wanted, at most a page (more is served as one page). */
   limit: number;
+  /** Where the page starts in the order: a multiple of the page size, 0 when absent. */
+  offset?: number;
 }
 
-/** Too many searches are already waiting for a turn. */
-export class LaunchpadSearchBusyError extends Error {
+/** The launch reads have no room for this request right now: its client's share, or everyone's, is taken. */
+export class LaunchpadBusyError extends Error {
   public readonly retryAfterS = 1;
+  constructor(message = 'ELYSIUM_LAUNCHPAD_BUSY') {
+    super(message);
+    this.name = 'LaunchpadBusyError';
+  }
+}
+
+/** The same for a search: this client already has one running and one waiting, or too many wait in all. */
+export class LaunchpadSearchBusyError extends LaunchpadBusyError {
   constructor() {
     super('ELYSIUM_LAUNCHPAD_SEARCH_BUSY');
     this.name = 'LaunchpadSearchBusyError';
+  }
+}
+
+/** The tokens of an order, in order, as far as it was read. */
+interface LaunchOrder {
+  tokens: string[];
+  /** Tokens the filters match in all. */
+  total: number;
+  totalCapped: boolean;
+}
+
+/** An order being read, or read, up to `rows` tokens. */
+interface OrderEntry {
+  rows: number;
+  order: Promise<LaunchOrder>;
+}
+
+/** One page of an order, with its rows read. */
+interface LaunchPage {
+  tokens: ElysiumLaunchTokenView[];
+  total: number;
+  totalCapped: boolean;
+}
+
+/**
+ * A read that everyone asking for it shares, started by the first of them that
+ * gets a slot of its own: a caller never waits in another client's queue for
+ * it. A failed read is forgotten (`onFailure`) and can be started again.
+ */
+class SharedRead<T> {
+  private running: Promise<T> | null = null;
+  private result: { value: T } | null = null;
+
+  constructor(
+    private readonly read: () => Promise<T>,
+    private readonly onFailure: () => void
+  ) {}
+
+  /** The value once it has been read. */
+  public get settled(): { value: T } | null {
+    return this.result;
+  }
+
+  public run(): Promise<T> {
+    this.running ??= this.read().then(
+      (value) => {
+        this.result = { value };
+        return value;
+      },
+      (error: unknown) => {
+        this.running = null;
+        this.onFailure();
+        throw error;
+      }
+    );
+    return this.running;
   }
 }
 
@@ -231,8 +327,11 @@ const LAUNCH_JOINS = Prisma.sql`
  * - the rest of what a row shows, and what the page sorts on, is kept on the
  *   launch row by the ingestion (last price, curve sold), so the other tokens
  *   come out of elysium_launch through its indexes, already in order.
- * A page is the head of an order: the active tokens that belong first, then as
- * many of the others as it takes. A search sorts its matches in memory.
+ * An order is a list of token addresses: the active tokens that belong first,
+ * then as many of the others as it takes; a search sorts its matches in
+ * memory. A page is 200 of them with their rows read. A request gets at most
+ * one page (it was 5,000 rows, 2 MB to serialize and compress on each call),
+ * and the list is walked by `offset`.
  */
 export class ElysiumLaunchpadMarketService {
   private static instance: ElysiumLaunchpadMarketService;
@@ -240,10 +339,11 @@ export class ElysiumLaunchpadMarketService {
   private snapshot: Snapshot | null = null;
   private refreshing: Promise<Snapshot> | null = null;
   private refreshFailedAt = 0;
-  /** Pages of the current snapshot, by request key; cleared when the snapshot changes. */
-  private pages = new Map<string, Promise<Omit<ElysiumLaunchpadPage, 'summary' | 'top' | 'hypeUsd' | 'computedAt'>>>();
-  private searching = 0;
-  private searchWaiters: Array<() => void> = [];
+  /** Orders and pages of the current snapshot, by key; cleared when the snapshot changes. */
+  private orders = new Map<string, OrderEntry>();
+  private pages = new Map<string, SharedRead<LaunchPage>>();
+  private readonly pageGate = new FairGate(PAGE_GATE);
+  private readonly searchGate = new FairGate(SEARCH_GATE);
 
   public static getInstance(): ElysiumLaunchpadMarketService {
     if (!ElysiumLaunchpadMarketService.instance) {
@@ -297,6 +397,7 @@ export class ElysiumLaunchpadMarketService {
       this.refreshing = this.computeSnapshot()
         .then((next) => {
           this.snapshot = next;
+          this.orders.clear();
           this.pages.clear();
           return next;
         })
@@ -469,18 +570,17 @@ export class ElysiumLaunchpadMarketService {
   private static readonly UNPRICED = Prisma.sql`AND (l.last_price IS NULL OR l.last_price = 0)`;
 
   // ---------------------------------------------------------------------------
-  // The four orders, without a search
+  // The four orders, without a search: the first `rows` tokens of each
   // ---------------------------------------------------------------------------
 
   /**
    * Hot: by 24h volume, then trades. Only the active tokens have either, so
    * they come first, in the snapshot's order; the others follow, newest first.
    */
-  private async hotPage(snap: Snapshot, pad: string | undefined, limit: number): Promise<ElysiumLaunchTokenView[]> {
-    const head = snap.hot.filter((v) => !pad || v.launchpad === pad).slice(0, limit);
-    if (head.length >= limit) return head;
-    const rest = await this.hydrate(snap, await this.newestTokens(snap, pad, undefined, limit - head.length, true));
-    return head.concat(rest);
+  private async hotOrder(snap: Snapshot, pad: string | undefined, rows: number): Promise<string[]> {
+    const head = snap.hot.filter((v) => !pad || v.launchpad === pad).slice(0, rows).map((v) => v.address);
+    if (head.length >= rows) return head;
+    return head.concat(await this.newestTokens(snap, pad, undefined, rows - head.length, true));
   }
 
   /**
@@ -489,20 +589,21 @@ export class ElysiumLaunchpadMarketService {
    * the active gainers, everything flat (active then the others), the active
    * losers, then everything unknown.
    */
-  private async gainersPage(snap: Snapshot, pad: string | undefined, limit: number): Promise<ElysiumLaunchTokenView[]> {
+  private async gainersOrder(snap: Snapshot, pad: string | undefined, rows: number): Promise<string[]> {
     const active = snap.gainers.filter((v) => !pad || v.launchpad === pad);
-    const up = active.filter((v) => v.change24h !== null && v.change24h > 0);
-    const flat = active.filter((v) => v.change24h === 0);
-    const down = active.filter((v) => v.change24h !== null && v.change24h < 0);
-    const unknown = active.filter((v) => v.change24h === null);
+    const address = (v: ElysiumLaunchTokenView): string => v.address;
+    const up = active.filter((v) => v.change24h !== null && v.change24h > 0).map(address);
+    const flat = active.filter((v) => v.change24h === 0).map(address);
+    const down = active.filter((v) => v.change24h !== null && v.change24h < 0).map(address);
+    const unknown = active.filter((v) => v.change24h === null).map(address);
 
-    let out = up.concat(flat).slice(0, limit);
-    if (out.length < limit) {
-      out = out.concat(await this.hydrate(snap, await this.newestTokens(snap, pad, ElysiumLaunchpadMarketService.PRICED, limit - out.length, true)));
+    let out = up.concat(flat).slice(0, rows);
+    if (out.length < rows) {
+      out = out.concat(await this.newestTokens(snap, pad, ElysiumLaunchpadMarketService.PRICED, rows - out.length, true));
     }
-    if (out.length < limit) out = out.concat(down.concat(unknown).slice(0, limit - out.length));
-    if (out.length < limit) {
-      out = out.concat(await this.hydrate(snap, await this.newestTokens(snap, pad, ElysiumLaunchpadMarketService.UNPRICED, limit - out.length, true)));
+    if (out.length < rows) out = out.concat(down.concat(unknown).slice(0, rows - out.length));
+    if (out.length < rows) {
+      out = out.concat(await this.newestTokens(snap, pad, ElysiumLaunchpadMarketService.UNPRICED, rows - out.length, true));
     }
     return out;
   }
@@ -513,81 +614,57 @@ export class ElysiumLaunchpadMarketService {
    * quote is read and merged at its USD value. Tokens without a USD value
    * (never traded, or a quote that has none) follow, newest first.
    */
-  private async mcapPage(snap: Snapshot, pad: string | undefined, limit: number): Promise<ElysiumLaunchTokenView[]> {
+  private async mcapOrder(snap: Snapshot, pad: string | undefined, rows: number): Promise<string[]> {
     const valued = [...USD_QUOTES, ...(snap.hypeUsd !== null ? HYPE_QUOTES : [])];
     const heads = valued.map(
       (quote) => Prisma.sql`
         (SELECT l.token, l.last_price, l.quote, (extract(epoch FROM l.created_at))::float8 AS born
          FROM elysium_launch l
          WHERE l.quote = ${quote} AND l.last_price > 0 ${this.padFilter(pad)}
-         ORDER BY l.last_price DESC, l.created_at DESC, l.token LIMIT ${limit})`
+         ORDER BY l.last_price DESC, l.created_at DESC, l.token LIMIT ${rows})`
     );
-    const rows = await this.timed<{ token: string; last_price: number; quote: string; born: number }>(
+    const ranked = await this.timed<{ token: string; last_price: number; quote: string; born: number }>(
       PAGE_TIMEOUT_MS,
       Prisma.sql`${Prisma.join(heads, ' UNION ALL ')}`
     );
-    const ranked = rows
-      // Same tie order as each head (newest, then address), so a shorter page is the head of a longer one.
+    const out = ranked
+      // Same tie order as each head (newest, then address), so a shorter read is the head of a longer one.
       .map((r) => ({ token: r.token, usd: r.last_price * (quoteUsd(r.quote, snap.hypeUsd) ?? 0), born: r.born }))
       .sort((a, b) => b.usd - a.usd || b.born - a.born || (a.token < b.token ? -1 : 1))
-      .slice(0, limit);
-    let out = await this.hydrate(snap, ranked.map((r) => r.token));
-    if (out.length < limit) {
-      // Everything without a USD value: no positive price, or a quote that is not valued.
-      // (Spelled out: `NOT (quote = ANY(…) AND last_price > 0)` is NULL, not true, for a NULL price.)
-      const unvalued = Prisma.sql`AND (l.last_price IS NULL OR l.last_price <= 0 OR NOT (l.quote = ANY(${valued}::text[])))`;
-      out = out.concat(await this.newest(snap, pad, unvalued, limit - out.length));
-    }
-    return out;
+      .slice(0, rows)
+      .map((r) => r.token);
+    if (out.length >= rows) return out;
+    // Everything without a USD value: no positive price, or a quote that is not valued.
+    // (Spelled out: `NOT (quote = ANY(…) AND last_price > 0)` is NULL, not true, for a NULL price.)
+    const unvalued = Prisma.sql`AND (l.last_price IS NULL OR l.last_price <= 0 OR NOT (l.quote = ANY(${valued}::text[])))`;
+    return out.concat(await this.newestTokens(snap, pad, unvalued, rows - out.length));
   }
 
   // ---------------------------------------------------------------------------
   // Search
   // ---------------------------------------------------------------------------
 
-  /** Runs `fn` when one of the search slots is free; refuses when too many already wait. */
-  private async withSearchSlot<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.searching >= SEARCH_CONCURRENCY) {
-      if (this.searchWaiters.length >= SEARCH_MAX_WAITING) throw new LaunchpadSearchBusyError();
-      await new Promise<void>((resolve) => this.searchWaiters.push(resolve));
-    } else {
-      this.searching += 1;
-    }
-    try {
-      return await fn();
-    } finally {
-      // Hand the slot to the next waiter, or free it.
-      const next = this.searchWaiters.shift();
-      if (next) next();
-      else this.searching -= 1;
-    }
-  }
-
   /**
    * A search reads its matches (symbol, name or address containing `q`), newest
    * first up to SEARCH_MAX_MATCHES, and sorts them here in the requested order:
    * the active ones carry their 24h figures from the snapshot, the others are
-   * flat with no volume.
+   * flat with no volume. The whole sorted list is the order: its pages cost
+   * nothing more.
    */
-  private async searchPage(
-    snap: Snapshot,
-    query: ElysiumLaunchpadQuery & { q: string }
-  ): Promise<{ tokens: ElysiumLaunchTokenView[]; total: number; totalCapped: boolean }> {
-    const pattern = containsPattern(query.q);
-    const rows = await this.withSearchSlot(() =>
-      this.timed<{ token: string; last_price: number | null; quote: string; born: number; launchpad: string }>(
-        PAGE_TIMEOUT_MS,
-        Prisma.sql`
-          SELECT l.token, l.last_price, l.quote, l.launchpad, (extract(epoch FROM l.created_at))::float8 AS born
-          FROM elysium_launch l
-          WHERE (l.symbol ILIKE ${pattern} OR l.name ILIKE ${pattern} OR l.token ILIKE ${pattern}) ${this.padFilter(query.pad)}
-          ORDER BY l.created_at DESC, l.token
-          LIMIT ${SEARCH_MAX_MATCHES + 1}`
-      )
+  private async searchOrder(snap: Snapshot, pad: string | undefined, sort: LaunchpadSort, q: string): Promise<LaunchOrder> {
+    const pattern = containsPattern(q);
+    const rows = await this.timed<{ token: string; last_price: number | null; quote: string; born: number; launchpad: string }>(
+      PAGE_TIMEOUT_MS,
+      Prisma.sql`
+        SELECT l.token, l.last_price, l.quote, l.launchpad, (extract(epoch FROM l.created_at))::float8 AS born
+        FROM elysium_launch l
+        WHERE (l.symbol ILIKE ${pattern} OR l.name ILIKE ${pattern} OR l.token ILIKE ${pattern}) ${this.padFilter(pad)}
+        ORDER BY l.created_at DESC, l.token
+        LIMIT ${SEARCH_MAX_MATCHES + 1}`
     );
     const totalCapped = rows.length > SEARCH_MAX_MATCHES;
     const matches = totalCapped ? rows.slice(0, SEARCH_MAX_MATCHES) : rows;
-    // Enough of a view to sort on; the rows of the page are then read in full.
+    // Enough of a view to sort on; the rows of a page are read in full when it is asked for.
     const keys = matches.map((r): ElysiumLaunchTokenView => {
       const active = snap.active.get(r.token);
       if (active) return active;
@@ -613,12 +690,70 @@ export class ElysiumLaunchpadMarketService {
         graduated: false,
       };
     });
-    const page = keys.sort(launchTokenSorter(query.sort)).slice(0, query.limit);
-    return {
-      tokens: await this.hydrate(snap, page.map((v) => v.address)),
-      total: matches.length,
-      totalCapped,
-    };
+    return { tokens: keys.sort(launchTokenSorter(sort)).map((v) => v.address), total: matches.length, totalCapped };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Orders and pages, kept for their snapshot
+  // ---------------------------------------------------------------------------
+
+  /** Keeps `value` under `key` as the most recently used entry of `cache`, dropping the least recently used past `max`. */
+  private static remember<V>(cache: Map<string, V>, key: string, value: V, max: number): void {
+    cache.delete(key);
+    cache.set(key, value);
+    if (cache.size > max) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+  }
+
+  /** Runs a read of the launches in its gate, for `client`; a refusal becomes the error the route answers 429 to. */
+  private async gated<T>(gate: FairGate, client: string, search: boolean, read: () => Promise<T>): Promise<T> {
+    try {
+      return await gate.run(client, read);
+    } catch (error) {
+      if (error instanceof GateBusyError) throw search ? new LaunchpadSearchBusyError() : new LaunchpadBusyError();
+      throw error;
+    }
+  }
+
+  /**
+   * The order of a request, read at least `need` tokens far (or to its end).
+   * One read is shared by everyone asking for it, and kept: the first page
+   * reads a page's worth, the next four pages ORDER_MID_ROWS, a deeper one the
+   * whole order (addresses only), and a search all its matches at once. Called
+   * from a page's read, in its slot.
+   */
+  private async orderFor(snap: Snapshot, key: string, query: ElysiumLaunchpadQuery, need: number): Promise<LaunchOrder> {
+    const cached = this.orders.get(key);
+    if (cached) {
+      if (cached.rows >= need) {
+        ElysiumLaunchpadMarketService.remember(this.orders, key, cached, ORDER_CACHE_MAX);
+        return cached.order;
+      }
+      // Read less far than needed, but to its end: nothing more to read.
+      const known = await cached.order.catch(() => null);
+      if (known && known.tokens.length < cached.rows) return known;
+    }
+    const { pad, sort, q } = query;
+    const rows = q || need > ORDER_MID_ROWS ? ORDER_MAX_ROWS : need <= PAGE_ROWS ? PAGE_ROWS : ORDER_MID_ROWS;
+    const order = q
+      ? this.searchOrder(snap, pad, sort, q)
+      : (async (): Promise<LaunchOrder> => {
+          let tokens: string[];
+          if (sort === 'new') tokens = await this.newestTokens(snap, pad, undefined, rows);
+          else if (sort === 'gainers') tokens = await this.gainersOrder(snap, pad, rows);
+          else if (sort === 'mcap') tokens = await this.mcapOrder(snap, pad, rows);
+          else tokens = await this.hotOrder(snap, pad, rows);
+          return { tokens, total: pad ? (snap.perPad.get(pad)?.tokens ?? 0) : snap.summary.tokens, totalCapped: false };
+        })();
+    const entry: OrderEntry = { rows, order };
+    // A failed read is not kept: the next request reads again.
+    order.catch(() => {
+      if (this.orders.get(key) === entry) this.orders.delete(key);
+    });
+    ElysiumLaunchpadMarketService.remember(this.orders, key, entry, ORDER_CACHE_MAX);
+    return order;
   }
 
   // ---------------------------------------------------------------------------
@@ -626,43 +761,51 @@ export class ElysiumLaunchpadMarketService {
   // ---------------------------------------------------------------------------
 
   /**
-   * The first `limit` tokens of an order, with the totals and the mini lists.
-   * Pages are kept for the snapshot they were built from, and a page being
-   * computed is shared by everyone asking for it.
+   * `limit` tokens of an order from `offset` (at most one page of 200), with
+   * the totals and the mini lists. Orders and pages are kept for the snapshot
+   * they were built from. A page that is not built yet is read in a slot of
+   * `client`'s own share (a search in the search slots), and that one read
+   * serves everyone asking for the page.
    */
-  public async getPage(query: ElysiumLaunchpadQuery): Promise<ElysiumLaunchpadPage> {
+  public async getPage(query: ElysiumLaunchpadQuery, client = ''): Promise<ElysiumLaunchpadPage> {
     const snap = await this.getSnapshot();
     const q = query.q?.trim().toLowerCase() || undefined;
-    const key = `${snap.at}|${query.pad ?? ''}|${query.sort}|${query.limit}|${q ?? ''}`;
-    let pending = this.pages.get(key);
-    if (!pending) {
-      pending = this.computePage(snap, { ...query, q });
-      // A failed page is not kept: the next request computes it again.
-      pending.catch(() => {
-        if (this.pages.get(key) === pending) this.pages.delete(key);
-      });
-      if (this.pages.size >= PAGE_CACHE_MAX) {
-        const oldest = this.pages.keys().next().value;
-        if (oldest !== undefined) this.pages.delete(oldest);
-      }
-      this.pages.set(key, pending);
+    const limit = Math.max(0, Math.min(query.limit, PAGE_ROWS));
+    const asked = Math.max(0, Math.trunc(query.offset ?? 0));
+    const offset = asked - (asked % PAGE_ROWS);
+    const orderKey = `${snap.at}|${query.pad ?? ''}|${query.sort}|${q ?? ''}`;
+    const pageKey = `${orderKey}|${offset}`;
+    let entry = this.pages.get(pageKey);
+    if (!entry) {
+      const created: SharedRead<LaunchPage> = new SharedRead(
+        () => this.readPage(snap, orderKey, { ...query, q }, offset),
+        // A failed page is not kept: the next request reads it again.
+        () => {
+          if (this.pages.get(pageKey) === created) this.pages.delete(pageKey);
+        }
+      );
+      entry = created;
     }
-    const page = await pending;
-    return { ...page, summary: snap.summary, top: snap.top, hypeUsd: snap.hypeUsd, computedAt: new Date(snap.at).toISOString() };
+    ElysiumLaunchpadMarketService.remember(this.pages, pageKey, entry, PAGE_CACHE_MAX);
+    const shared = entry;
+    const page = shared.settled
+      ? shared.settled.value
+      : await this.gated(q ? this.searchGate : this.pageGate, client, q !== undefined, () => shared.run());
+    return {
+      tokens: limit >= page.tokens.length ? page.tokens : page.tokens.slice(0, limit),
+      total: page.total,
+      totalCapped: page.totalCapped,
+      summary: snap.summary,
+      top: snap.top,
+      hypeUsd: snap.hypeUsd,
+      computedAt: new Date(snap.at).toISOString(),
+    };
   }
 
-  private async computePage(
-    snap: Snapshot,
-    query: ElysiumLaunchpadQuery
-  ): Promise<{ tokens: ElysiumLaunchTokenView[]; total: number; totalCapped: boolean }> {
-    if (query.q) return this.searchPage(snap, { ...query, q: query.q });
-    const { pad, sort, limit } = query;
-    let tokens: ElysiumLaunchTokenView[];
-    if (sort === 'new') tokens = await this.newest(snap, pad, undefined, limit);
-    else if (sort === 'gainers') tokens = await this.gainersPage(snap, pad, limit);
-    else if (sort === 'mcap') tokens = await this.mcapPage(snap, pad, limit);
-    else tokens = await this.hotPage(snap, pad, limit);
-    const total = pad ? (snap.perPad.get(pad)?.tokens ?? 0) : snap.summary.tokens;
-    return { tokens, total, totalCapped: false };
+  /** The page of an order that starts at `offset`: its tokens, with their rows read. */
+  private async readPage(snap: Snapshot, orderKey: string, query: ElysiumLaunchpadQuery, offset: number): Promise<LaunchPage> {
+    const order = await this.orderFor(snap, orderKey, query, Math.min(ORDER_MAX_ROWS, offset + PAGE_ROWS));
+    const tokens = await this.hydrate(snap, order.tokens.slice(offset, offset + PAGE_ROWS));
+    return { tokens, total: order.total, totalCapped: order.totalCapped };
   }
 }
