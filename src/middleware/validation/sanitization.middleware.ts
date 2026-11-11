@@ -1,5 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import sanitizeHtml from 'sanitize-html';
+import { ClientBudget } from '../../utils/clientBudget';
+import { rateLimitKeyForIp } from '../../utils/client-ip';
+import { positiveIntEnv } from '../../utils/env';
+import { logDeduplicator } from '../../utils/logDeduplicator';
 
 /**
  * Hard cap on query keys. Real requests carry a handful; anything past this is
@@ -11,11 +15,59 @@ const MAX_QUERY_KEYS = 50;
 /** Bounds the recursion in `sanitizeObject` so a deeply nested body can't blow the stack. */
 const MAX_BODY_DEPTH = 8;
 
+/** A string with none of these has no tag and no entity: the HTML parser would hand it back as it is. */
+const MARKUP = /[<>&]/;
+const CONTROL_CHARS = /[\x00-\x1F\x7F-\x9F]/g;
+
+/**
+ * HTML parsing one client may ask for, in units, per 10 s window.
+ *
+ * This middleware runs before every route, so before every route limiter, and
+ * the HTML parser is its expensive part: up to 9 microseconds to start on a
+ * string, then up to 0.4 per `<` (measured 2026-11-11). A 74 kB body of 12,375
+ * strings `"<a>"` held the event loop 90 ms, a 16 kB query string of `<` about
+ * 6 ms, on any path, as often as the caller liked.
+ *
+ * So only the strings that carry markup (`<`, `>` or `&`) go to the parser,
+ * and what they cost is counted per client: a unit is one string, plus one per
+ * 8 markup characters, plus one per 1,024 characters (9 microseconds a unit at
+ * worst). The largest legitimate case is a bulk import of 1,000 wallets whose
+ * names all carry a `&` or a `<`: 1,000 units. 1,536 a window is at most about
+ * 14 ms of parsing per client per 10 s, whatever it sends; a request that
+ * needs more than a whole window is refused for good (400), one that finds the
+ * window spent is told when to retry (429). In memory: it holds when Redis is
+ * down.
+ */
+const SANITIZE_WINDOW_MS = 10_000;
+const sanitizeBudget = new ClientBudget(positiveIntEnv('SANITIZE_UNITS_PER_WINDOW', 1536), SANITIZE_WINDOW_MS);
+/**
+ * Units parsed in one go (about a millisecond). A request that needs more
+ * gives the event loop back between slices, so even the largest accepted one
+ * never holds every other request behind its whole parsing.
+ */
+const SANITIZE_SLICE_UNITS = 128;
+
+/** A string waiting for the HTML parser, what parsing it weighs, and where its result goes. */
+interface PendingString {
+  holder: Record<string, unknown>;
+  key: string;
+  value: string;
+  units: number;
+}
+
+/** What one request asks of the HTML parser. */
+interface ParseWork {
+  pending: PendingString[];
+  units: number;
+}
+
 /**
  * Middleware de sanitization pour nettoyer les entrées utilisateur
  * Ce middleware doit être appliqué avant la validation
  */
 export const sanitizeInput = (req: Request, res: Response, next: NextFunction): void => {
+  const work: ParseWork = { pending: [], units: 0 };
+
   // Express 5 exposes `req.query` as a getter that RE-PARSES the raw query
   // string on every property access. The previous loop read it ~3× per key, so
   // n keys cost O(n²) parses — ~600 ms of CPU for a 1000-key URL, an
@@ -41,7 +93,8 @@ export const sanitizeInput = (req: Request, res: Response, next: NextFunction): 
     const sanitizedQuery: Record<string, unknown> = {};
     for (const key of keys) {
       const value = rawQuery[key];
-      sanitizedQuery[key] = typeof value === 'string' ? sanitizeString(value) : value;
+      if (typeof value === 'string') collect(work, sanitizedQuery, key, value);
+      else sanitizedQuery[key] = value;
     }
     // Shadow the prototype getter with an own value property (Express 5 removed
     // the setter, so a plain assignment would throw).
@@ -56,21 +109,94 @@ export const sanitizeInput = (req: Request, res: Response, next: NextFunction): 
   // Sanitization personnalisée pour les paramètres de route (bounded by the
   // route definition, always a handful of keys).
   if (req.params) {
-    Object.keys(req.params).forEach(key => {
-      if (typeof req.params[key] === 'string') {
-        req.params[key] = sanitizeString(req.params[key] as string);
-      }
-    });
+    const params = req.params as Record<string, unknown>;
+    for (const key of Object.keys(params)) {
+      const value = params[key];
+      if (typeof value === 'string') collect(work, params, key, value);
+    }
   }
 
   // Sanitization personnalisée pour le corps de la requête (bounded by the
-  // express.json() body limit set in app.ts).
+  // body limit of the parsers and by the request body budget in front of them).
   if (req.body) {
-    sanitizeObject(req.body, 0);
+    sanitizeObject(req.body, 0, work);
+  }
+
+  if (work.pending.length > 0) {
+    if (work.units > sanitizeBudget.limit) {
+      res.status(400).json({
+        success: false,
+        error: 'Too much markup in the request',
+        code: 'INPUT_TOO_COMPLEX',
+      });
+      return;
+    }
+    const client = rateLimitKeyForIp(req.ip ?? '');
+    if (!sanitizeBudget.take(client, work.units)) {
+      const retryAfter = sanitizeBudget.retryAfterS();
+      logDeduplicator.warn('Sanitizer budget spent', { ip: client });
+      res.setHeader('Retry-After', String(retryAfter));
+      res.status(429).json({ error: 'Rate limit exceeded', message: 'Too much markup in recent requests', retryAfter });
+      return;
+    }
+    parsePending(work.pending, 0, next);
+    return;
   }
 
   next();
 };
+
+/**
+ * Runs the HTML parser over `pending` from `index`, a slice at a time, then
+ * calls `next`. The common request (a few strings with markup) is done in the
+ * first slice, synchronously, as before.
+ */
+function parsePending(pending: PendingString[], index: number, next: NextFunction): void {
+  try {
+    let units = 0;
+    while (index < pending.length && units < SANITIZE_SLICE_UNITS) {
+      const { holder, key, value } = pending[index];
+      holder[key] = sanitizeString(value);
+      units += pending[index].units;
+      index += 1;
+    }
+  } catch (error) {
+    // Later slices run outside Express's own try/catch: hand the error over.
+    next(error);
+    return;
+  }
+  if (index < pending.length) setImmediate(parsePending, pending, index, next);
+  else next();
+}
+
+/**
+ * Cleans `value` in place when it carries no markup (no parser needed), or
+ * queues it for the HTML parser and counts what that will cost.
+ */
+function collect(work: ParseWork, holder: Record<string, unknown>, key: string, value: string): void {
+  if (!MARKUP.test(value)) {
+    holder[key] = cleanText(value);
+    return;
+  }
+  let markup = 0;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    // < > &
+    if (c === 60 || c === 62 || c === 38) markup++;
+  }
+  const units = 1 + Math.floor(markup / 8) + Math.floor(value.length / 1024);
+  work.units += units;
+  work.pending.push({ holder, key, value, units });
+}
+
+/**
+ * What `sanitizeString` does to a string without `<`, `>` or `&`: with no tag
+ * to drop and no entity to decode, the HTML parser returns the text through
+ * its control-character filter and nothing else. Same result, without the parser.
+ */
+function cleanText(text: string): string {
+  return text.replace(CONTROL_CHARS, '').replace(/\s+/g, ' ').trim();
+}
 
 /**
  * Fonction utilitaire pour sanitizer une chaîne de caractères
@@ -85,7 +211,7 @@ function sanitizeString(str: string): string {
     disallowedTagsMode: 'discard', // Supprimer les tags, pas encoder
     textFilter: (text: string) => {
       // Supprimer les caractères de contrôle
-      return text.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
+      return text.replace(CONTROL_CHARS, '');
     }
   });
 
@@ -101,17 +227,23 @@ function sanitizeString(str: string): string {
  * Fonction utilitaire pour sanitizer un objet récursivement
  * @param obj Objet à sanitizer
  * @param depth Profondeur courante (garde-fou anti stack-overflow)
+ * @param work Ce que la requête demande au parseur HTML
  */
-function sanitizeObject(obj: any, depth: number): void {
+function sanitizeObject(obj: unknown, depth: number, work: ParseWork): void {
   if (!obj || typeof obj !== 'object' || depth > MAX_BODY_DEPTH) {
     return;
   }
+  // Past a whole window of parsing the request is refused: nothing left to look for.
+  if (work.units > sanitizeBudget.limit) return;
 
-  Object.keys(obj).forEach(key => {
-    if (typeof obj[key] === 'string') {
-      obj[key] = sanitizeString(obj[key]);
-    } else if (typeof obj[key] === 'object') {
-      sanitizeObject(obj[key], depth + 1);
+  const holder = obj as Record<string, unknown>;
+  for (const key of Object.keys(holder)) {
+    const value = holder[key];
+    if (typeof value === 'string') {
+      collect(work, holder, key, value);
+      if (work.units > sanitizeBudget.limit) return;
+    } else if (typeof value === 'object') {
+      sanitizeObject(value, depth + 1, work);
     }
-  });
+  }
 }

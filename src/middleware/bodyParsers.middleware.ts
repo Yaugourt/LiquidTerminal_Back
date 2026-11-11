@@ -10,11 +10,14 @@ import express from 'express';
  * sends one, and these parsers run before any auth: decoding gzip/Brotli here
  * would hand attacker bytes to zlib on every route (Node CVE-2026-111497).
  */
-export const jsonBodyParser = express.json({ limit: '100kb', inflate: false });
+/** The largest body either parser reads (the request body budget counts against it). */
+export const BODY_PARSER_LIMIT_BYTES = 100 * 1024;
+
+export const jsonBodyParser = express.json({ limit: BODY_PARSER_LIMIT_BYTES, inflate: false });
 
 export const urlencodedBodyParser = express.urlencoded({
   extended: true,
-  limit: '100kb',
+  limit: BODY_PARSER_LIMIT_BYTES,
   parameterLimit: 100,
   inflate: false,
 });

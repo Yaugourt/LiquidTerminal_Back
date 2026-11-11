@@ -11,6 +11,7 @@ import { securityHeaders } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import { compressionMiddleware } from './middleware/compression.middleware';
 import { jsonBodyParser, urlencodedBodyParser } from './middleware/bodyParsers.middleware';
+import { requestBodyBudget } from './middleware/bodyBudget.middleware';
 
 import { ClientInitializerService } from './core/client.initializer.service';
 import { startPoolMonitor } from './core/poolRegistry';
@@ -137,6 +138,10 @@ app.use(cors({
 
 // Ajouter les en-têtes de sécurité
 app.use(securityHeaders);
+
+// Bodies are counted per client before they are parsed: the parsers and the
+// sanitizer run ahead of every route limiter (see bodyBudget.middleware.ts).
+app.use(requestBodyBudget);
 
 // Parser le body avant la sanitization (limits and the refusal of compressed
 // bodies: see bodyParsers.middleware.ts).
