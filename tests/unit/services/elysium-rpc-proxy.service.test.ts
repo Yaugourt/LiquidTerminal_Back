@@ -423,6 +423,42 @@ describe('ElysiumRpcProxyService', () => {
     expect(logged).not.toContain('rpc.example.test');
   });
 
+  it('rewrites the node\'s error before it leaves: its own wording quoted the key', async () => {
+    const { service } = load();
+    const raw = JSON.stringify({ jsonrpc: '2.0', id: 7, error: { code: -32000, message: `Post "${KEYED_URL}": EOF`, stack: 'at /srv/rpc.js:1' } });
+    fetchMock.mockResolvedValueOnce(response([raw.slice(0, 30), raw.slice(30)]));
+    const answer = await service.forward(CALL, 1, 'c1');
+    const text = textOf(answer);
+    expect(JSON.parse(text)).toEqual({ jsonrpc: '2.0', id: 7, error: { code: -32000, message: 'Node error' } });
+    expect(text).not.toContain('SECRET-KEY-123');
+    // What is held and announced is the answer as it leaves, not as it came.
+    expect(answer.bytes).toBe(Buffer.byteLength(text));
+    expect(service.load.bufferedBytes).toBe(answer.bytes);
+    answer.release();
+    expect(service.load.bufferedBytes).toBe(0);
+  });
+
+  it('keeps a revert as the node said it, and a result byte for byte', async () => {
+    const { service } = load();
+    const revert = JSON.stringify({ jsonrpc: '2.0', id: 7, error: { code: 3, message: 'execution reverted: paused', data: '0x08c379a0' } });
+    fetchMock.mockResolvedValueOnce(response([revert]));
+    expect(JSON.parse(await relay(service))).toEqual(JSON.parse(revert));
+    const result = '{"jsonrpc":"2.0","id":7,  "result":"0x1"}';
+    fetchMock.mockResolvedValueOnce(response([result]));
+    expect(await relay(service)).toBe(result);
+  });
+
+  it('does not relay a large answer that quotes the key, without reading it for errors', async () => {
+    const { service } = load();
+    const big = `{"jsonrpc":"2.0","id":7,"result":"0x${'ab'.repeat(40_000)}","debug":"${KEYED_URL}"}`;
+    fetchMock.mockResolvedValueOnce(response([big.slice(0, 50_000), big.slice(50_000)]));
+    await expect(service.forward(CALL)).rejects.toThrow('ELYSIUM_MAINNET_RPC_UPSTREAM');
+    expect(service.load.bufferedBytes).toBe(0);
+    const fine = `{"jsonrpc":"2.0","id":7,"result":"0x${'ab'.repeat(40_000)}"}`;
+    fetchMock.mockResolvedValueOnce(response([fine]));
+    expect(await relay(service)).toBe(fine);
+  });
+
   it('says so when no upstream is configured', async () => {
     const { service } = load();
     delete process.env.ELYSIUM_MAINNET_RPC_URL;

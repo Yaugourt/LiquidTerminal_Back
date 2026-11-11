@@ -1,6 +1,7 @@
 import type { ServerResponse } from 'http';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { positiveIntEnv } from '../../utils/env';
+import { cleanRpcErrors, holdsSecret, RPC_ERROR_CLEAN_MAX_BYTES, rpcSecrets } from './elysium-rpc-errors';
 import { FairGate, GateBusyError } from '../../utils/fairGate';
 
 /**
@@ -75,7 +76,9 @@ const SLOT_WAIT_MS = 5_000;
  *   (`ELYSIUM_RPC_GLOBAL_PER_MINUTE`), per process: many IPs together still
  *   cannot spend the key's quota;
  * - bytes of one answer (`ELYSIUM_RPC_MAX_RESPONSE_BYTES`): the body is read
- *   up to that size and relayed as received, never decoded or parsed here.
+ *   up to that size and relayed as received, never decoded or parsed here,
+ *   except a small answer that carries an error: the node's own wording is
+ *   cleaned before it leaves (see elysium-rpc-errors).
  */
 export class ElysiumRpcProxyService {
   private static instance: ElysiumRpcProxyService;
@@ -278,6 +281,23 @@ export class ElysiumRpcProxyService {
       // error page behind a 200) must not reach the client as JSON.
       if (!ElysiumRpcProxyService.looksLikeJsonRpc(chunks)) {
         logDeduplicator.warn('Elysium RPC proxy: upstream answer is not JSON-RPC');
+        throw new Error('ELYSIUM_MAINNET_RPC_UPSTREAM');
+      }
+      // The node's own error messages are not relayed as written (see elysium-rpc-errors). An
+      // answer that carries an error is small: it is read and its errors rewritten. A large one
+      // is results, and is only checked for the key before it leaves.
+      const secrets = rpcSecrets(url);
+      if (held.bytes <= RPC_ERROR_CLEAN_MAX_BYTES) {
+        const cleaned = cleanRpcErrors(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks), secrets);
+        if (cleaned) {
+          const delta = cleaned.byteLength - held.bytes;
+          if (delta > 0) this.hold(client, delta);
+          else this.unhold(client, -delta);
+          held.bytes = cleaned.byteLength;
+          chunks = [cleaned];
+        }
+      } else if (holdsSecret(chunks, secrets)) {
+        logDeduplicator.warn('Elysium RPC proxy: upstream answer quotes the node\'s address, not relayed');
         throw new Error('ELYSIUM_MAINNET_RPC_UPSTREAM');
       }
       return { chunks, bytes: held.bytes, release };

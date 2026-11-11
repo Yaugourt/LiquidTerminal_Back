@@ -178,15 +178,28 @@ export class ElysiumAnalyticsService {
   }
 
   /**
-   * What the public route serves: how the data is doing. What the provider bills, what is left
-   * on the account and how full the database's volume is are for whoever runs the service (the
-   * alerts read them, and the admin route serves them): on a public route they would tell
-   * anyone when the credits or the disk are about to run out.
+   * What the public route serves: whether the data is fresh and complete, and nothing of how
+   * the service is run. Left to the admin route (the alerts read the same figures in-process):
+   * what the provider bills and what is left on the account, the size of the database, of the
+   * transaction table and of the rollups, the position and the row count of each stream, how
+   * long each view takes to compute. On a public route these tell anyone when the credits or
+   * the disk are about to run out, and which view is the slow one.
    */
   public async getPublicStatus(): Promise<ViewResult<Omit<ElysiumStatus, 'credits' | 'database'> & { views: Array<Record<string, unknown>> }>> {
     const full = await this.getStatus();
     const { credits: _credits, database: _database, ...rest } = full.data;
-    return new ViewResult(rest, full.computedAt, full.refreshEveryS);
+    const without = (row: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> =>
+      Object.fromEntries(Object.entries(row).filter(([field]) => !fields.includes(field)));
+    return new ViewResult(
+      {
+        ...rest,
+        streams: rest.streams.map((s) => without(s, ['cursor', 'rows'])),
+        rollups: without(rest.rollups, ['sizeBytes', 'txTableBytes', 'keepDays']),
+        views: rest.views.map((v) => without(v, ['lastDurationMs', 'watched', 'running'])),
+      },
+      full.computedAt,
+      full.refreshEveryS
+    );
   }
 
   /**

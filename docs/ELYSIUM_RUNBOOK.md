@@ -8,17 +8,18 @@ analytics views) needs a hand. Every limit and cadence quoted here is listed in
 
 ## 1. Where to look first
 
-One route says how the data is doing, and is public:
+One route says whether the data is fresh and complete, and is public:
 
 ```bash
 curl -s "$BACK/elysium/analytics/status" | jq '.data | {partial, streams: [.streams[] | {stream, state, lagSeconds, lastOkAt, lastError}], provider, rollups, completeness: {differing: .completeness.differing}, rejects, upkeep}'
 ```
 
-The same, with what the provider bills and how full the database is, is for an admin (a Privy
-token of an account whose role is ADMIN, as the admin pages send it):
+The same with how the service is run is for an admin (a Privy token of an account whose role is
+ADMIN, as the admin pages send it): what the provider bills, the size of the database and of
+the tables, the position and the row count of each stream, how long each view takes.
 
 ```bash
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$BACK/elysium/analytics/status/ops" | jq '.data | {credits, database}'
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$BACK/elysium/analytics/status/ops" | jq '.data | {credits, database, rollups, streams: [.streams[] | {stream, cursor, rows}], views: [.views[] | {view, lastDurationMs}]}'
 ```
 
 | Field | What it says |
@@ -28,13 +29,14 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$BACK/elysium/analytics/status/
 | `streams[].lagSeconds` | age of the stream's data; for `bridge`, the age of its newest transfer (no fault: nobody may have bridged for hours); `null` for the streams whose cursor is the time of their run (`tokens`, `methods`, `tokenstats`, `launchstats`) and for the RPC fallback `txlive` |
 | `partial` | the parts of the status that could not be read at this computation (`rollups`, `database`, `rejects`, `completeness`, `credits`): shown empty, and to be read as unknown |
 | `provider` | the provider's last indexed block time and how far behind the clock it is |
-| `rollups` | built days, closed days waiting for their rollup, the builder's last error, the disk they take |
+| `rollups` | built days, closed days waiting for their rollup, the builder's last error (admin route: the disk they take, the days kept) |
 | `completeness` | for the last 7 closed days: our transaction count and the provider's, and `differing` |
 | `rejects` | what was read and not stored, per stream and reason, today / yesterday / 7 days |
 | `upkeep` | the one-time jobs (`launchstate`, `kilngrads`, `bridgedeep`, …) and whether they are done |
 | `credits` (admin route) | HypeDexer credits per UTC day (8 days), today's most expensive paths, the balance |
 | `database` (admin route) | size of the historical database, and its share of the volume when `HISTORICAL_DB_VOLUME_BYTES` is set (the database alone: the write-ahead log and anything else on the volume are not counted, so the real share is a little higher) |
-| `views` | each scheduled view: last computation, its duration, its last error |
+| `views` | each scheduled view: last computation, its last error (admin route: its duration, whether it is being watched or running) |
+| `streams[].cursor`, `streams[].rows` (admin route) | where each stream stands, and how many rows it has written |
 
 `GET $BACK/api/health` answers the process's uptime: after a deploy, a small uptime is the proof
 the new image runs (the deploy status GitHub shows can be wrong, see section 10).

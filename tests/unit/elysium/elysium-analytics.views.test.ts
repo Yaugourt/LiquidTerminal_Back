@@ -14,7 +14,7 @@ jest.mock('../../../src/core/viewScheduler', () => {
       read,
       watch: jest.fn(),
       readOrCompute: jest.fn(),
-      describe: () => [{ view: 'elysium:analytics:status:v5' }],
+      describe: () => [{ view: 'elysium:analytics:status:v5', lastDurationMs: 12, watched: true, running: false }],
     },
   };
 });
@@ -106,12 +106,40 @@ describe('Elysium scheduled views', () => {
     expect(status.data).toMatchObject({ of: 'elysium:analytics:status:v5', views: [{ view: 'elysium:analytics:status:v5' }] });
   });
 
-  it('the public status leaves out what the provider bills, the balance and the size of the database', async () => {
-    const full = { partial: [], streams: [{ stream: 'tx' }], credits: { balance: 5, days: [] }, database: { bytes: 1, usedShare: 0.5 } };
+  it('the public status says whether the data is fresh and complete, and nothing of how the service is run', async () => {
+    const full = {
+      partial: [],
+      streams: [{ stream: 'tx', cursor: '2026-11-11T17:59:40.000Z', rows: 52_205_824, backfillDone: true, lastError: null, lagSeconds: 20, everyS: 30, lastOkAt: '2026-11-11T17:59:50.000Z', state: 'ok' }],
+      rollups: { builtDays: 61, waitingDays: 0, lastBuiltAt: '2026-11-11T00:12:00.000Z', keepDays: 63, sizeBytes: 4e9, txTableBytes: 30e9, lastError: null },
+      rejects: [],
+      completeness: { differing: 0, days: [] },
+      provider: { headAt: '2026-11-11T17:59:50.000Z', lagSeconds: 10 },
+      upkeep: [],
+      credits: { balance: 5, days: [] },
+      database: { bytes: 1, usedShare: 0.5 },
+    };
     read.mockResolvedValueOnce({ data: full as never, computedAt: '2026-11-11T18:00:00.000Z', refreshEveryS: 15 });
     const open = await ElysiumAnalyticsService.getInstance().getPublicStatus();
-    expect(open.data).toEqual({ partial: [], streams: [{ stream: 'tx' }], views: [{ view: 'elysium:analytics:status:v5' }] });
+    expect(open.data).toEqual({
+      partial: [],
+      streams: [{ stream: 'tx', backfillDone: true, lastError: null, lagSeconds: 20, everyS: 30, lastOkAt: '2026-11-11T17:59:50.000Z', state: 'ok' }],
+      rollups: { builtDays: 61, waitingDays: 0, lastBuiltAt: '2026-11-11T00:12:00.000Z', lastError: null },
+      rejects: [],
+      completeness: { differing: 0, days: [] },
+      provider: { headAt: '2026-11-11T17:59:50.000Z', lagSeconds: 10 },
+      upkeep: [],
+      views: [{ view: 'elysium:analytics:status:v5' }],
+    });
+    // Neither the spend, nor a size, nor a position, nor a count of rows, nor a duration.
+    expect(JSON.stringify(open.data)).not.toMatch(/credits|balance|database|Bytes|cursor|"rows"|lastDurationMs|keepDays/);
     expect(open.computedAt).toBe('2026-11-11T18:00:00.000Z');
     expect(open.refreshEveryS).toBe(15);
+  });
+
+  it('the full status keeps all of it, for the admin route and the alerts', async () => {
+    const full = { partial: [], streams: [{ stream: 'tx', cursor: 'c', rows: 1 }], rollups: { sizeBytes: 4e9 }, credits: { balance: 5 }, database: { bytes: 1 } };
+    read.mockResolvedValueOnce({ data: full as never, computedAt: 'x', refreshEveryS: 15 });
+    const status = await ElysiumAnalyticsService.getInstance().getStatus();
+    expect(status.data).toMatchObject(full);
   });
 });
