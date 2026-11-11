@@ -409,6 +409,22 @@ model ElysiumTxLive {
   @@map("elysium_tx_live")
 }
 
+/// What the ingestion read and did not store, counted per stream, reason and UTC day
+/// (a refused row, an unknown launch emitter, a window cut at the page cap). `sample`
+/// keeps one example per day; the public status only shows the counts.
+model ElysiumIngestReject {
+  stream String   @db.VarChar(32)
+  reason String   @db.VarChar(48)
+  day    DateTime @db.Date
+  count  BigInt   @default(0)
+  lastAt DateTime @default(now()) @map("last_at") @db.Timestamptz(3)
+  sample String?  @db.Text
+
+  @@id([stream, reason, day])
+  @@index([day])
+  @@map("elysium_ingest_reject")
+}
+
 model ElysiumIngestState {
   stream       String    @id @db.VarChar(32)
   cursor       DateTime? @db.Timestamptz(3)

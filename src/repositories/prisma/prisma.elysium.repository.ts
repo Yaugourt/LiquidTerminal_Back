@@ -7,6 +7,7 @@ import type {
   LaunchRow,
   LaunchTradeRow,
 } from '../../services/elysium/elysium-launchpad.util';
+import type { RejectCount } from '../../services/elysium/elysium-ingest-rejects';
 
 /** Market keys looked up per statement (a page of 1,000 logs names at most 3,000). */
 const LAUNCH_MARKET_KEYS_PER_QUERY = 5_000;
@@ -36,6 +37,12 @@ export type ElysiumStream =
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
 export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'tokenstail', 'rollup']);
+
+/** A sample is free text taken from a refused row: what jsonb itself refuses (NUL, half a surrogate pair) is removed. */
+function cleanSample(sample: string | null): string | null {
+  if (sample === null) return null;
+  return sample.replace(/\u0000/g, '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
+}
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -740,6 +747,24 @@ export class ElysiumIngestRepository {
       holders,
       top10Pct,
       devPct
+    );
+  }
+
+  /**
+   * Adds what a tick left out to the day's counts (see IngestRejects). The first sample of a day
+   * stays: it is the one that says when the trouble started.
+   */
+  public async addRejects(rows: RejectCount[]): Promise<void> {
+    if (rows.length === 0) return;
+    await prismaHistorical.$executeRawUnsafe(
+      `INSERT INTO elysium_ingest_reject (stream, reason, day, count, last_at, sample)
+       SELECT stream, reason, (now() AT TIME ZONE 'UTC')::date, count, now(), sample
+       FROM jsonb_to_recordset($1::jsonb) AS r(stream text, reason text, count bigint, sample text)
+       ON CONFLICT (stream, reason, day) DO UPDATE SET
+         count = elysium_ingest_reject.count + EXCLUDED.count,
+         last_at = now(),
+         sample = COALESCE(elysium_ingest_reject.sample, EXCLUDED.sample)`,
+      JSON.stringify(rows.map((r) => ({ stream: r.stream, reason: r.reason, count: r.count, sample: cleanSample(r.sample) })))
     );
   }
 

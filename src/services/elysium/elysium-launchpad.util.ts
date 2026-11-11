@@ -623,6 +623,63 @@ export function decodeLaunchTrade(raw: unknown, markets: Map<string, LaunchMarke
   return null;
 }
 
+/** Which contracts may emit each launch topic (the same lists decodeLaunch checks). */
+const LAUNCH_EMITTER_OF: Readonly<Record<string, (address: string) => boolean>> = {
+  [LAUNCHPAD_TOPICS.chainzyLaunch]: (a) => EMITTERS.chainzy.has(a),
+  [LAUNCHPAD_TOPICS.corepadLaunch]: (a) => EMITTERS.corepad.has(a),
+  [LAUNCHPAD_TOPICS.signalCurveLaunch]: (a) => EMITTERS.signalCurve.has(a),
+  [LAUNCHPAD_TOPICS.signalV4Launch]: (a) => EMITTERS.signalV4.has(a),
+  [LAUNCHPAD_TOPICS.neuriioLaunch]: (a) => NEURIIO_PADS.has(a),
+  [LAUNCHPAD_TOPICS.neuriioFtfLaunch]: (a) => NEURIIO_PADS.has(a),
+  [LAUNCHPAD_TOPICS.akaPoolRegistered]: (a) => EMITTERS.akaHook.has(a),
+  [LAUNCHPAD_TOPICS.bunnyLaunch]: (a) => EMITTERS.bunnyPad.has(a),
+  [LAUNCHPAD_TOPICS.kilnLaunch]: (a) => EMITTERS.kilnFactory.has(a),
+};
+
+/** A log that was read and not stored, as the reject counts name it. */
+export interface LogReject {
+  reason: 'log-malformed' | 'log-undecodable' | 'launch-unknown-emitter' | 'market-unknown';
+  sample: string;
+}
+
+function logSample(b: Base): string {
+  return `emitter ${b.address} topic ${b.topic0.slice(0, 10)} tx ${b.txHash} log ${b.logIndex}`;
+}
+
+/**
+ * Why a log carrying a launch topic gave no launch (call it when decodeLaunch returned null).
+ * The one that matters is the unknown emitter: anyone can emit these topics on a testnet, and a
+ * launchpad that deploys a new version of its contract looks exactly the same, so it is counted
+ * with the address, for someone to tell which it is.
+ */
+export function launchRejectReason(raw: unknown): LogReject | null {
+  const b = base(raw);
+  if (!b) return { reason: 'log-malformed', sample: JSON.stringify(raw ?? null).slice(0, 300) };
+  const allowed = LAUNCH_EMITTER_OF[b.topic0];
+  if (!allowed) return null;
+  return { reason: allowed(b.address) ? 'log-undecodable' : 'launch-unknown-emitter', sample: logSample(b) };
+}
+
+/**
+ * Why a trade or graduation log named no market we know, when a launchpad's own contract
+ * emitted it: the token traded there launched without us seeing it (call it when the decoder
+ * returned null). Logs from anywhere else are not counted: a Swap of a pool that is not a
+ * launch market is the normal case, and a curve nobody listed cannot be told from spam.
+ */
+export function marketRejectReason(raw: unknown, known: (key: string) => boolean): LogReject | null {
+  const b = base(raw);
+  if (!b) return { reason: 'log-malformed', sample: JSON.stringify(raw ?? null).slice(0, 300) };
+  const padOwned =
+    (b.topic0 === LAUNCHPAD_TOPICS.corepadTrade && (EMITTERS.bunnyPad.has(b.address) || NEURIIO_PADS.has(b.address))) ||
+    (b.topic0 === LAUNCHPAD_TOPICS.signalRouterTrade && EMITTERS.signalRouter.has(b.address)) ||
+    (b.topic0 === LAUNCHPAD_TOPICS.kilnGraduated && EMITTERS.kilnFactory.has(b.address)) ||
+    (b.topic0 === LAUNCHPAD_TOPICS.neuriioGraduated && NEURIIO_PADS.has(b.address));
+  if (!padOwned) return null;
+  const key = topicAddress(b.l.topic1);
+  if (key && known(key)) return null;
+  return { reason: 'market-unknown', sample: `${logSample(b)} market ${key ?? '?'}` };
+}
+
 /**
  * Every value a log of `raw` can name its market by: the emitting contract, and its first indexed
  * argument read as an address (a token or a curve) and as 32 bytes (a V4 pool id). That is what

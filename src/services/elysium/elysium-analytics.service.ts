@@ -157,7 +157,12 @@ export class ElysiumAnalyticsService {
    * database.
    */
   public async getStatus(): Promise<
-    ViewResult<{ streams: Array<Record<string, unknown>>; rollups: Record<string, unknown>; views: Array<Record<string, unknown>> }>
+    ViewResult<{
+      streams: Array<Record<string, unknown>>;
+      rollups: Record<string, unknown>;
+      rejects: Array<Record<string, unknown>>;
+      views: Array<Record<string, unknown>>;
+    }>
   > {
     const status = await viewScheduler.read(this.statusView());
     // Where the scheduled views stand is read from this process as the request comes, never stored.
@@ -170,9 +175,13 @@ export class ElysiumAnalyticsService {
    * used to read the analytics pool on request and did not answer for 20 s
    * while that pool was full of aggregates.
    */
-  private statusView(): ViewDef<{ streams: Array<Record<string, unknown>>; rollups: Record<string, unknown> }> {
-    return this.view('status', 'v2', CADENCE.status, async () => {
-      const [all, days, sizes] = await Promise.all([
+  private statusView(): ViewDef<{
+    streams: Array<Record<string, unknown>>;
+    rollups: Record<string, unknown>;
+    rejects: Array<Record<string, unknown>>;
+  }> {
+    return this.view('status', 'v3', CADENCE.status, async () => {
+      const [all, days, sizes, rejects] = await Promise.all([
         ElysiumIngestRepository.getInstance().listStates(),
         prismaHistoricalPages.$queryRaw<Array<{ day: string; built_ms: number | null }>>`
           SELECT day::text AS day, (extract(epoch FROM built_at) * 1000)::float8 AS built_ms
@@ -184,6 +193,19 @@ export class ElysiumAnalyticsService {
                   + pg_total_relation_size('elysium_caller_set') + pg_total_relation_size('elysium_method_sender_day')
                   + pg_total_relation_size('elysium_day_rollup'))::float8 AS rollups,
                  pg_total_relation_size('elysium_tx')::float8 AS tx`.catch(() => []),
+        // What the ingestion read and did not store over the last 7 UTC days, per stream and reason.
+        prismaHistoricalPages.$queryRaw<
+          Array<{ stream: string; reason: string; today: number; yesterday: number; week: number; last_ms: number }>
+        >`
+          SELECT stream, reason,
+                 COALESCE(sum(count) FILTER (WHERE day = (now() AT TIME ZONE 'UTC')::date), 0)::float8 AS today,
+                 COALESCE(sum(count) FILTER (WHERE day = (now() AT TIME ZONE 'UTC')::date - 1), 0)::float8 AS yesterday,
+                 sum(count)::float8 AS week,
+                 (extract(epoch FROM max(last_at)) * 1000)::float8 AS last_ms
+          FROM elysium_ingest_reject
+          WHERE day >= (now() AT TIME ZONE 'UTC')::date - 6
+          GROUP BY stream, reason
+          ORDER BY stream, reason`.catch(() => []),
       ]);
       // Markers (a one-time rebuild, a position in a listing) are not streams: they have no lag to show.
       const rows = all.filter((r) => !ELYSIUM_STATE_MARKERS.has(r.stream));
@@ -214,6 +236,15 @@ export class ElysiumAnalyticsService {
           txTableBytes: sizes[0] ? Number(sizes[0].tx) : null,
           lastError: errorCategory(builder?.lastError ?? null),
         },
+        // Counts only: the stored example of each stays in the database.
+        rejects: rejects.map((r) => ({
+          stream: r.stream,
+          reason: r.reason,
+          today: Number(r.today),
+          yesterday: Number(r.yesterday),
+          last7d: Number(r.week),
+          lastAt: iso(Number(r.last_ms)),
+        })),
       };
     });
   }

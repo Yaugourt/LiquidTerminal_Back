@@ -29,6 +29,8 @@ const SEARCH_TOLERANCE_BLOCKS = 2;
 /** Interpolation and bisection alternate, so ~2 x log2(blocks) steps always converge. */
 const SEARCH_MAX_STEPS = 64;
 const MEMO_MAX = 512;
+/** Blocks whose time is read one by one for logs returned without it, per range (one call each). */
+const MISSING_TIME_BLOCKS_MAX = 200;
 /**
  * The public RPC answers ~34 items of a burst and sustains ~12 blocks/s at 25 per batch with a 1s
  * gap (measured 2026-10-22); the chain makes ~8 blocks/s.
@@ -71,10 +73,13 @@ export interface UpstreamLogRow {
   data: string;
 }
 
-/** RPC log -> provider row; null when the RPC left out the block timestamp or the log was reorged out. */
-export function toUpstreamLog(l: RpcLog): UpstreamLogRow | null {
-  if (l.removed || !l.blockTimestamp || !l.topics?.length) return null;
-  const seconds = parseInt(l.blockTimestamp, 16);
+/**
+ * RPC log -> provider row; null when the log was reorged out, or when it has no usable time
+ * (`blockSeconds` is the time of its block, for a log the RPC returned without one).
+ */
+export function toUpstreamLog(l: RpcLog, blockSeconds?: number): UpstreamLogRow | null {
+  if (l.removed || !l.topics?.length) return null;
+  const seconds = l.blockTimestamp ? parseInt(l.blockTimestamp, 16) : (blockSeconds ?? NaN);
   if (!Number.isFinite(seconds)) return null;
   return {
     block_time: new Date(seconds * 1000).toISOString(),
@@ -131,14 +136,32 @@ export class ElysiumRpcLogs {
       const hi = Math.min(to, lo + this.logSpan - 1);
       const logs = await this.logsInRange(topic0, lo, hi);
       lo = hi + 1;
+      const times = await this.missingBlockTimes(logs);
       for (const l of logs) {
-        const row = toUpstreamLog(l);
+        const row = toUpstreamLog(l, times.get(l.blockNumber));
         if (!row) continue;
         const t = Date.parse(row.block_time);
         if (t >= start.getTime() && t < end.getTime()) rows.push(row);
       }
     }
     return rows;
+  }
+
+  /**
+   * The time of the blocks of the logs that came back without one (`blockTimestamp` is an
+   * addition of some nodes, not part of the standard answer). Such a log used to be dropped
+   * without a trace; it now takes its block's time, read from the RPC. Past
+   * MISSING_TIME_BLOCKS_MAX blocks in one range the read fails instead, so the stream waits and
+   * says why rather than leaving the logs out.
+   */
+  private async missingBlockTimes(logs: RpcLog[]): Promise<Map<string, number>> {
+    const times = new Map<string, number>();
+    for (const l of logs) {
+      if (l.removed || l.blockTimestamp || times.has(l.blockNumber)) continue;
+      if (times.size >= MISSING_TIME_BLOCKS_MAX) throw new Error('Elysium RPC: logs returned without their block time');
+      times.set(l.blockNumber, await this.blockTime(parseInt(l.blockNumber, 16)));
+    }
+    return times;
   }
 
   /**

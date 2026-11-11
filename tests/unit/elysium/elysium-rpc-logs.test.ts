@@ -1,4 +1,4 @@
-import { toUpstreamLog } from '../../../src/services/elysium/elysium-rpc-logs';
+import { ElysiumRpcLogs, toUpstreamLog } from '../../../src/services/elysium/elysium-rpc-logs';
 import { decodeGraduation } from '../../../src/services/elysium/elysium-launchpad.util';
 
 /** A real Neuriio Graduated log as eth_getLogs returns it on the Kinetiq RPC. */
@@ -31,9 +31,67 @@ describe('elysium RPC logs', () => {
     expect(decodeGraduation(row)).toMatchObject({ token: '0xe37c75b2fcfff1d3ac963552a556e6b78b6d5137' });
   });
 
-  it('drops reorged logs and logs without a block timestamp', () => {
+  it('drops reorged logs; a log without a block timestamp takes the time of its block', () => {
     expect(toUpstreamLog({ ...rpcLog, removed: true })).toBeNull();
     expect(toUpstreamLog({ ...rpcLog, blockTimestamp: undefined })).toBeNull();
+    expect(toUpstreamLog({ ...rpcLog, blockTimestamp: undefined }, 1_791_476_224)?.block_time).toBe(
+      new Date(1_791_476_224_000).toISOString()
+    );
+  });
+});
+
+describe('elysium RPC logs returned without their block time', () => {
+  const BLOCK_TIME = 1_762_862_400; // 2026-11-11T12:00:00Z
+  /** How many times each block was read. */
+  let blockReads: Map<number, number>;
+  const serve = (logs: unknown[]): void => {
+    blockReads = new Map();
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const { method, params } = JSON.parse(String((init as RequestInit).body)) as { method: string; params: unknown[] };
+      let result: unknown;
+      if (method === 'eth_blockNumber') result = '0x3e8';
+      else if (method === 'eth_getLogs') result = logs;
+      else {
+        const n = parseInt(String(params[0]), 16);
+        blockReads.set(n, (blockReads.get(n) ?? 0) + 1);
+        result = { timestamp: `0x${(n === 0 ? 0 : BLOCK_TIME - 1000 + n).toString(16)}` };
+      }
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }));
+    });
+  };
+  const fresh = (): ElysiumRpcLogs => {
+    (ElysiumRpcLogs as unknown as { instance?: unknown }).instance = undefined;
+    return ElysiumRpcLogs.getInstance();
+  };
+  afterEach(() => {
+    jest.restoreAllMocks();
+    // The instance remembers block times: the next tests get one of their own.
+    (ElysiumRpcLogs as unknown as { instance?: unknown }).instance = undefined;
+  });
+
+  it('reads the block of such a log, once per block, and keeps the log', async () => {
+    const at = (block: number, index: number) => ({ ...rpcLog, blockTimestamp: undefined, blockNumber: `0x${block.toString(16)}`, logIndex: `0x${index.toString(16)}` });
+    serve([at(500, 0), at(500, 1), at(501, 0)]);
+    const rpc = fresh();
+    const start = new Date((BLOCK_TIME - 1000 + 400) * 1000);
+    const end = new Date((BLOCK_TIME - 1000 + 600) * 1000);
+
+    const rows = await rpc.getLogs(String(rpcLog.topics[0]), start, end);
+
+    expect(rows.map((r) => [r.block_number, r.log_index, r.block_time])).toEqual([
+      [500, 0, new Date((BLOCK_TIME - 500) * 1000).toISOString()],
+      [500, 1, new Date((BLOCK_TIME - 500) * 1000).toISOString()],
+      [501, 0, new Date((BLOCK_TIME - 499) * 1000).toISOString()],
+    ]);
+    expect([blockReads.get(500), blockReads.get(501)]).toEqual([1, 1]);
+  });
+
+  it('fails the read, rather than leave the logs out, when too many blocks would have to be read', async () => {
+    serve(Array.from({ length: 260 }, (_, i) => ({ ...rpcLog, blockTimestamp: undefined, blockNumber: `0x${(300 + i).toString(16)}` })));
+    const rpc = fresh();
+    const start = new Date((BLOCK_TIME - 1000 + 250) * 1000);
+    const end = new Date((BLOCK_TIME - 1000 + 700) * 1000);
+    await expect(rpc.getLogs(String(rpcLog.topics[0]), start, end)).rejects.toThrow('without their block time');
   });
 });
 

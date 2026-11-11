@@ -14,7 +14,7 @@ jest.mock('../../../src/core/viewScheduler', () => {
       read,
       watch: jest.fn(),
       readOrCompute: jest.fn(),
-      describe: () => [{ view: 'elysium:analytics:status:v2' }],
+      describe: () => [{ view: 'elysium:analytics:status:v3' }],
     },
   };
 });
@@ -51,7 +51,7 @@ describe('Elysium scheduled views', () => {
     const day = { activeS: 60, idleS: 600 };
     const week = { activeS: 300, idleS: 1800, heavy: true };
     expect(Object.fromEntries(registered.map((d) => [d.key, d.cadence]))).toEqual({
-      'elysium:analytics:status:v2': { activeS: 15, idleS: 60, cheap: true },
+      'elysium:analytics:status:v3': { activeS: 15, idleS: 60, cheap: true },
       'elysium:analytics:deployments:d14': day,
       'elysium:analytics:users:d14': day,
       'elysium:analytics:bridge:d14': day,
@@ -103,6 +103,6 @@ describe('Elysium scheduled views', () => {
 
   it('adds where the views stand to the status, read as the request comes', async () => {
     const status = await ElysiumAnalyticsService.getInstance().getStatus();
-    expect(status.data).toMatchObject({ of: 'elysium:analytics:status:v2', views: [{ view: 'elysium:analytics:status:v2' }] });
+    expect(status.data).toMatchObject({ of: 'elysium:analytics:status:v3', views: [{ view: 'elysium:analytics:status:v3' }] });
   });
 });

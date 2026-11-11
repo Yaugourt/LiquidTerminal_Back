@@ -10,6 +10,7 @@ import { ElysiumIngestRepository, ElysiumStream } from '../../repositories/prism
 import { ELYSIUM_PROJECTS } from '../../constants/elysium-projects';
 import { BLOCK_BATCH, ElysiumRpcLogs } from './elysium-rpc-logs';
 import { ElysiumRollupService } from './elysium-rollup.service';
+import { IngestRejects } from './elysium-ingest-rejects';
 import {
   dedupeBy,
   ELYSIUM_GENESIS,
@@ -19,6 +20,7 @@ import {
   normalizeLiveTx,
   normalizeToken,
   normalizeTx,
+  parseUpstreamTime,
   planWindow,
   toUpstreamTime,
   BridgeRow,
@@ -44,10 +46,12 @@ import {
   LAUNCH_TOPIC_ORDER,
   launchMarketCandidates,
   launchMarketKeys,
+  launchRejectReason,
   LaunchMarket,
   LaunchRow,
   LaunchTradeRow,
   Launchpad,
+  marketRejectReason,
   TRADE_TOPICS,
   V4_POOL_MANAGERS,
 } from './elysium-launchpad.util';
@@ -200,6 +204,13 @@ class CallThrottle {
   }
 }
 
+/** A row the provider flags as a system transaction (left out on purpose, never a reject). */
+function isSystemTx(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const v = (raw as Record<string, unknown>).is_system;
+  return v === true || v === 1 || v === '1' || v === 'true';
+}
+
 class IngestStoppedError extends Error {
   constructor() {
     super('Elysium ingestion stopped');
@@ -245,6 +256,15 @@ export class ElysiumIngestionService {
   private readonly throttle = new CallThrottle();
   private readonly rpcLogs = ElysiumRpcLogs.getInstance();
   private readonly rollups = ElysiumRollupService.getInstance();
+  /** What the running ticks read and did not store; written to the database as each tick ends. */
+  private readonly rejects = new IngestRejects();
+  /**
+   * Per stream, the time up to which its rows were already read once (its cursor before the
+   * window being read). A window starts a little before that time on purpose, and the bridge
+   * re-reads hours of transfers: what is left out of those re-read rows was counted when they
+   * were first read, and is not counted again.
+   */
+  private readonly countedUpTo = new Map<ElysiumStream, number>();
   /** Last read of the provider's head, null until the first successful read. */
   private head: { at: number; value: Date | null } | null = null;
 
@@ -317,6 +337,31 @@ export class ElysiumIngestionService {
   }
 
   private async runTick(stream: ElysiumStream, tick: () => Promise<number>): Promise<number> {
+    try {
+      return await this.runLockedTick(stream, tick);
+    } finally {
+      await this.flushRejects();
+    }
+  }
+
+  /**
+   * Writes what the ticks left out since the last write (see IngestRejects). A failed write keeps
+   * the counts for the next one: they are a few entries, one per stream and reason.
+   */
+  private async flushRejects(): Promise<void> {
+    const rows = this.rejects.take();
+    if (rows.length === 0) return;
+    try {
+      await this.repo.addRejects(rows);
+    } catch (error) {
+      this.rejects.restore(rows);
+      logDeduplicator.warn('Elysium ingest: reject counts not written, kept for the next tick', {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+    }
+  }
+
+  private async runLockedTick(stream: ElysiumStream, tick: () => Promise<number>): Promise<number> {
     let next = 0;
     try {
       const ran = await withDistributedLock(`poll:elysium-ingest:${stream}`, LOCK_TTL_S, async () => {
@@ -420,6 +465,37 @@ export class ElysiumIngestionService {
   }
 
   /**
+   * Maps a page of provider rows, counting the ones the mapper refuses (rows without the fields
+   * a row needs) instead of dropping them without a trace. `expected` tells the rows the mapper
+   * leaves out on purpose.
+   */
+  private mapCounted<T>(
+    stream: ElysiumStream,
+    raw: readonly unknown[],
+    map: (row: unknown) => T | null,
+    expected: (row: unknown) => boolean = () => false
+  ): T[] {
+    const rows: T[] = [];
+    for (const r of raw) {
+      const row = map(r);
+      if (row !== null) rows.push(row);
+      else if (!expected(r) && this.firstRead(stream, r)) {
+        this.rejects.note(stream, 'row-malformed', JSON.stringify(r ?? null).slice(0, 300));
+      }
+    }
+    return rows;
+  }
+
+  /** False for a row of the part of a window that was read before (see countedUpTo). */
+  private firstRead(stream: ElysiumStream, raw: unknown): boolean {
+    const upTo = this.countedUpTo.get(stream);
+    if (upTo === undefined || !raw || typeof raw !== 'object') return true;
+    const r = raw as Record<string, unknown>;
+    const time = parseUpstreamTime(r.block_time ?? r.initiated_time);
+    return time === null || time.getTime() > upTo;
+  }
+
+  /**
    * Pages a list endpoint until a short page, handing each page to `onPage`.
    * At the page cap it throws PageCapError, or with `truncate` keeps what it
    * read and returns true: anyone can write to the testnet, so a window that
@@ -470,6 +546,7 @@ export class ElysiumIngestionService {
         ceiling: this.providerCeiling(head),
       });
       if (!w) return TX_LIVE_INTERVAL_MS;
+      this.countedUpTo.set('tx', cursor ? cursor.getTime() : -Infinity);
 
       let inserted = 0;
       try {
@@ -482,10 +559,8 @@ export class ElysiumIngestionService {
             include_system: false,
           },
           async (raw) => {
-            const rows = dedupeBy(
-              raw.map(normalizeTx).filter((r): r is TxRow => r !== null),
-              (r) => r.tx_hash
-            );
+            // System transactions are asked out of the answer; one that comes anyway is not a reject.
+            const rows = dedupeBy(this.mapCounted<TxRow>('tx', raw, normalizeTx, isSystemTx), (r) => r.tx_hash);
             inserted += (await this.repo.insertTxs(rows)).inserted;
           },
           // At the smallest step, keep what was read and move on.
@@ -581,10 +656,7 @@ export class ElysiumIngestionService {
   private async ingestBridgeWindow(params: Record<string, string>): Promise<number> {
     let changed = 0;
     await this.pageAll('/bridge/transfers', params, async (raw) => {
-      const rows = dedupeBy(
-        raw.map(normalizeBridgeTransfer).filter((r): r is BridgeRow => r !== null),
-        (r) => r.transfer_id
-      );
+      const rows = dedupeBy(this.mapCounted<BridgeRow>('bridge', raw, normalizeBridgeTransfer), (r) => r.transfer_id);
       changed += await this.repo.upsertBridgeTransfers(rows);
     }, { truncate: true });
     return changed;
@@ -634,6 +706,8 @@ export class ElysiumIngestionService {
     }
 
     const now = new Date();
+    // The live windows re-read transfers of the last hours: only the ones begun since the last run are new.
+    this.countedUpTo.set('bridge', state.cursor ? state.cursor.getTime() : -Infinity);
     const wide = now.getTime() - this.lastBridgeWideAt >= BRIDGE_WIDE_EVERY_MS;
     const windowMs = wide ? BRIDGE_WIDE_WINDOW_MS : BRIDGE_LIVE_WINDOW_MS;
     let changed = await this.ingestBridgeWindow({
@@ -667,10 +741,7 @@ export class ElysiumIngestionService {
       this.ensureRunning();
       await this.throttle.wait();
       const raw = await this.client.fetchIngestPage('/tokens', { standard: 'erc20', limit: PAGE_SIZE, offset: page * PAGE_SIZE });
-      const rows = dedupeBy(
-        raw.map(normalizeToken).filter((r): r is TokenRow => r !== null),
-        (r) => r.address
-      );
+      const rows = dedupeBy(this.mapCounted<TokenRow>('tokens', raw, normalizeToken), (r) => r.address);
       await this.repo.upsertTokens(rows);
       try {
         await this.repo.nameLaunches(rows);
@@ -717,23 +788,31 @@ export class ElysiumIngestionService {
     let inserted = 0;
     for (const topic0 of [DEX_TOPICS.v2PairCreated, DEX_TOPICS.v3PoolCreated]) {
       await this.pageLogs(source, topic0, start, end, async (raw) => {
-        const rows = dedupeBy(
-          raw.map(decodePoolCreated).filter((r): r is DexPoolRow => r !== null),
-          (r) => r.pool
-        );
+        const rows = dedupeBy(this.decodeCounted<DexPoolRow>('dex', raw, decodePoolCreated), (r) => r.pool);
         inserted += await this.repo.insertDexPools(rows);
       });
     }
     for (const topic0 of [DEX_TOPICS.v2Swap, DEX_TOPICS.v3Swap]) {
       await this.pageLogs(source, topic0, start, end, async (raw) => {
-        const rows = dedupeBy(
-          raw.map(decodeSwap).filter((r): r is DexSwapRow => r !== null),
-          (r) => `${r.tx_hash}:${r.log_index}`
-        );
+        const rows = dedupeBy(this.decodeCounted<DexSwapRow>('dex', raw, decodeSwap), (r) => `${r.tx_hash}:${r.log_index}`);
         inserted += await this.repo.insertDexSwaps(rows);
       });
     }
     return inserted;
+  }
+
+  /**
+   * Decodes a page of logs read by topic, counting the ones that carry the topic and do not
+   * decode: with a topic filter every log of the page is meant for this decoder.
+   */
+  private decodeCounted<T>(stream: ElysiumStream, raw: readonly unknown[], decode: (log: unknown) => T | null): T[] {
+    const rows: T[] = [];
+    for (const r of raw) {
+      const row = decode(r);
+      if (row !== null) rows.push(row);
+      else if (this.firstRead(stream, r)) this.rejects.note(stream, 'log-undecodable', JSON.stringify(r ?? null).slice(0, 300));
+    }
+    return rows;
   }
 
   private async dexTick(): Promise<number> {
@@ -757,6 +836,7 @@ export class ElysiumIngestionService {
         ceiling: lagging ? null : this.providerCeiling(head),
       });
       if (!w) return DEX_LIVE_INTERVAL_MS;
+      this.countedUpTo.set('dex', cursor ? cursor.getTime() : -Infinity);
       const inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging));
       const finishesBackfill = !backfillDone && w.caughtUp;
       await this.repo.advance('dex', {
@@ -890,19 +970,23 @@ export class ElysiumIngestionService {
     // Launches first, so trades in the same window find their market.
     for (const topic0 of LAUNCH_TOPIC_ORDER) {
       await this.pageLogs(source, topic0, start, end, async (raw) => {
-        const rows = dedupeBy(
-          raw.map(decodeLaunch).filter((r): r is LaunchRow => r !== null),
-          (r) => r.token
-        );
-        inserted += await this.repo.insertLaunches(rows);
+        const launches: LaunchRow[] = [];
+        for (const r of raw) {
+          const row = decodeLaunch(r);
+          if (row) launches.push(row);
+          else if (this.firstRead('launchpad', r)) this.noteLogReject(launchRejectReason(r));
+        }
+        inserted += await this.repo.insertLaunches(dedupeBy(launches, (r) => r.token));
       });
     }
     for (const topic0 of GRADUATION_TOPICS) {
       await this.pageLogs(source, topic0, start, end, async (raw) => {
         const known = await this.launchMarketsFor(raw);
-        const rows = raw.map(decodeGraduation).filter((g): g is NonNullable<typeof g> => {
+        const rows = raw.map(decodeGraduation).filter((g, i): g is NonNullable<typeof g> => {
           const key = g?.curve ?? g?.token;
-          return key !== null && key !== undefined && known.has(key);
+          const found = key !== null && key !== undefined && known.has(key);
+          if (!found && this.firstRead('launchpad', raw[i])) this.noteLogReject(marketRejectReason(raw[i], (k) => known.has(k)));
+          return found;
         });
         await this.repo.markGraduated(rows);
       });
@@ -912,14 +996,20 @@ export class ElysiumIngestionService {
     for (const topic0 of TRADE_TOPICS) {
       await this.pageLogs(source, topic0, start, end, async (raw) => {
         const markets = await this.launchMarketsFor(raw);
-        const rows = dedupeBy(
-          raw.map((r) => decodeLaunchTrade(r, markets)).filter((r): r is LaunchTradeRow => r !== null),
-          (r) => `${r.tx_hash}:${r.log_index}`
-        );
-        inserted += await this.repo.insertLaunchTrades(rows);
+        const trades: LaunchTradeRow[] = [];
+        for (const r of raw) {
+          const row = decodeLaunchTrade(r, markets);
+          if (row) trades.push(row);
+          else if (this.firstRead('launchpad', r)) this.noteLogReject(marketRejectReason(r, (k) => markets.has(k)));
+        }
+        inserted += await this.repo.insertLaunchTrades(dedupeBy(trades, (r) => `${r.tx_hash}:${r.log_index}`));
       });
     }
     return inserted;
+  }
+
+  private noteLogReject(reject: { reason: 'log-malformed' | 'log-undecodable' | 'launch-unknown-emitter' | 'market-unknown'; sample: string } | null): void {
+    if (reject) this.rejects.note('launchpad', reject.reason, reject.sample);
   }
 
   /**
@@ -981,6 +1071,7 @@ export class ElysiumIngestionService {
         ceiling: lagging ? null : this.providerCeiling(head),
       });
       if (!w) return LAUNCHPAD_LIVE_INTERVAL_MS;
+      this.countedUpTo.set('launchpad', cursor ? cursor.getTime() : -Infinity);
       const inserted = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging));
       const finishesBackfill = !backfillDone && w.caughtUp;
       await this.repo.advance('launchpad', {
