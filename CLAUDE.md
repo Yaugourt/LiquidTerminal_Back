@@ -261,6 +261,8 @@ try {
 
 Before changing a poll interval, cache TTL, rate limit or upstream budget, read docs/DATA_BUDGET.md and update it in the same commit.
 
+When the Elysium ingestion needs a hand (a stream stopped, a day that differs, the volume filling up, going back): docs/ELYSIUM_RUNBOOK.md. A change to a statement of the Elysium ingestion or views gets a test in tests/db (`npm run test:db`, real Postgres).
+
 ### HyperLiquid (`clients/hyperliquid/`)
 - Spot market data, token info, asset context
 - Perpetual market data
