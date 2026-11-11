@@ -132,6 +132,25 @@ describe('ElysiumRollupService.tick', () => {
     expect(prune).toHaveBeenCalledTimes(2);
   });
 
+  it('a drop of the old days that fails does not end the pass, and is tried again half an hour later (it counted as done for 6 hours)', async () => {
+    listDays.mockResolvedValue(allBuilt().slice(0, -1)); // yesterday waits to be built
+    prune.mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
+    await svc.tick();
+    expect(buildDay).toHaveBeenCalledWith('2026-11-09', expect.anything());
+    expect(prune).toHaveBeenCalledTimes(1);
+
+    (Date.now as jest.Mock).mockReturnValue(NOW + 29 * 60_000);
+    await svc.tick();
+    expect(prune).toHaveBeenCalledTimes(1);
+    (Date.now as jest.Mock).mockReturnValue(NOW + 31 * 60_000);
+    await svc.tick();
+    expect(prune).toHaveBeenCalledTimes(2);
+    // That one went through: not again for 6 hours.
+    (Date.now as jest.Mock).mockReturnValue(NOW + 5 * 3_600_000);
+    await svc.tick();
+    expect(prune).toHaveBeenCalledTimes(2);
+  });
+
   it('clears its last error after a pass that went through', async () => {
     await svc.tick();
     expect(states.advance).toHaveBeenCalledWith('rollup', { cursor: new Date(NOW) });

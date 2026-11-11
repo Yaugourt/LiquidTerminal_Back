@@ -96,6 +96,8 @@ describe('errorCategory', () => {
     expect(errorCategory('API error: 503 Service Unavailable https://upstream.example/elysium/testnet/transactions')).toBe('upstream_http_503');
     expect(errorCategory("Can't reach database server at `db.railway.internal:5432`")).toBe('db_error');
     expect(errorCategory('Command timed out')).toBe('timeout');
+    expect(errorCategory('Elysium ingest: tx tick given up after 300 s without moving on')).toBe('tick_time_limit');
+    expect(errorCategory('Elysium ingest: tx tick given up after 1800 s in all')).toBe('tick_time_limit');
     expect(errorCategory('Elysium ingest: window exceeded the page cap')).toBe('page_cap');
     expect(errorCategory('something else at 10.0.0.3')).toBe('error');
     expect(errorCategory(null)).toBeNull();

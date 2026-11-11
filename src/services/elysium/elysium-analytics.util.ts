@@ -98,6 +98,7 @@ export function errorCategory(message: string | null): string | null {
   if (!message) return null;
   const http = /API error:?\s*(\d{3})/i.exec(message);
   if (http) return `upstream_http_${http[1]}`;
+  if (/tick given up/i.test(message)) return 'tick_time_limit';
   if (/time(d)? ?out/i.test(message)) return 'timeout';
   if (/prisma|database|can't reach|ECONNREFUSED|ECONNRESET/i.test(message)) return 'db_error';
   if (/page/i.test(message)) return 'page_cap';

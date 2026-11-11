@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { HypeDexerElysiumIndexerClient } from '../../clients/hypedexer/rest/elysium/elysium-indexer.client';
 import type {
   ElysiumIngestPageQuery,
@@ -12,6 +11,7 @@ import { ELYSIUM_PROJECTS } from '../../constants/elysium-projects';
 import { BLOCK_BATCH, ElysiumRpcLogs } from './elysium-rpc-logs';
 import { ElysiumRollupService } from './elysium-rollup.service';
 import { IngestRejects } from './elysium-ingest-rejects';
+import { currentTick, tickStep, TickGivenUpError, type TickContext } from './elysium-tick';
 import { ElysiumDayCheckService } from './elysium-day-check.service';
 import {
   dedupeBy,
@@ -121,13 +121,25 @@ const TICK_BUDGET_MS = 40_000;
 /** How long a stream's lock outlives a process that died holding it (it is renewed while a tick runs). */
 const LOCK_TTL_S = 120;
 /**
- * The longest a tick may take. A tick aims at TICK_BUDGET_MS and checks it between two pieces of
- * work; nothing bounded the piece itself. A write that waited on a lock, or an answer whose body
- * stopped half way, then never came back: the stream's loop only starts again when its tick
- * ends, so the stream was stopped until the next restart, with no error to see. Past this limit
- * the tick is given up: the stream records it as an error, and runs again.
+ * The longest a tick may stay on one piece of work. A tick aims at TICK_BUDGET_MS and checks it
+ * between two pieces of work; nothing bounded the piece itself. A write that waited on a lock,
+ * or an answer whose body stopped half way, then never came back: the stream's loop only starts
+ * again when its tick ends, so the stream was stopped until the next restart, with no error to
+ * see. A tick that has not moved on to its next piece (a page, a write, a window) for this long
+ * is given up: the stream records it as an error, and runs again.
+ *
+ * It is a time without moving on, not the tick's whole duration: after an outage of the
+ * provider the tx stream reads windows of an hour, a hundred pages each, and one such window
+ * can take longer than this. Cut at a fixed duration it would have been started over from its
+ * first page every time, for ever.
  */
 const TICK_LIMIT_MS = 5 * MINUTE_MS;
+/**
+ * A tick that keeps moving on is still given up after this many times its limit (30 minutes for
+ * most streams): the windowed streams then take a window half as long at their next run, so a
+ * window too big to be read within that converges instead of being started over.
+ */
+const TICK_TOTAL_FACTOR = 6;
 /** How often, at most, a stream's completed run and the provider's head are written for the status route. */
 const STATE_WRITE_EVERY_MS = 30_000;
 /** A registry run reads 40 pages of a slow listing (about 7 minutes, measured 2026-11-10). */
@@ -308,24 +320,18 @@ class IngestStoppedError extends Error {
   }
 }
 
-/** A tick that ran past its time limit: what its stream records. */
+/** A tick given up at its time limit: what its stream records. */
 class TickTimeLimitError extends Error {
-  constructor(stream: string, limitMs: number) {
-    super(`Elysium ingest: ${stream} tick given up after ${Math.round(limitMs / 1000)} s`);
+  constructor(
+    stream: string,
+    seconds: number,
+    /** True when the tick stood still; false when it kept moving on and ran past its whole allowance. */
+    public readonly stoodStill: boolean
+  ) {
+    super(`Elysium ingest: ${stream} tick given up after ${seconds} s ${stoodStill ? 'without moving on' : 'in all'}`);
     this.name = 'TickTimeLimitError';
   }
 }
-
-/** What a tick given up for running too long throws at its next step, so it stops there instead of running beside its successor. */
-class TickGivenUpError extends Error {
-  constructor() {
-    super('Elysium ingest: tick given up');
-    this.name = 'TickGivenUpError';
-  }
-}
-
-/** The tick the current call belongs to, and whether it was given up. */
-const currentTick = new AsyncLocalStorage<{ givenUp: boolean }>();
 
 /**
  * Elysium ingestion: pulls raw txs, bridge transfers and the token registry
@@ -523,6 +529,7 @@ export class ElysiumIngestionService {
       return next;
     } catch (error) {
       if (error instanceof IngestStoppedError) return 0;
+      if (error instanceof TickTimeLimitError && !error.stoodStill) this.shrinkStep(stream);
       const count = (this.failures.get(stream) ?? 0) + 1;
       this.failures.set(stream, count);
       const message = error instanceof Error ? error.message : String(error);
@@ -558,21 +565,33 @@ export class ElysiumIngestionService {
   }
 
   /**
-   * Runs a tick, and gives it up when it is not over after its stream's time limit. The tick
-   * itself cannot be interrupted: it is marked as given up, and stops at its next step
-   * (ensureRunning) instead of going on beside the tick that follows it. One that never comes
-   * back stays pending, and harms nothing: its stream runs again.
+   * Runs a tick, and gives it up when it has not moved on for its stream's time limit (or has
+   * run for TICK_TOTAL_FACTOR times that in all). The tick itself cannot be interrupted: it is
+   * marked as given up, and stops at its next step (ensureRunning) instead of going on beside
+   * the tick that follows it. One that never comes back stays pending, and harms nothing: its
+   * stream runs again.
    */
   private async withinTimeLimit(stream: ElysiumStream, tick: () => Promise<number>): Promise<number> {
     const limitMs = this.tickLimit(stream);
-    const context = { givenUp: false };
+    const totalMs = TICK_TOTAL_FACTOR * limitMs;
+    const started = Date.now();
+    const context: TickContext = { givenUp: false, movedAt: started };
     const work = currentTick.run(context, tick);
     let timer: NodeJS.Timeout | undefined;
     const limit = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        context.givenUp = true;
-        reject(new TickTimeLimitError(stream, limitMs));
-      }, limitMs);
+      const look = (): void => {
+        const now = Date.now();
+        const still = now - context.movedAt;
+        const total = now - started;
+        if (still >= limitMs || total >= totalMs) {
+          context.givenUp = true;
+          reject(new TickTimeLimitError(stream, Math.round((still >= limitMs ? still : total) / 1000), still >= limitMs));
+          return;
+        }
+        timer = setTimeout(look, Math.min(limitMs - still, totalMs - total));
+        timer.unref?.();
+      };
+      timer = setTimeout(look, limitMs);
       timer.unref?.();
     });
     try {
@@ -688,9 +707,29 @@ export class ElysiumIngestionService {
     return true;
   }
 
+  /** Between two pieces of work: stops a tick that was stopped or given up, and notes that this one moved on. */
   private ensureRunning(): void {
     if (this.stopped) throw new IngestStoppedError();
-    if (currentTick.getStore()?.givenUp) throw new TickGivenUpError();
+    tickStep();
+  }
+
+  /**
+   * True for what ends a tick on purpose (the service stopping, the tick given up at its time
+   * limit): never a failure of the work in hand, so never caught as one.
+   */
+  private static endsTick(error: unknown): boolean {
+    return error instanceof IngestStoppedError || error instanceof TickGivenUpError;
+  }
+
+  /**
+   * After a tick that kept moving on and still ran past its whole allowance: the stream takes a
+   * window half as long at its next run. Without it the same window would be started over, and
+   * given up at the same point, for as long as it holds more than can be read in that time.
+   */
+  private shrinkStep(stream: ElysiumStream): void {
+    if (stream === 'tx') this.txStepMs = Math.max(MIN_STEP_MS, Math.floor(this.txStepMs / 2));
+    else if (stream === 'dex') this.dexStepMs = Math.max(MIN_STEP_MS, Math.floor(this.dexStepMs / 2));
+    else if (stream === 'launchpad') this.launchpadStepMs = Math.max(MIN_STEP_MS, Math.floor(this.launchpadStepMs / 2));
   }
 
   /**
@@ -912,6 +951,8 @@ export class ElysiumIngestionService {
       const count = Math.min(BLOCK_BATCH, tip - this.liveBlock + 1);
       if (count <= 0) return TXLIVE_LIVE_INTERVAL_MS;
       const blocks = await this.rpcLogs.getBlocks(this.liveBlock, count);
+      // A tick given up while it waited stops here: its successor reads from its own pointer.
+      this.ensureRunning();
       if (blocks.length > 0) {
         const rows = dedupeBy(
           blocks.flatMap((b) =>
@@ -1106,7 +1147,7 @@ export class ElysiumIngestionService {
         raw = await this.client.fetchIngestBridgeTransfers(deposit.tx_hash);
         failedInARow = 0;
       } catch (error) {
-        if (error instanceof IngestStoppedError) throw error;
+        if (ElysiumIngestionService.endsTick(error)) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.rejects.note('bridge', 'transfer-unreadable', `${deposit.transfer_id} ${message.slice(0, 160)}`);
         // The provider is failing: the rest waits for the next pass. Never a reason to fail this
@@ -1399,7 +1440,7 @@ export class ElysiumIngestionService {
       }
       await this.repo.nameLaunches([row]);
     } catch (error) {
-      if (error instanceof IngestStoppedError) throw error;
+      if (ElysiumIngestionService.endsTick(error)) throw error;
       logDeduplicator.warn('Elysium ingest: new launch not named from its token page', {
         errorType: error instanceof Error ? error.name : typeof error,
       });
@@ -1424,7 +1465,7 @@ export class ElysiumIngestionService {
    * unreadable tokens at the head of the queue was then never passed).
    */
   private noteTokenFailure(stream: ElysiumStream, token: string, error: unknown, inARow: number): void {
-    if (error instanceof IngestStoppedError) throw error;
+    if (ElysiumIngestionService.endsTick(error)) throw error;
     this.setAside(stream, token, TOKEN_FAILURE_RETRY_MS);
     const message = error instanceof Error ? error.message : String(error);
     this.rejects.note(stream, 'token-unreadable', `${token} ${message.slice(0, 160)}`);
@@ -1619,7 +1660,7 @@ export class ElysiumIngestionService {
       }
       this.kilnHistoryDone = true;
     } catch (error) {
-      if (error instanceof IngestStoppedError) throw error;
+      if (ElysiumIngestionService.endsTick(error)) throw error;
       this.kilnHistoryRetryAt = Date.now() + 10 * MINUTE_MS;
       logDeduplicator.warn('Elysium ingest: Kiln graduation history not read, retrying later', {
         errorType: error instanceof Error ? error.name : typeof error,

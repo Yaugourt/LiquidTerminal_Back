@@ -1,6 +1,7 @@
 import { ElysiumIngestRepository } from '../../repositories/prisma/prisma.elysium.repository';
 import { ElysiumRollupRepository } from '../../repositories/prisma/prisma.elysium-rollup.repository';
 import { logDeduplicator } from '../../utils/logDeduplicator';
+import { tickStep } from './elysium-tick';
 import { ELYSIUM_GENESIS } from './elysium-ingest.util';
 import {
   closedRollupDays,
@@ -19,6 +20,8 @@ const IDLE_INTERVAL_MS = 5 * 60_000;
 const BACKLOG_INTERVAL_MS = 5_000;
 /** Old days are dropped at most this often. */
 const PRUNE_EVERY_MS = 6 * 3_600_000;
+/** A drop that failed is tried again after this long. */
+const PRUNE_RETRY_MS = 30 * 60_000;
 /** A day whose build failed is left alone for this long, doubled at each failure, up to RETRY_MAX_MS. */
 const RETRY_MIN_MS = 5 * 60_000;
 const RETRY_MAX_MS = 6 * 3_600_000;
@@ -74,15 +77,26 @@ export class ElysiumRollupService {
     const closed = closedRollupDays(cursor, now, ELYSIUM_GENESIS);
     const keep = rollupKeepDays();
 
-    // Old days are dropped on schedule, whatever waits to be built.
+    // Old days are dropped on schedule, whatever waits to be built. A drop that fails is tried
+    // again half an hour later, and does not keep this pass from building: it used to count as
+    // done for six hours, and to end the pass there.
     if (now.getTime() - this.lastPruneAt >= PRUNE_EVERY_MS) {
-      this.lastPruneAt = now.getTime();
-      const removed = await this.repo.prune({
-        calls: firstKeptDay(now, keep),
-        callers: firstKeptDay(now, Math.min(keep, ROLLUP_CALLERS_KEEP_DAYS)),
-        senders: firstKeptDay(now, Math.min(keep, ROLLUP_SENDERS_KEEP_DAYS)),
-      });
-      if (removed > 0) logDeduplicator.info('Elysium rollups: old days dropped', { rows: removed });
+      try {
+        const removed = await this.repo.prune({
+          calls: firstKeptDay(now, keep),
+          callers: firstKeptDay(now, Math.min(keep, ROLLUP_CALLERS_KEEP_DAYS)),
+          senders: firstKeptDay(now, Math.min(keep, ROLLUP_SENDERS_KEEP_DAYS)),
+        });
+        this.lastPruneAt = now.getTime();
+        if (removed > 0) logDeduplicator.info('Elysium rollups: old days dropped', { rows: removed });
+      } catch (error) {
+        this.lastPruneAt = now.getTime() - PRUNE_EVERY_MS + PRUNE_RETRY_MS;
+        logDeduplicator.warn('Elysium rollups: old days not dropped, tried again later', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        });
+      }
+      // The drop and the build are two pieces of work: the tick's time limit counts each on its own.
+      tickStep();
     }
 
     const known = new Map((await this.repo.listDays(firstKeptDay(now, keep))).map((d) => [d.day, d]));

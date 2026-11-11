@@ -1,8 +1,10 @@
 /**
  * A stream's loop starts again when its tick ends, and nothing bounded a tick: a write that
  * waited on a lock, or an answer whose body stopped half way, stopped the stream until the next
- * restart, with no error to see (2026-11-11). A tick is now given up after its stream's time
- * limit: the stream records it and runs again, and the tick given up stops at its next step.
+ * restart, with no error to see (2026-11-11). A tick that has not moved on to its next piece of
+ * work for its stream's time limit is now given up: the stream records it and runs again, and
+ * the tick given up stops at its next step. A tick that keeps moving on is left to run (a long
+ * window after an outage), up to six times that limit; the stream's window is then halved.
  * The stream's lock is its own, and is kept for as long as the tick runs.
  */
 const mockLog = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
@@ -32,6 +34,8 @@ import { ElysiumIngestRepository } from '../../../src/repositories/prisma/prisma
 const MIN = 60_000;
 type Internals = {
   stopped: boolean;
+  txStepMs: number;
+  dexStepMs: number;
   runTick: (stream: string, tick: () => Promise<number>) => Promise<number>;
   ensureRunning: () => void;
 };
@@ -73,8 +77,66 @@ describe('Elysium ingestion: a tick that does not come back', () => {
     await jest.advanceTimersByTimeAsync(2_000);
     // One failure: the usual wait of the stream, doubled.
     expect(settled).toBe(60_000);
-    expect(recordError).toHaveBeenCalledWith('tx', 'Elysium ingest: tx tick given up after 300 s');
+    expect(recordError).toHaveBeenCalledWith('tx', 'Elysium ingest: tx tick given up after 300 s without moving on');
     expect(mockRedis.locks.has('poll:elysium-ingest:tx')).toBe(false);
+    // It stood still: its window is not the cause, and stays as it is.
+    expect(svc.txStepMs).toBe(60 * MIN);
+  });
+
+  /** A tick that finishes a piece of work every `everyMs`, for `forMs` in all. */
+  const moving = (everyMs: number, forMs: number) => async (): Promise<number> => {
+    for (let spent = 0; spent < forMs; spent += everyMs) {
+      await new Promise((r) => setTimeout(r, everyMs));
+      svc.ensureRunning();
+    }
+    return 30_000;
+  };
+
+  it('a tick that keeps moving on is not given up at 5 minutes: an hour of transactions after an outage takes longer than that', async () => {
+    let settled: number | undefined;
+    void svc.runTick('tx', moving(20_000, 12 * MIN)).then((next) => {
+      settled = next;
+    });
+    await jest.advanceTimersByTimeAsync(11 * MIN + 50_000);
+    expect(settled).toBeUndefined();
+    expect(mockRedis.locks.has('poll:elysium-ingest:tx')).toBe(true);
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(settled).toBe(30_000);
+    expect(recordError).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('a tick that moved on and then stands still is given up 5 minutes after its last step', async () => {
+    let settled = false;
+    const tick = async (): Promise<number> => {
+      await moving(60_000, 3 * MIN)();
+      return new Promise<number>(() => undefined); // then a statement that never comes back
+    };
+    void svc.runTick('dex', tick).then(() => {
+      settled = true;
+    });
+    await jest.advanceTimersByTimeAsync(7 * MIN + 50_000);
+    expect(settled).toBe(false);
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(settled).toBe(true);
+    expect(recordError).toHaveBeenCalledWith('dex', 'Elysium ingest: dex tick given up after 300 s without moving on');
+  });
+
+  it('a tick still moving on after 30 minutes is given up, and its stream takes a window half as long next time', async () => {
+    let settled = false;
+    void svc.runTick('tx', moving(30_000, 60 * MIN)).then(() => {
+      settled = true;
+    });
+    await jest.advanceTimersByTimeAsync(29 * MIN + 30_000);
+    expect(settled).toBe(false);
+    await jest.advanceTimersByTimeAsync(MIN);
+    expect(settled).toBe(true);
+    expect(recordError).toHaveBeenCalledWith('tx', 'Elysium ingest: tx tick given up after 1800 s in all');
+    expect(svc.txStepMs).toBe(30 * MIN);
+    // The tick given up stops at its next step.
+    const before = jest.getTimerCount();
+    await jest.advanceTimersByTimeAsync(2 * MIN);
+    expect(jest.getTimerCount()).toBeLessThanOrEqual(before);
   });
 
   it('the tick given up stops at its next step instead of going on beside the next one', async () => {
@@ -120,7 +182,7 @@ describe('Elysium ingestion: a tick that does not come back', () => {
       await jest.advanceTimersByTimeAsync(2 * MIN);
       expect(settled).toBe(true);
     }
-    expect(recordError).toHaveBeenCalledWith('tokens', 'Elysium ingest: tokens tick given up after 1200 s');
+    expect(recordError).toHaveBeenCalledWith('tokens', 'Elysium ingest: tokens tick given up after 1200 s without moving on');
   });
 
   it('does not start a stream another process holds', async () => {
