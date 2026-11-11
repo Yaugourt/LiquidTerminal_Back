@@ -71,6 +71,19 @@ export type FeesWindow = '24h' | '7d' | '30d';
 export const BOT_TXS_24H = 500;
 export const BOT_SHARE_24H = 0.01;
 
+/** What the status view holds. `partial` names the parts that could not be read at this computation. */
+export interface ElysiumStatus {
+  partial: string[];
+  streams: Array<Record<string, unknown>>;
+  rollups: Record<string, unknown>;
+  rejects: Array<Record<string, unknown>>;
+  completeness: Record<string, unknown>;
+  provider: Record<string, unknown>;
+  upkeep: Array<Record<string, unknown>>;
+  credits: Record<string, unknown> | null;
+  database: Record<string, unknown>;
+}
+
 export interface MethodRef {
   methodId: string;
   signature: string | null;
@@ -158,22 +171,22 @@ export class ElysiumAnalyticsService {
    * disk (indexes included). The only view of the rollups from outside the
    * database.
    */
-  public async getStatus(): Promise<
-    ViewResult<{
-      streams: Array<Record<string, unknown>>;
-      rollups: Record<string, unknown>;
-      rejects: Array<Record<string, unknown>>;
-      completeness: Record<string, unknown>;
-      provider: Record<string, unknown>;
-      upkeep: Array<Record<string, unknown>>;
-      credits: Record<string, unknown> | null;
-      database: Record<string, unknown>;
-      views: Array<Record<string, unknown>>;
-    }>
-  > {
+  public async getStatus(): Promise<ViewResult<ElysiumStatus & { views: Array<Record<string, unknown>> }>> {
     const status = await viewScheduler.read(this.statusView());
     // Where the scheduled views stand is read from this process as the request comes, never stored.
     return new ViewResult({ ...status.data, views: viewScheduler.describe() }, status.computedAt, status.refreshEveryS);
+  }
+
+  /**
+   * What the public route serves: how the data is doing. What the provider bills, what is left
+   * on the account and how full the database's volume is are for whoever runs the service (the
+   * alerts read them, and the admin route serves them): on a public route they would tell
+   * anyone when the credits or the disk are about to run out.
+   */
+  public async getPublicStatus(): Promise<ViewResult<Omit<ElysiumStatus, 'credits' | 'database'> & { views: Array<Record<string, unknown>> }>> {
+    const full = await this.getStatus();
+    const { credits: _credits, database: _database, ...rest } = full.data;
+    return new ViewResult(rest, full.computedAt, full.refreshEveryS);
   }
 
   /**
@@ -182,30 +195,24 @@ export class ElysiumAnalyticsService {
    * used to read the analytics pool on request and did not answer for 20 s
    * while that pool was full of aggregates.
    */
-  private statusView(): ViewDef<{
-    streams: Array<Record<string, unknown>>;
-    rollups: Record<string, unknown>;
-    rejects: Array<Record<string, unknown>>;
-    completeness: Record<string, unknown>;
-    provider: Record<string, unknown>;
-    upkeep: Array<Record<string, unknown>>;
-    credits: Record<string, unknown> | null;
-    database: Record<string, unknown>;
-  }> {
+  private statusView(): ViewDef<ElysiumStatus> {
     return this.view('status', 'v5', CADENCE.status, async () => {
-      const [all, days, sizes, rejects, checks, credits] = await Promise.all([
+      // A part that cannot be read is named in `partial` and shown empty: the rest of the status
+      // is still worth serving, and whoever reads it (the alerts) must not take "could not be
+      // read" for "nothing there".
+      const [all, daysRead, sizesRead, rejectsRead, checksRead, credits] = await Promise.all([
         ElysiumIngestRepository.getInstance().listStates(),
         prismaHistoricalPages.$queryRaw<Array<{ day: string; built_ms: number | null }>>`
           SELECT day::text AS day, (extract(epoch FROM built_at) * 1000)::float8 AS built_ms
           FROM elysium_day_rollup
           WHERE built_at IS NOT NULL AND NOT dirty AND day >= ${firstKeptDay(new Date(), rollupKeepDays())}::date
-          ORDER BY day`.catch(() => []),
+          ORDER BY day`.catch(() => null),
         prismaHistoricalPages.$queryRaw<Array<{ rollups: number; tx: number; database: number }>>`
           SELECT (pg_total_relation_size('elysium_call_day') + pg_total_relation_size('elysium_caller_day')
                   + pg_total_relation_size('elysium_caller_set') + pg_total_relation_size('elysium_method_sender_day')
                   + pg_total_relation_size('elysium_day_rollup'))::float8 AS rollups,
                  pg_total_relation_size('elysium_tx')::float8 AS tx,
-                 pg_database_size(current_database())::float8 AS database`.catch(() => []),
+                 pg_database_size(current_database())::float8 AS database`.catch(() => null),
         // What the ingestion read and did not store over the last 7 UTC days, per stream and reason.
         prismaHistoricalPages.$queryRaw<
           Array<{ stream: string; reason: string; today: number; yesterday: number; week: number; last_ms: number }>
@@ -218,7 +225,7 @@ export class ElysiumAnalyticsService {
           FROM elysium_ingest_reject
           WHERE day >= (now() AT TIME ZONE 'UTC')::date - 6
           GROUP BY stream, reason
-          ORDER BY stream, reason`.catch(() => []),
+          ORDER BY stream, reason`.catch(() => null),
         // Each closed day of the last week against the provider's own count of it (ElysiumDayCheckService).
         prismaHistoricalPages.$queryRaw<
           Array<{
@@ -244,10 +251,20 @@ export class ElysiumAnalyticsService {
                  rereads, rows_added, rows_corrected, rows_removed
           FROM elysium_day_check
           WHERE day >= (now() AT TIME ZONE 'UTC')::date - 8
-          ORDER BY day`.catch(() => []),
+          ORDER BY day`.catch(() => null),
         // What the provider billed, from the meter's totals in Redis (null when Redis cannot say).
         hypedexerCreditMeter.summary(),
       ]);
+      const partial: string[] = [];
+      if (daysRead === null) partial.push('rollups');
+      if (sizesRead === null) partial.push('database');
+      if (rejectsRead === null) partial.push('rejects');
+      if (checksRead === null) partial.push('completeness');
+      if (credits === null) partial.push('credits');
+      const days = daysRead ?? [];
+      const sizes = sizesRead ?? [];
+      const rejects = rejectsRead ?? [];
+      const checks = checksRead ?? [];
       // Markers (a one-time rebuild, a position in a listing) are not streams: they have no lag to show.
       const rows = all.filter((r) => !ELYSIUM_STATE_MARKERS.has(r.stream));
       const builder = all.find((r) => r.stream === 'rollup');
@@ -264,6 +281,7 @@ export class ElysiumAnalyticsService {
       const volumeBytes = positiveIntEnv('HISTORICAL_DB_VOLUME_BYTES', 0);
       const databaseBytes = sizes[0] ? Number(sizes[0].database) : null;
       return {
+        partial,
         streams: rows.map((r) => {
           const health = streamHealth(r, now, providerHead);
           return {
@@ -310,8 +328,9 @@ export class ElysiumAnalyticsService {
           usedShare: volumeBytes > 0 && databaseBytes !== null ? databaseBytes / volumeBytes : null,
         },
         rollups: {
-          builtDays: built.size,
-          waitingDays: due.filter((day) => !built.has(day)).length,
+          // Unknown, not zero and not "all of them", when the list of built days could not be read.
+          builtDays: daysRead === null ? null : built.size,
+          waitingDays: daysRead === null ? null : due.filter((day) => !built.has(day)).length,
           firstDay: days[0]?.day.slice(0, 10) ?? null,
           lastDay: days[days.length - 1]?.day.slice(0, 10) ?? null,
           lastBuiltAt: iso(lastBuilt),

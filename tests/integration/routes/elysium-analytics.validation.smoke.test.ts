@@ -24,8 +24,23 @@ jest.mock('../../../src/core/redis.service', () => ({
   },
 }));
 
+// Who may read a route: the real middlewares open the database and Privy; here a token named
+// "admin" is an admin's, and anything else is nobody's.
+jest.mock('../../../src/middleware/authMiddleware', () => ({
+  validatePrivyToken: (req: Request, res: Response, next: NextFunction) => {
+    if (req.headers.authorization === 'Bearer admin') next();
+    else res.status(401).json({ success: false, code: 'UNAUTHENTICATED' });
+  },
+}));
+jest.mock('../../../src/middleware/roleMiddleware', () => ({
+  requireAdmin: (_req: Request, _res: Response, next: NextFunction) => {
+    next();
+  },
+}));
+
 const mockService = {
-  getStatus: jest.fn().mockResolvedValue({ streams: [] }),
+  getStatus: jest.fn().mockResolvedValue({ streams: [], credits: { balance: 5 }, database: { bytes: 1 } }),
+  getPublicStatus: jest.fn().mockResolvedValue({ streams: [] }),
   getDeployments: jest.fn().mockResolvedValue({ daily: [], topDeployers: [], trending: [] }),
   getContracts: jest.fn().mockResolvedValue({ rows: [] }),
   getUsers: jest.fn().mockResolvedValue({ daily: [] }),
@@ -102,6 +117,22 @@ describe('Elysium analytics GET validation smoke', () => {
     const res = await request(app).get(path);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ success: true });
+  });
+
+  it('the public status is the one without the spend and the size of the database; the full one asks for an admin', async () => {
+    mockService.getStatus.mockClear();
+    const open = await request(app).get('/elysium/analytics/status');
+    expect(open.status).toBe(200);
+    expect(open.body.data).toEqual({ streams: [] });
+    expect(mockService.getStatus).not.toHaveBeenCalled();
+
+    const refused = await request(app).get('/elysium/analytics/status/ops');
+    expect(refused.status).toBe(401);
+    expect(mockService.getStatus).not.toHaveBeenCalled();
+
+    const ops = await request(app).get('/elysium/analytics/status/ops').set('Authorization', 'Bearer admin');
+    expect(ops.status).toBe(200);
+    expect(ops.body.data).toEqual({ streams: [], credits: { balance: 5 }, database: { bytes: 1 } });
   });
 
   it('applies defaults (days=14, window=24h)', async () => {

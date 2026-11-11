@@ -105,4 +105,13 @@ describe('Elysium scheduled views', () => {
     const status = await ElysiumAnalyticsService.getInstance().getStatus();
     expect(status.data).toMatchObject({ of: 'elysium:analytics:status:v5', views: [{ view: 'elysium:analytics:status:v5' }] });
   });
+
+  it('the public status leaves out what the provider bills, the balance and the size of the database', async () => {
+    const full = { partial: [], streams: [{ stream: 'tx' }], credits: { balance: 5, days: [] }, database: { bytes: 1, usedShare: 0.5 } };
+    read.mockResolvedValueOnce({ data: full as never, computedAt: '2026-11-11T18:00:00.000Z', refreshEveryS: 15 });
+    const open = await ElysiumAnalyticsService.getInstance().getPublicStatus();
+    expect(open.data).toEqual({ partial: [], streams: [{ stream: 'tx' }], views: [{ view: 'elysium:analytics:status:v5' }] });
+    expect(open.computedAt).toBe('2026-11-11T18:00:00.000Z');
+    expect(open.refreshEveryS).toBe(15);
+  });
 });

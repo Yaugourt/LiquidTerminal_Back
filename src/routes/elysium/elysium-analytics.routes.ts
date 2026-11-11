@@ -2,6 +2,8 @@ import { Router, Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
 import { addressLookupRateLimiter, elysiumSearchRateLimiter, marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateGetRequest } from '../../middleware/validation';
+import { validatePrivyToken } from '../../middleware/authMiddleware';
+import { requireAdmin } from '../../middleware/roleMiddleware';
 import {
   elysiumAnalyticsAddressSchema,
   elysiumAnalyticsContractsSchema,
@@ -53,7 +55,9 @@ function register<S extends QuerySchema>(
   schema: S,
   code: string,
   handler: (query: z.infer<S['shape']['query']>, params: z.infer<S['shape']['params']>, client: string) => Promise<unknown>,
-  extraLimiter?: RequestHandler
+  extraLimiter?: RequestHandler,
+  /** Run after the rate limiters and before anything else: who may read the route. */
+  guards: RequestHandler[] = []
 ): void {
   const querySchema = schema.shape.query;
   const paramsSchema = schema.shape.params;
@@ -61,6 +65,7 @@ function register<S extends QuerySchema>(
     path,
     marketRateLimiter,
     ...(extraLimiter ? [extraLimiter] : []),
+    ...guards,
     validateGetRequest(schema),
     (async (req: Request, res: Response) => {
       try {
@@ -105,7 +110,17 @@ function register<S extends QuerySchema>(
   );
 }
 
-register('/status', elysiumAnalyticsStatusSchema, 'ELYSIUM_ANALYTICS_STATUS_ERROR', () => service.getStatus());
+// How the data is doing: public. What the provider bills, the balance of the account and how
+// full the database's volume is: for an admin (the alerts read the same figures in-process).
+register('/status', elysiumAnalyticsStatusSchema, 'ELYSIUM_ANALYTICS_STATUS_ERROR', () => service.getPublicStatus());
+register(
+  '/status/ops',
+  elysiumAnalyticsStatusSchema,
+  'ELYSIUM_ANALYTICS_STATUS_ERROR',
+  () => service.getStatus(),
+  undefined,
+  [validatePrivyToken as RequestHandler, requireAdmin as RequestHandler]
+);
 
 register('/deployments', elysiumAnalyticsDaysSchema, 'ELYSIUM_ANALYTICS_DEPLOYMENTS_ERROR', (q) =>
   service.getDeployments(q.days)

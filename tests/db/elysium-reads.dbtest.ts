@@ -27,6 +27,7 @@ interface FeesValue {
   totals: Record<string, number>;
 }
 interface StatusValue {
+  partial: string[];
   streams: Array<Record<string, unknown>>;
   provider: Record<string, unknown>;
   upkeep: Array<Record<string, unknown>>;
@@ -213,7 +214,9 @@ describe('the status of the streams', () => {
   it('the size of the database is shown, with the share in use once the volume\'s size is given', async () => {
     expect(status.database.bytes).toBeGreaterThan(1_000_000);
     expect(status.database).toMatchObject({ volumeBytes: null, usedShare: null });
+    // No Redis in this test: the credits are unknown, and said to be; everything read from the database was read.
     expect(status.credits).toBeNull();
+    expect(status.partial).toEqual(['credits']);
     process.env.HISTORICAL_DB_VOLUME_BYTES = String(status.database.bytes * 2);
     try {
       const withVolume = await analytics.statusView().compute();
