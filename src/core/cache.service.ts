@@ -264,6 +264,10 @@ export class CacheService {
     const keepLastCopy = options.lastCopy !== false;
     try {
       const cachedData = await redisService.get(key);
+      // Redis answers again: what this process kept of the key during the outage is over. Left
+      // there, it would be served again if Redis went down once more within its TTL, in place
+      // of whatever was stored or invalidated in between.
+      if (this.memory.size > 0) this.memoryDrop(key);
       if (cachedData) {
         return { data: JSON.parse(cachedData), stale: false };
       }
@@ -613,6 +617,7 @@ export class CacheService {
     };
     try {
       const raw = await redisService.get(swrKey);
+      if (this.memory.size > 0) this.memoryDrop(key);
       if (raw) {
         const entry = JSON.parse(raw) as { at: number; value: T };
         if (Date.now() - entry.at > freshS * 1000 && !upstreamRefusal()) {
@@ -709,7 +714,8 @@ export class CacheService {
    * @param pattern Pattern des clés à invalider
    */
   async invalidateByPattern(pattern: string): Promise<void> {
-    const matches = new RegExp(`^${pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
+    // `s`: a key can hold a line terminator (a search text written into it), and `*` matches it in Redis.
+    const matches = new RegExp(`^${pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`, 's');
     for (const key of [...this.memory.keys()]) if (matches.test(key)) this.memoryDrop(key);
     try {
       const [keys, copies] = await Promise.all([

@@ -762,6 +762,31 @@ describe('CacheService while Redis cannot be used', () => {
     await expect(cache.getOrSet('k', async () => 'fetched', 60)).resolves.toBe('from Redis');
   });
 
+  it('forgets what it kept of a key once Redis has answered for it: a second outage does not bring the old value back', async () => {
+    await cache.getOrSet('k', async () => 'first outage', 300);
+    await cache.getOrRefresh('agg', async () => 'first outage', 300, 3600);
+    // Redis is back; the keys are read through it (and changed there meanwhile, by anyone).
+    mockRedis.healthy = true;
+    mockRedis.store.set('k', JSON.stringify('changed since'));
+    mockRedis.store.set('agg:swr', JSON.stringify({ at: now, value: 'changed since' }));
+    await cache.getOrSet('k', async () => 'unused', 300);
+    await cache.getOrRefresh('agg', async () => 'unused', 300, 3600);
+    // Redis goes down again, within the TTL of what was kept the first time.
+    mockRedis.healthy = false;
+    now += 30_000;
+    await expect(cache.getOrSet('k', async () => 'second outage', 300)).resolves.toBe('second outage');
+    await expect(cache.getOrRefresh('agg', async () => 'second outage', 300, 3600)).resolves.toBe('second outage');
+  });
+
+  it('forgets by pattern a key that holds a line terminator, as Redis does', async () => {
+    const key = `crud:list:${JSON.stringify({ q: 'two\u2028lines' })}`;
+    const fetchFn = jest.fn(async () => 1);
+    await cache.getOrSet(key, fetchFn, 60);
+    await cache.invalidateByPattern('crud:list:*');
+    await cache.getOrSet(key, fetchFn, 60);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps a value too when Redis answers but the cache itself fails', async () => {
     mockRedis.healthy = true;
     const broken = new Error('READONLY You can\'t write against a read only replica');
