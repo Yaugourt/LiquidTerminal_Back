@@ -141,6 +141,8 @@ describe('BaseApiService time limit', () => {
   });
 
   class OneShot extends BaseApiService {
+    // The body's own limit, short enough for a test (120 s in the real clients).
+    protected readonly bodyTimeoutMs = 400;
     public once<T>(endpoint: string, timeoutMs: number): Promise<T> {
       return this.fetchWithTimeout<T>(endpoint, { method: 'GET' }, timeoutMs);
     }
@@ -157,12 +159,47 @@ describe('BaseApiService time limit', () => {
     return new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } });
   };
 
-  it('covers the reading of the body: an answer that stops half way ends at the time limit (it was waited for with no limit)', async () => {
+  it('covers the reading of the body: an answer that stops half way ends at the body\'s limit (it was waited for with no limit)', async () => {
     global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => stalledBody(init?.signal as AbortSignal)) as unknown as typeof fetch;
     const client = new OneShot('https://upstream.example');
     const started = Date.now();
     await expect(client.once('/slow', 150)).rejects.toThrow('Request timeout');
+    expect(Date.now() - started).toBeGreaterThanOrEqual(380);
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('a body that takes longer to come down than the request\'s limit is still read (a large file)', async () => {
+    // Headers at once, then the body in pieces over 300 ms: past the request's 150 ms, within the body's 400.
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      const parts = ['{"rows":[1', ',2', ',3]}'];
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal.addEventListener('abort', () => controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+          parts.forEach((part, i) =>
+            setTimeout(() => {
+              if (signal.aborted) return;
+              controller.enqueue(new TextEncoder().encode(part));
+              if (i === parts.length - 1) controller.close();
+            }, (i + 1) * 100)
+          );
+        },
+      });
+      return new Response(stream, { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    await expect(new OneShot('https://upstream.example').once('/large', 150)).resolves.toEqual({ rows: [1, 2, 3] });
+  });
+
+  it('the wait for the answer itself keeps the request\'s limit', async () => {
+    global.fetch = jest.fn(
+      (_url: unknown, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          (init?.signal as AbortSignal).addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        })
+    ) as unknown as typeof fetch;
+    const started = Date.now();
+    await expect(new OneShot('https://upstream.example').once('/silent', 150)).rejects.toThrow('Request timeout');
+    expect(Date.now() - started).toBeLessThan(380);
   });
 
   it('still returns a body that arrives whole', async () => {

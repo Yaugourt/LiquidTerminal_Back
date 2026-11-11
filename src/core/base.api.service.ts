@@ -159,6 +159,14 @@ class ResponseBodyError extends Error {
   }
 }
 
+/**
+ * How long the reading of a body may take once its headers are in, when the request's own limit
+ * is shorter. The request limit (30 s by default) is the wait for an answer; a large file
+ * (Hyperliquid's leaderboard is about 40 MB) may take longer than that to come down, and before
+ * 2026-11-11 its download had no limit at all. A body that stops half way now ends here.
+ */
+const BODY_TIMEOUT_MS = 120_000;
+
 function isAbort(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError';
 }
@@ -170,6 +178,8 @@ export abstract class BaseApiService {
     private readonly MAX_RETRY_DELAY_MS = 30_000; // absolute cap per retry
     /** Ceiling on a response body: MAX_RESPONSE_BYTES unless a client raises it. */
     protected readonly maxResponseBytes: number = MAX_RESPONSE_BYTES;
+    /** Time allowed to read a body once its headers are in (never under the request's own limit). */
+    protected readonly bodyTimeoutMs: number = BODY_TIMEOUT_MS;
     /**
      * Whether a 429 is retried. Not on Hyperliquid /info: its 1,200 weight a
      * minute is one budget per IP for the whole backend, so a 429 means the
@@ -207,7 +217,7 @@ export abstract class BaseApiService {
       await acquireOutboundSlot();
 
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      let timeout = setTimeout(() => controller.abort(), timeoutMs);
       // Hyperliquid /info spends weight from the IP's 1,200 a minute: count
       // each request sent, whatever the answer.
       const hyperliquidType = isHyperliquidInfoUrl(this.baseUrl) ? hyperliquidWeightMeter.record(options.body) : undefined;
@@ -262,9 +272,13 @@ export abstract class BaseApiService {
           );
         }
 
-        // Awaited here, inside the try: the time limit and the outbound slot then cover the
+        // Awaited here, inside the try: a time limit and the outbound slot then cover the
         // reading of the body. Returned as a promise, the `finally` below ran first, and an
-        // answer whose body stopped half way was waited for with no limit at all.
+        // answer whose body stopped half way was waited for with no limit at all. The answer
+        // came within the request's limit; the body gets its own, so that a large file that
+        // takes longer than that to come down is still read.
+        clearTimeout(timeout);
+        timeout = setTimeout(() => controller.abort(), Math.max(timeoutMs, this.bodyTimeoutMs));
         let data: T;
         try {
           data = (await response.json()) as T;
@@ -277,7 +291,10 @@ export abstract class BaseApiService {
         // A body that does not read: the error it gave before (the caller's, unlogged and
         // unwrapped), except the abort of the time limit, which is a timeout like any other.
         if (error instanceof ResponseBodyError) {
-          if (isAbort(error.cause)) throw new Error('Request timeout');
+          if (isAbort(error.cause)) {
+            logDeduplicator.error('API request failed', { url: safeUrl, error: 'Request timeout while reading the body' });
+            throw new Error('Request timeout');
+          }
           throw error.cause;
         }
 
