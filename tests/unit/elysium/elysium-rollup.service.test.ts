@@ -135,11 +135,81 @@ describe('ElysiumRollupService.tick', () => {
   it('clears its last error after a pass that went through', async () => {
     await svc.tick();
     expect(states.advance).toHaveBeenCalledWith('rollup', { cursor: new Date(NOW) });
-    (states.advance as jest.Mock).mockClear();
-    listDays.mockResolvedValue(allBuilt().filter((d) => d.day !== '2026-11-09'));
-    buildDay.mockRejectedValue(new Error('statement timeout'));
-    await expect(svc.tick()).rejects.toThrow('statement timeout');
-    expect(states.advance).not.toHaveBeenCalled();
+  });
+
+  describe('a day whose build fails', () => {
+    let recordError: jest.SpyInstance;
+    const without = (...days: string[]) => allBuilt().filter((d) => !days.includes(d.day));
+    beforeEach(() => {
+      recordError = jest.spyOn(states, 'recordError').mockResolvedValue(undefined);
+      (states.advance as jest.Mock).mockClear();
+    });
+
+    it('is recorded, with its day, and does not clear the builder\'s error', async () => {
+      listDays.mockResolvedValue(without('2026-11-09'));
+      buildDay.mockRejectedValue(new Error('canceling statement due to statement timeout'));
+      await expect(svc.tick()).resolves.toBe(IDLE);
+      expect(recordError).toHaveBeenCalledWith('rollup', '2026-11-09: canceling statement due to statement timeout');
+      expect(states.advance).not.toHaveBeenCalled();
+    });
+
+    it('does not hold the older days: the next pass builds the next one that waits (the newest was tried again every time)', async () => {
+      const missing = new Set(['2026-11-09', '2026-11-07', '2026-11-03']);
+      listDays.mockImplementation(async () => without(...missing));
+      buildDay.mockImplementation(async (d: string) => {
+        if (d === '2026-11-09') throw new Error('statement timeout');
+        missing.delete(d);
+        return 'built';
+      });
+      // The failure asks to come back at once: other days wait.
+      await expect(svc.tick()).resolves.toBe(5_000);
+      await svc.tick();
+      await svc.tick();
+      expect(buildDay.mock.calls.map((c) => c[0])).toEqual(['2026-11-09', '2026-11-07', '2026-11-03']);
+      // Its error stays the builder's while the others are built.
+      expect(recordError).toHaveBeenCalledTimes(3);
+      expect(states.advance).not.toHaveBeenCalled();
+    });
+
+    it('is tried again after 5 minutes, then 10, then 20', async () => {
+      listDays.mockResolvedValue(without('2026-11-09'));
+      buildDay.mockRejectedValue(new Error('statement timeout'));
+      let clock = NOW;
+      (Date.now as jest.Mock).mockImplementation(() => clock);
+      const tries = (): number => buildDay.mock.calls.length;
+      await svc.tick();
+      clock += 4 * 60_000;
+      await svc.tick();
+      expect(tries()).toBe(1);
+      clock += 2 * 60_000;
+      await svc.tick();
+      expect(tries()).toBe(2);
+      clock += 9 * 60_000;
+      await svc.tick();
+      expect(tries()).toBe(2);
+      clock += 2 * 60_000;
+      await svc.tick();
+      expect(tries()).toBe(3);
+    });
+
+    it('is forgotten once it is built: the builder\'s error is cleared', async () => {
+      listDays.mockResolvedValue(without('2026-11-09'));
+      buildDay.mockRejectedValueOnce(new Error('statement timeout'));
+      let clock = NOW;
+      (Date.now as jest.Mock).mockImplementation(() => clock);
+      await svc.tick();
+      clock += 6 * 60_000;
+      buildDay.mockResolvedValue('built');
+      await svc.tick();
+      expect(states.advance).toHaveBeenCalledWith('rollup', { cursor: new Date(clock) });
+    });
+
+    it('does not keep the old days from being dropped', async () => {
+      listDays.mockResolvedValue(without('2026-11-09'));
+      buildDay.mockRejectedValue(new Error('statement timeout'));
+      await svc.tick();
+      expect(prune).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('keeps fewer days with ELYSIUM_ROLLUP_KEEP_DAYS: older days are neither built nor kept', async () => {

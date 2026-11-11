@@ -88,6 +88,17 @@ export class ElysiumRollupRepository {
     const to = new Date(Date.parse(from) + 86_400_000).toISOString();
     const token = randomUUID();
 
+    // Another build is running, of this day or of another: its row is left alone. The reset
+    // below used to come first, and took the running build's token with it: the build that was
+    // already 15 minutes in then ended as 'dirty' at its last statement, for nothing. Asked for
+    // in a statement of its own, the lock is taken and given back at once; the build takes it
+    // for good below (a build that slips in between the two is told 'dirty' as before).
+    const free = await prismaHistorical.$queryRawUnsafe<Array<{ ok: boolean }>>(
+      `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok`,
+      BUILD_LOCK_KEY
+    );
+    if (!free[0]?.ok) return 'busy';
+
     await prismaHistorical.$executeRawUnsafe(
       `INSERT INTO elysium_day_rollup (day, built_at, dirty, build_token) VALUES ($1::date, NULL, false, $2)
        ON CONFLICT (day) DO UPDATE SET built_at = NULL, dirty = false, build_token = EXCLUDED.build_token`,
