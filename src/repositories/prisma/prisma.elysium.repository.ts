@@ -1,5 +1,5 @@
 import { prismaHistorical } from '../../core/prisma.historical.service';
-import { BRIDGE_TX_TYPES } from '../../services/elysium/elysium-ingest.util';
+import { BRIDGE_TX_TYPES, storableText } from '../../services/elysium/elysium-ingest.util';
 import type { BridgeRow, LiveTxRow, TokenRow, TxRow } from '../../services/elysium/elysium-ingest.util';
 import type { DexPoolRow, DexSwapRow } from '../../services/elysium/elysium-dex.util';
 import type {
@@ -37,12 +37,6 @@ export type ElysiumStream =
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
 export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'tokenstail', 'rollup']);
-
-/** A sample is free text taken from a refused row: what jsonb itself refuses (NUL, half a surrogate pair) is removed. */
-function cleanSample(sample: string | null): string | null {
-  if (sample === null) return null;
-  return sample.replace(/\u0000/g, '').replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
-}
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -764,7 +758,7 @@ export class ElysiumIngestRepository {
          count = elysium_ingest_reject.count + EXCLUDED.count,
          last_at = now(),
          sample = COALESCE(elysium_ingest_reject.sample, EXCLUDED.sample)`,
-      JSON.stringify(rows.map((r) => ({ stream: r.stream, reason: r.reason, count: r.count, sample: cleanSample(r.sample) })))
+      JSON.stringify(rows.map((r) => ({ stream: r.stream, reason: r.reason, count: r.count, sample: r.sample === null ? null : storableText(r.sample) })))
     );
   }
 

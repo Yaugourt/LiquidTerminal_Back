@@ -198,7 +198,7 @@ describe('Elysium ingestion: left-out rows are counted and written', () => {
   });
 
   it('writes the counts of a tick that failed, too', async () => {
-    fetchPage.mockResolvedValueOnce(page([tx(2, NOW - 30_000, { from_addr: '' })]));
+    fetchPage.mockResolvedValueOnce(page([tx(1, NOW - 30_000), tx(2, NOW - 30_000, { from_addr: '' })]));
     (repo.insertTxs as jest.Mock).mockRejectedValueOnce(new Error('connection lost'));
     await svc.runTick('tx', () => svc.txTick());
     expect(repo.recordError).toHaveBeenCalled();

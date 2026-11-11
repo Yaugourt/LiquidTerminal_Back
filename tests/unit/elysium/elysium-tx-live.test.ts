@@ -3,16 +3,17 @@ import { normalizeLiveTx } from '../../../src/services/elysium/elysium-ingest.ut
 
 const WATCHED = new Set(['0x90332b0ecbb2c9517f405627b0dd5d5265246563']);
 const BLOCK = { number: 13_545_909, timestamp: 1_792_670_000 };
+const HASH = `0x${'ab'.repeat(32)}`;
 
 describe('elysium live tx fallback', () => {
   it('keeps a call to a watched contract, lowercased, timed by its block', () => {
     const row = normalizeLiveTx(
-      { hash: '0xABC', from: '0xF26F5551E96AE5162509B25925FFFA7F07B2D652', to: '0x90332B0ECBB2C9517F405627B0DD5D5265246563' },
+      { hash: HASH.toUpperCase().replace('0X', '0x'), from: '0xF26F5551E96AE5162509B25925FFFA7F07B2D652', to: '0x90332B0ECBB2C9517F405627B0DD5D5265246563' },
       BLOCK,
       WATCHED
     );
     expect(row).toEqual({
-      tx_hash: '0xabc',
+      tx_hash: HASH,
       block_number: '13545909',
       block_time: new Date(BLOCK.timestamp * 1000).toISOString(),
       from_addr: '0xf26f5551e96ae5162509b25925fffa7f07b2d652',
@@ -22,9 +23,11 @@ describe('elysium live tx fallback', () => {
 
   it('drops system txs, deployments and calls to other contracts', () => {
     const from = '0xf26f5551e96ae5162509b25925fffa7f07b2d652';
-    expect(normalizeLiveTx({ hash: '0x1', from, to: '0x00000000000000000000000000000000000a4b05' }, BLOCK, WATCHED)).toBeNull();
-    expect(normalizeLiveTx({ hash: '0x2', from, to: null }, BLOCK, WATCHED)).toBeNull();
-    expect(normalizeLiveTx({ hash: '0x3', from, to: '0x90332b0ecbb2c9517f405627b0dd5d5265246563' }, { ...BLOCK, timestamp: 0 }, WATCHED)).toBeNull();
+    expect(normalizeLiveTx({ hash: HASH, from, to: '0x00000000000000000000000000000000000a4b05' }, BLOCK, WATCHED)).toBeNull();
+    expect(normalizeLiveTx({ hash: HASH, from, to: null }, BLOCK, WATCHED)).toBeNull();
+    expect(normalizeLiveTx({ hash: HASH, from, to: '0x90332b0ecbb2c9517f405627b0dd5d5265246563' }, { ...BLOCK, timestamp: 0 }, WATCHED)).toBeNull();
+    // A hash that is not one would not fit its column: the row is left out, not stored cut.
+    expect(normalizeLiveTx({ hash: '0xabc', from, to: '0x90332b0ecbb2c9517f405627b0dd5d5265246563' }, BLOCK, WATCHED)).toBeNull();
   });
 
   describe('batched block reads', () => {

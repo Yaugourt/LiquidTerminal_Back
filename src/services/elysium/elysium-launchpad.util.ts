@@ -8,8 +8,8 @@
  * Anyone can emit any topic on a testnet, so launch events are only accepted
  * from the launchpads' own contracts, and trades only for known markets.
  */
-import { parseUpstreamTime } from './elysium-ingest.util';
-import { dataWord, topicAddress, wordInt, wordUint } from './elysium-dex.util';
+import { address, boundedText, int8String, parseUpstreamTime, txHash } from './elysium-ingest.util';
+import { dataWord, logIndexOf, topicAddress, wordInt, wordUint } from './elysium-dex.util';
 
 export const LAUNCHPAD_TOPICS = {
   /** Chainzy HyperEVMLaunchCreated: topic2 token, topic3 V3 pool, data w1 creator. */
@@ -236,19 +236,15 @@ function base(raw: unknown): Base | null {
   const topic0 = lower(l.topic0);
   const data = lower(l.data) ?? '0x';
   const time = parseUpstreamTime(l.block_time);
-  const txHash = lower(l.tx_hash);
-  const address = lower(l.address);
-  const logIndex = Number(l.log_index);
-  const block =
-    typeof l.block_number === 'number' && Number.isFinite(l.block_number)
-      ? String(Math.trunc(l.block_number))
-      : typeof l.block_number === 'string' && /^\d+$/.test(l.block_number)
-        ? l.block_number
-        : null;
-  if (!topic0 || !time || !txHash || !address || block === null || !Number.isInteger(logIndex) || !data.startsWith('0x')) {
+  // Checked for their exact shape: these go to fixed-width columns (see elysium-ingest.util).
+  const hash = txHash(l.tx_hash);
+  const emitter = address(l.address);
+  const logIndex = logIndexOf(l.log_index);
+  const block = int8String(l.block_number);
+  if (!topic0 || !time || !hash || !emitter || block === null || logIndex === null || !data.startsWith('0x')) {
     return null;
   }
-  return { l, topic0, data, time, block, txHash, address, logIndex };
+  return { l, topic0, data, time, block, txHash: hash, address: emitter, logIndex };
 }
 
 function word(data: string, i: number): string | null {
@@ -260,8 +256,16 @@ function wordAddr(data: string, i: number): string | null {
   return w ? `0x${w.slice(-40)}` : null;
 }
 
-/** ABI-encoded dynamic string whose offset sits in word `i`; null if malformed. */
-function wordString(data: string, i: number): string | null {
+/** Columns of elysium_launch a launch event fills with text its creator chose. */
+const NAME_MAX = 256;
+const SYMBOL_MAX = 128;
+
+/**
+ * ABI-encoded dynamic string whose offset sits in word `i`, cleaned and cut to `max` characters
+ * (the launch's creator writes it: a symbol longer than its column failed the whole page of
+ * launches, on every run); null if malformed or empty.
+ */
+function wordString(data: string, i: number, max = NAME_MAX): string | null {
   const off = word(data, i);
   if (!off) return null;
   const at = Number(wordUint(off)) / 32;
@@ -271,8 +275,7 @@ function wordString(data: string, i: number): string | null {
   const start = 2 + (at + 1) * 64;
   const hex = data.slice(start, start + len * 2);
   if (len > 256 || hex.length !== len * 2) return null;
-  const text = Buffer.from(hex, 'hex').toString('utf8').replace(/\0/g, '').trim();
-  return text === '' ? null : text;
+  return boundedText(Buffer.from(hex, 'hex').toString('utf8'), max);
 }
 
 /** Raw amount to a float (for prices only, never stored as amounts). */
@@ -329,7 +332,7 @@ export function decodeLaunch(raw: unknown): LaunchRow | null {
       pool: null,
       quote: NATIVE_HYPE,
       name: wordString(b.data, 1),
-      symbol: wordString(b.data, 2),
+      symbol: wordString(b.data, 2, SYMBOL_MAX),
     };
   }
   if (b.topic0 === LAUNCHPAD_TOPICS.signalCurveLaunch && EMITTERS.signalCurve.has(b.address)) {
@@ -357,8 +360,8 @@ export function decodeLaunch(raw: unknown): LaunchRow | null {
       curve: null,
       pool: null,
       quote: neuriioQuote,
-      name: solo ? (handle ? `@${handle}` : null) : wordString(b.data, 0),
-      symbol: solo ? (handle ? handle.toUpperCase() : null) : wordString(b.data, 1),
+      name: solo ? (handle ? boundedText(`@${handle}`, NAME_MAX) : null) : wordString(b.data, 0),
+      symbol: solo ? (handle ? boundedText(handle.toUpperCase(), SYMBOL_MAX) : null) : wordString(b.data, 1, SYMBOL_MAX),
     };
   }
   if (b.topic0 === LAUNCHPAD_TOPICS.signalV4Launch && EMITTERS.signalV4.has(b.address)) {
@@ -390,7 +393,7 @@ export function decodeLaunch(raw: unknown): LaunchRow | null {
       pool: null,
       quote: NATIVE_HYPE,
       name: wordString(b.data, 0),
-      symbol: wordString(b.data, 1),
+      symbol: wordString(b.data, 1, SYMBOL_MAX),
     };
   }
   if (b.topic0 === LAUNCHPAD_TOPICS.kilnLaunch && EMITTERS.kilnFactory.has(b.address)) {
@@ -407,7 +410,7 @@ export function decodeLaunch(raw: unknown): LaunchRow | null {
       pool: null,
       quote: NATIVE_HYPE,
       name: wordString(b.data, 0),
-      symbol: wordString(b.data, 1),
+      symbol: wordString(b.data, 1, SYMBOL_MAX),
     };
   }
   return null;

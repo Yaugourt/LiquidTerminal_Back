@@ -2,7 +2,7 @@
  * Pure decoders for the Uniswap V2 / V3 logs ingested from Elysium (/logs).
  * No I/O so they stay unit-testable.
  */
-import { parseUpstreamTime } from './elysium-ingest.util';
+import { address, int8String, parseUpstreamTime, txHash } from './elysium-ingest.util';
 
 /** Event signatures (topic0) tracked by the DEX stream. */
 export const DEX_TOPICS = {
@@ -17,6 +17,8 @@ export type DexTopic = keyof typeof DEX_TOPICS;
 const TWO_255 = BigInt(2) ** BigInt(255);
 const TWO_256 = BigInt(2) ** BigInt(256);
 const HEX32 = /^0x[0-9a-f]{64}$/;
+const INT4_MAX = 2_147_483_647;
+const UINT24_MAX = 0xffffff;
 
 export interface DexPoolRow {
   pool: string;
@@ -101,16 +103,18 @@ function base(raw: unknown): {
   const l = raw as RawLog;
   const data = lower(l.data) ?? '0x';
   const time = parseUpstreamTime(l.block_time);
-  const txHash = lower(l.tx_hash);
-  const address = lower(l.address);
-  const block =
-    typeof l.block_number === 'number' && Number.isFinite(l.block_number)
-      ? String(Math.trunc(l.block_number))
-      : typeof l.block_number === 'string' && /^\d+$/.test(l.block_number)
-        ? l.block_number
-        : null;
-  if (!time || !txHash || !address || block === null || !data.startsWith('0x')) return null;
-  return { l, data, time, block, txHash, address };
+  // Checked for their exact shape: these go to fixed-width columns (see elysium-ingest.util).
+  const hash = txHash(l.tx_hash);
+  const emitter = address(l.address);
+  const block = int8String(l.block_number);
+  if (!time || !hash || !emitter || block === null || !data.startsWith('0x')) return null;
+  return { l, data, time, block, txHash: hash, address: emitter };
+}
+
+/** A log index as stored (an integer column); null for anything else. */
+export function logIndexOf(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= 0 && n <= INT4_MAX ? n : null;
 }
 
 /** V2 PairCreated(token0 indexed, token1 indexed, pair, allPairsLength) or V3 PoolCreated(token0, token1, fee indexed; tickSpacing, pool). */
@@ -140,6 +144,7 @@ export function decodePoolCreated(raw: unknown): DexPoolRow | null {
     const w1 = dataWord(b.data, 1);
     const feeTopic = lower(b.l.topic3);
     if (!w1 || !feeTopic || !HEX32.test(feeTopic)) return null;
+    // A uint24 on a real pool; the topic is 32 bytes and anyone can emit this event with any value.
     const fee = Number(BigInt(feeTopic));
     return {
       pool: wordAddress(w1),
@@ -147,7 +152,7 @@ export function decodePoolCreated(raw: unknown): DexPoolRow | null {
       version: 'v3',
       token0,
       token1,
-      fee: Number.isSafeInteger(fee) ? fee : null,
+      fee: fee <= UINT24_MAX ? fee : null,
       created_at: b.time.toISOString(),
       block_number: b.block,
       tx_hash: b.txHash,
@@ -164,8 +169,8 @@ export function decodePoolCreated(raw: unknown): DexPoolRow | null {
 export function decodeSwap(raw: unknown): DexSwapRow | null {
   const b = base(raw);
   if (!b) return null;
-  const logIndex = Number(b.l.log_index);
-  if (!Number.isInteger(logIndex)) return null;
+  const logIndex = logIndexOf(b.l.log_index);
+  if (logIndex === null) return null;
   const topic0 = lower(b.l.topic0);
   const sender = topicAddress(b.l.topic1);
   const recipient = topicAddress(b.l.topic2);

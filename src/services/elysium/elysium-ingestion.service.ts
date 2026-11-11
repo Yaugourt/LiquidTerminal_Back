@@ -15,13 +15,16 @@ import {
   dedupeBy,
   ELYSIUM_GENESIS,
   HOUR_MS,
+  isRowRefusal,
   MINUTE_MS,
   normalizeBridgeTransfer,
   normalizeLiveTx,
   normalizeToken,
   normalizeTx,
   parseUpstreamTime,
+  pgErrorCode,
   planWindow,
+  storableText,
   toUpstreamTime,
   BridgeRow,
   LiveTxRow,
@@ -80,6 +83,12 @@ class PageIncompleteError extends Error {
     this.name = 'PageIncompleteError';
   }
 }
+/**
+ * Rows of one page the database may refuse and the stream set aside. Past that many the page is
+ * not a page with a bad row any more, it is a page the code cannot store: the stream stops on it
+ * and says so, as before.
+ */
+const MAX_REFUSED_PER_PAGE = 25;
 /** At most ~2 upstream calls per second across every stream. */
 const MIN_CALL_GAP_MS = 500;
 /** How often the provider's last indexed block time is read, at least. */
@@ -512,6 +521,49 @@ export class ElysiumIngestionService {
     return rows;
   }
 
+  /**
+   * Writes a page of rows, and when the database refuses the statement because of the data
+   * (isRowRefusal), finds the rows at fault by halves, sets them aside and stores the rest.
+   *
+   * The normalisers already clean and bound what is known to break (see elysium-ingest.util);
+   * this is for what nobody thought of. Without it one refused value fails its page on every
+   * run and the stream never passes it. A refusal that is not about the data (a lost
+   * connection, a time limit, a lock) is thrown as it is: the tick fails and is run again.
+   */
+  private async writeRows<T>(
+    stream: ElysiumStream,
+    rows: T[],
+    write: (rows: T[]) => Promise<number>,
+    describe: (row: T) => string
+  ): Promise<number> {
+    return this.writeHalves(stream, rows, write, describe, { left: MAX_REFUSED_PER_PAGE });
+  }
+
+  private async writeHalves<T>(
+    stream: ElysiumStream,
+    rows: T[],
+    write: (rows: T[]) => Promise<number>,
+    describe: (row: T) => string,
+    budget: { left: number }
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    try {
+      return await write(rows);
+    } catch (error) {
+      if (!isRowRefusal(error)) throw error;
+      if (rows.length === 1) {
+        if (budget.left <= 0) throw error;
+        budget.left -= 1;
+        this.rejects.note(stream, 'row-refused', `${pgErrorCode(error)} ${describe(rows[0])}`);
+        logDeduplicator.warn('Elysium ingest: a row the database refused was set aside', { stream, code: pgErrorCode(error) });
+        return 0;
+      }
+      const mid = rows.length >> 1;
+      const first = await this.writeHalves(stream, rows.slice(0, mid), write, describe, budget);
+      return first + (await this.writeHalves(stream, rows.slice(mid), write, describe, budget));
+    }
+  }
+
   /** False for a row of the part of a window that was read before (see countedUpTo). */
   private firstRead(stream: ElysiumStream, raw: unknown): boolean {
     const upTo = this.countedUpTo.get(stream);
@@ -600,7 +652,7 @@ export class ElysiumIngestionService {
           async (raw) => {
             // System transactions are asked out of the answer; one that comes anyway is not a reject.
             const rows = dedupeBy(this.mapCounted<TxRow>('tx', raw, normalizeTx, isSystemTx), (r) => r.tx_hash);
-            inserted += (await this.repo.insertTxs(rows)).inserted;
+            inserted += await this.writeRows('tx', rows, async (part) => (await this.repo.insertTxs(part)).inserted, (r) => r.tx_hash);
           },
           // At the smallest step, keep what was read and move on.
           { truncate: this.txStepMs <= MIN_STEP_MS }
@@ -677,7 +729,7 @@ export class ElysiumIngestionService {
           ),
           (r) => r.tx_hash
         );
-        const inserted = await this.repo.insertLiveTxs(rows);
+        const inserted = await this.writeRows('txlive', rows, (part) => this.repo.insertLiveTxs(part), (r) => r.tx_hash);
         const last = blocks[blocks.length - 1];
         this.liveBlock = last.number + 1;
         await this.repo.advance('txlive', { cursor: new Date(last.timestamp * 1000), addRows: inserted });
@@ -695,8 +747,11 @@ export class ElysiumIngestionService {
   private async ingestBridgeWindow(params: Record<string, string>): Promise<number> {
     let changed = 0;
     await this.pageAll('bridge', '/bridge/transfers', params, async (raw) => {
-      const rows = dedupeBy(this.mapCounted<BridgeRow>('bridge', raw, normalizeBridgeTransfer), (r) => r.transfer_id);
-      changed += await this.repo.upsertBridgeTransfers(rows);
+      const rows = dedupeBy(
+        this.mapCounted<BridgeRow>('bridge', raw, (r) => normalizeBridgeTransfer(r, (field, value) => this.noteCut('bridge', r, field, value))),
+        (r) => r.transfer_id
+      );
+      changed += await this.writeRows('bridge', rows, (part) => this.repo.upsertBridgeTransfers(part), (r) => r.transfer_id);
     }, { truncate: true });
     return changed;
   }
@@ -780,8 +835,11 @@ export class ElysiumIngestionService {
       this.ensureRunning();
       await this.throttle.wait();
       const { rows: raw, hasMore } = await this.client.fetchIngestPage('/tokens', { standard: 'erc20', limit: PAGE_SIZE, offset: page * PAGE_SIZE });
-      const rows = dedupeBy(this.mapCounted<TokenRow>('tokens', raw, normalizeToken), (r) => r.address);
-      await this.repo.upsertTokens(rows);
+      const rows = dedupeBy(
+        this.mapCounted<TokenRow>('tokens', raw, (r) => normalizeToken(r, (field, value) => this.noteCut('tokens', r, field, value))),
+        (r) => r.address
+      );
+      await this.writeRows('tokens', rows, (part) => this.repo.upsertTokens(part), (r) => r.address);
       try {
         await this.repo.nameLaunches(rows);
       } catch (error) {
@@ -829,13 +887,13 @@ export class ElysiumIngestionService {
     for (const topic0 of [DEX_TOPICS.v2PairCreated, DEX_TOPICS.v3PoolCreated]) {
       await this.pageLogs('dex', source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(this.decodeCounted<DexPoolRow>('dex', raw, decodePoolCreated), (r) => r.pool);
-        inserted += await this.repo.insertDexPools(rows);
+        inserted += await this.writeRows('dex', rows, (part) => this.repo.insertDexPools(part), (r) => r.pool);
       });
     }
     for (const topic0 of [DEX_TOPICS.v2Swap, DEX_TOPICS.v3Swap]) {
       await this.pageLogs('dex', source, topic0, start, end, async (raw) => {
         const rows = dedupeBy(this.decodeCounted<DexSwapRow>('dex', raw, decodeSwap), (r) => `${r.tx_hash}:${r.log_index}`);
-        inserted += await this.repo.insertDexSwaps(rows);
+        inserted += await this.writeRows('dex', rows, (part) => this.repo.insertDexSwaps(part), (r) => `${r.tx_hash}:${r.log_index}`);
       });
     }
     return inserted;
@@ -965,7 +1023,9 @@ export class ElysiumIngestionService {
           rows.push({ method_id: id, ...r, source: '4byte' });
         }
       }
-      written += await this.repo.upsertMethodSigs(rows);
+      // Signatures are text anyone may have registered in a public database: cleaned like any other.
+      const clean = rows.map((r) => ({ ...r, signature: r.signature === null ? null : storableText(r.signature) }));
+      written += await this.writeRows('methods', clean, (part) => this.repo.upsertMethodSigs(part), (r) => r.method_id);
     }
     await this.repo.advance('methods', { cursor: new Date(), addRows: written, backfillDone: true });
     // Budget spent before every selector was looked up: continue soon.
@@ -1026,7 +1086,7 @@ export class ElysiumIngestionService {
           if (row) launches.push(row);
           else if (this.firstRead('launchpad', r)) this.noteLogReject(launchRejectReason(r));
         }
-        inserted += await this.repo.insertLaunches(dedupeBy(launches, (r) => r.token));
+        inserted += await this.writeRows('launchpad', dedupeBy(launches, (r) => r.token), (part) => this.repo.insertLaunches(part), (r) => r.token);
       });
     }
     for (const topic0 of GRADUATION_TOPICS) {
@@ -1038,7 +1098,7 @@ export class ElysiumIngestionService {
           if (!found && this.firstRead('launchpad', raw[i])) this.noteLogReject(marketRejectReason(raw[i], (k) => known.has(k)));
           return found;
         });
-        await this.repo.markGraduated(rows);
+        await this.writeRows('launchpad', rows, (part) => this.repo.markGraduated(part), (r) => `graduation ${r.curve ?? r.token}`);
       });
     }
     // Read per page of logs, after the launches and the graduations above: a pair a graduation
@@ -1052,10 +1112,20 @@ export class ElysiumIngestionService {
           if (row) trades.push(row);
           else if (this.firstRead('launchpad', r)) this.noteLogReject(marketRejectReason(r, (k) => markets.has(k)));
         }
-        inserted += await this.repo.insertLaunchTrades(dedupeBy(trades, (r) => `${r.tx_hash}:${r.log_index}`));
+        inserted += await this.writeRows(
+          'launchpad',
+          dedupeBy(trades, (r) => `${r.tx_hash}:${r.log_index}`),
+          (part) => this.repo.insertLaunchTrades(part),
+          (r) => `${r.tx_hash}:${r.log_index}`
+        );
       });
     }
     return inserted;
+  }
+
+  /** A status-like value longer than its column, stored cut: counted, with the value, for a first read. */
+  private noteCut(stream: ElysiumStream, raw: unknown, field: string, value: string): void {
+    if (this.firstRead(stream, raw)) this.rejects.note(stream, 'text-truncated', `${field}=${value}`);
   }
 
   private noteLogReject(reject: { reason: 'log-malformed' | 'log-undecodable' | 'launch-unknown-emitter' | 'market-unknown'; sample: string } | null): void {
