@@ -77,8 +77,9 @@ const SLOT_WAIT_MS = 5_000;
  *   cannot spend the key's quota;
  * - bytes of one answer (`ELYSIUM_RPC_MAX_RESPONSE_BYTES`): the body is read
  *   up to that size and relayed as received, never decoded or parsed here,
- *   except a small answer that carries an error: the node's own wording is
- *   cleaned before it leaves (see elysium-rpc-errors).
+ *   except an answer of up to 256 KB that carries an error: the node's own
+ *   wording is cleaned before it leaves; and no answer leaves with the node's
+ *   address or key in it (see elysium-rpc-errors).
  */
 export class ElysiumRpcProxyService {
   private static instance: ElysiumRpcProxyService;
@@ -283,9 +284,9 @@ export class ElysiumRpcProxyService {
         logDeduplicator.warn('Elysium RPC proxy: upstream answer is not JSON-RPC');
         throw new Error('ELYSIUM_MAINNET_RPC_UPSTREAM');
       }
-      // The node's own error messages are not relayed as written (see elysium-rpc-errors). An
-      // answer that carries an error is small: it is read and its errors rewritten. A large one
-      // is results, and is only checked for the key before it leaves.
+      // The node's own error messages are not relayed as written (see elysium-rpc-errors): an
+      // answer of up to 256 KB that carries an error is read and its errors rewritten; and no
+      // answer, whatever its size, leaves with the node's address or key in it.
       const secrets = rpcSecrets(url);
       if (held.bytes <= RPC_ERROR_CLEAN_MAX_BYTES) {
         const cleaned = cleanRpcErrors(chunks.length === 1 ? chunks[0] : Buffer.concat(chunks), secrets);
@@ -296,7 +297,8 @@ export class ElysiumRpcProxyService {
           held.bytes = cleaned.byteLength;
           chunks = [cleaned];
         }
-      } else if (holdsSecret(chunks, secrets)) {
+      }
+      if (holdsSecret(chunks, secrets)) {
         logDeduplicator.warn('Elysium RPC proxy: upstream answer quotes the node\'s address, not relayed');
         throw new Error('ELYSIUM_MAINNET_RPC_UPSTREAM');
       }

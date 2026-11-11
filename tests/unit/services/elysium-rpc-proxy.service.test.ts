@@ -450,13 +450,38 @@ describe('ElysiumRpcProxyService', () => {
 
   it('does not relay a large answer that quotes the key, without reading it for errors', async () => {
     const { service } = load();
-    const big = `{"jsonrpc":"2.0","id":7,"result":"0x${'ab'.repeat(40_000)}","debug":"${KEYED_URL}"}`;
+    const big = `{"jsonrpc":"2.0","id":7,"result":"0x${'ab'.repeat(200_000)}","debug":"${KEYED_URL}"}`;
     fetchMock.mockResolvedValueOnce(response([big.slice(0, 50_000), big.slice(50_000)]));
     await expect(service.forward(CALL)).rejects.toThrow('ELYSIUM_MAINNET_RPC_UPSTREAM');
     expect(service.load.bufferedBytes).toBe(0);
-    const fine = `{"jsonrpc":"2.0","id":7,"result":"0x${'ab'.repeat(40_000)}"}`;
+    const fine = `{"jsonrpc":"2.0","id":7,"result":"0x${'ab'.repeat(200_000)}"}`;
     fetchMock.mockResolvedValueOnce(response([fine]));
     expect(await relay(service)).toBe(fine);
+  });
+
+  it('does not relay a small answer that quotes the key outside an error: in a result, in another field, in a body that is not the JSON it looks like', async () => {
+    const { service } = load();
+    for (const body of [
+      `{"jsonrpc":"2.0","id":7,"result":"called ${KEYED_URL}"}`,
+      `{"jsonrpc":"2.0","id":7,"result":"0x1","via":"SECRET-KEY-123"}`,
+      `{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"boom"},"via":"rpc.example.test"`,
+    ]) {
+      fetchMock.mockResolvedValueOnce(response([body]));
+      await expect(service.forward(CALL)).rejects.toThrow('ELYSIUM_MAINNET_RPC_UPSTREAM');
+    }
+    expect(service.load.bufferedBytes).toBe(0);
+  });
+
+  it('rewrites the errors of a batch of 200 KB too', async () => {
+    const { service } = load();
+    const batch = JSON.stringify([
+      { jsonrpc: '2.0', id: 1, result: '0x' + 'ab'.repeat(100_000) },
+      { jsonrpc: '2.0', id: 2, error: { code: -32000, message: 'dial tcp 10.0.3.17:8545: connection refused', stack: 'at x' } },
+    ]);
+    fetchMock.mockResolvedValueOnce(response([batch]));
+    const parsed = JSON.parse(await relay(service)) as Array<Record<string, unknown>>;
+    expect(parsed[1]).toEqual({ jsonrpc: '2.0', id: 2, error: { code: -32000, message: 'Node error' } });
+    expect((parsed[0].result as string).length).toBe(200_002);
   });
 
   it('says so when no upstream is configured', async () => {

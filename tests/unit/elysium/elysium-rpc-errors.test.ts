@@ -72,6 +72,65 @@ describe('cleanRpcErrors', () => {
     expect(got.error.message).toHaveLength(301);
   });
 
+  it('does not relay what the node added beside the error: the answer is rebuilt from its id and its error', () => {
+    expect(clean({ jsonrpc: '2.0', id: 'abc', error: { code: -32000, message: 'boom' }, debug: { upstream: 'node-7' }, result: 'leftover' })).toEqual({
+      jsonrpc: '2.0',
+      id: 'abc',
+      error: { code: -32000, message: 'boom' },
+    });
+    expect(clean({ error: { code: -32000, message: 'boom' } })).toEqual({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'boom' } });
+  });
+
+  it('rewrites the error of each call of a simulation, which the node reports inside the result', () => {
+    const simulated = {
+      jsonrpc: '2.0',
+      id: 7,
+      result: [
+        {
+          number: '0x10',
+          calls: [
+            { status: '0x1', returnData: '0x', gasUsed: '0x5208' },
+            { status: '0x0', returnData: '0x', error: { code: 3, message: 'execution reverted: nope', data: '0x08c379a0', trace: ['x'] } },
+            { status: '0x0', returnData: '0x', error: { code: -32000, message: 'dial tcp 10.0.3.17:8545: i/o timeout' } },
+          ],
+        },
+      ],
+    };
+    expect(clean(simulated)).toEqual({
+      jsonrpc: '2.0',
+      id: 7,
+      result: [
+        {
+          number: '0x10',
+          calls: [
+            { status: '0x1', returnData: '0x', gasUsed: '0x5208' },
+            { status: '0x0', returnData: '0x', error: { code: 3, message: 'execution reverted: nope', data: '0x08c379a0' } },
+            { status: '0x0', returnData: '0x', error: { code: -32000, message: 'Node error' } },
+          ],
+        },
+      ],
+    });
+  });
+
+  /**
+   * A contract can revert with a message of tens of kilobytes. The pattern that looks for a
+   * URL or a host took 1.4 to 2 s on 60 KB, on the event loop, for every such call.
+   */
+  it('looks at a long message in a time that does not grow with its square', () => {
+    for (const long of ['a'.repeat(250_000), '0x' + 'ab'.repeat(120_000), 'a.'.repeat(120_000), 'execution reverted: ' + 'x-'.repeat(100_000)]) {
+      const started = process.hrtime.bigint();
+      const got = clean(error(long)) as { error: { message: string } };
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      expect(got.error.message.length).toBeLessThanOrEqual(301);
+      expect(ms).toBeLessThan(100);
+    }
+  });
+
+  it('still catches the key anywhere in a long message, past what is relayed', () => {
+    const got = clean(error('x'.repeat(5_000) + ' SECRET-KEY-123456')) as { error: { message: string } };
+    expect(got.error.message).toBe('Node error');
+  });
+
   it('rewrites the errors of a batch and leaves its results alone', () => {
     const batch = [
       { jsonrpc: '2.0', id: 1, result: '0x10' },
