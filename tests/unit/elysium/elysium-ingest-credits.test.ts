@@ -196,6 +196,6 @@ describe('Elysium ingestion: what it asks the provider', () => {
   it('holder stats: asks for a batch of 60, 40 of them for the new and the traded launches', async () => {
     const list = jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([]);
     await svc.launchStatsTick();
-    expect(list).toHaveBeenCalledWith(60, 40, 30 * 60, 14 * 60);
+    expect(list).toHaveBeenCalledWith(60, 40, 30 * 60, 14 * 60, []);
   });
 });

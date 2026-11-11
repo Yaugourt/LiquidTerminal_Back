@@ -402,6 +402,8 @@ export class ElysiumIngestRepository {
       SELECT pick.address FROM pick
       LEFT JOIN elysium_token_stat s ON s.address = pick.address
       WHERE s.address IS NULL OR s.fetched_at < now() - make_interval(secs => $2::int)
+      -- The ones never read, then the oldest snapshot first: a run cut short resumes where it matters.
+      ORDER BY s.fetched_at NULLS FIRST, pick.address
       `,
       perList,
       maxAgeS
@@ -692,21 +694,23 @@ export class ElysiumIngestRepository {
     limit: number,
     priority: number,
     activeMaxAgeS: number,
-    quietMaxAgeS: number
+    quietMaxAgeS: number,
+    /** Tokens to leave out of this batch (their figures could not be read a moment ago). */
+    exclude: string[] = []
   ): Promise<LaunchStatsTarget[]> {
     return prismaHistorical.$queryRawUnsafe<LaunchStatsTarget[]>(
       `
       WITH first AS (
         SELECT * FROM (
           (SELECT l.token, 0 AS pri, -extract(epoch FROM l.created_at) AS ord
-           FROM elysium_launch l WHERE l.stats_at IS NULL
+           FROM elysium_launch l WHERE l.stats_at IS NULL AND l.token <> ALL($5::text[])
            ORDER BY l.created_at DESC LIMIT $2::int)
           UNION ALL
           (SELECT l.token, 1 AS pri, extract(epoch FROM l.stats_at) AS ord
            FROM (SELECT DISTINCT token FROM elysium_launch_trade
                  WHERE block_time >= now() - interval '24 hours') a
            JOIN elysium_launch l ON l.token = a.token
-           WHERE l.stats_at < now() - make_interval(secs => $3::int)
+           WHERE l.stats_at < now() - make_interval(secs => $3::int) AND l.token <> ALL($5::text[])
            ORDER BY l.stats_at LIMIT $2::int)
         ) p ORDER BY pri, ord LIMIT $2::int
       ),
@@ -715,7 +719,7 @@ export class ElysiumIngestRepository {
         UNION ALL
         (SELECT l.token, 2 AS pri, extract(epoch FROM l.stats_at) AS ord
          FROM elysium_launch l
-         WHERE l.stats_at < now() - make_interval(secs => $4::int)
+         WHERE l.stats_at < now() - make_interval(secs => $4::int) AND l.token <> ALL($5::text[])
          ORDER BY l.stats_at LIMIT $1::int)
       ),
       best AS (SELECT DISTINCT ON (token) token, pri, ord FROM picks ORDER BY token, pri)
@@ -729,7 +733,8 @@ export class ElysiumIngestRepository {
       limit,
       priority,
       activeMaxAgeS,
-      quietMaxAgeS
+      quietMaxAgeS,
+      exclude
     );
   }
 

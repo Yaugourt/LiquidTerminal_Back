@@ -21,6 +21,7 @@ import {
   normalizeLiveTx,
   normalizeToken,
   normalizeTx,
+  tokenDecimals,
   parseUpstreamTime,
   pgErrorCode,
   planWindow,
@@ -205,6 +206,16 @@ const LAUNCH_STATS_PRIORITY = 40;
 const LAUNCH_HOLDERS_LIMIT = 1000;
 /** Day rollups: wait after a pass that failed or found the builder's lock taken. */
 const ROLLUP_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
+/**
+ * A token whose holder figures cannot be read is left alone for this long, then tried again.
+ * One such token used to end the run where it stood, and came first again on the next run: the
+ * tokens behind it were never read (a token the provider answers 4xx for held the whole stream).
+ */
+const TOKEN_RETRY_AFTER_MS = 30 * MINUTE_MS;
+/** This many tokens unreadable in a row is not about the tokens: the run fails and the stream backs off. */
+const TOKEN_FAILURES_IN_A_ROW = 3;
+/** Tokens remembered as unreadable at most (the oldest is forgotten first). */
+const UNREADABLE_TOKENS_MAX = 500;
 /** Holder snapshots for the top N tokens of each ranked list only. */
 const TOKEN_STATS_TOP_N = 25;
 const TOKEN_STATS_MAX_AGE_S = 14 * 60;
@@ -286,6 +297,8 @@ export class ElysiumIngestionService {
    * were first read, and is not counted again.
    */
   private readonly countedUpTo = new Map<ElysiumStream, number>();
+  /** Tokens whose holder figures could not be read, and when each may be tried again. */
+  private readonly unreadableUntil = new Map<string, number>();
   /** Last read of the provider's head, null until the first successful read. */
   private head: { at: number; value: Date | null } | null = null;
 
@@ -1041,15 +1054,24 @@ export class ElysiumIngestionService {
     const addresses = await this.repo.listTokensForStats(TOKEN_STATS_TOP_N, TOKEN_STATS_MAX_AGE_S);
     let done = 0;
     let processed = 0;
+    let failedInARow = 0;
     for (const address of addresses) {
       this.ensureRunning();
       if (Date.now() >= deadline) break;
       processed++;
+      if (this.isSetAside(address)) continue;
       await this.throttle.wait();
-      const t = await this.client.fetchIngestToken(address);
+      let t: Record<string, unknown>;
+      try {
+        t = await this.client.fetchIngestToken(address);
+        failedInARow = 0;
+      } catch (error) {
+        this.setTokenAside('tokenstats', address, error, ++failedInARow);
+        continue;
+      }
       const holders = Number(t.holders);
       if (!Number.isInteger(holders) || holders < 0) continue;
-      const decimals = typeof t.decimals === 'number' ? t.decimals : null;
+      const decimals = tokenDecimals(t.decimals);
       await this.repo.upsertTokenStat(address, holders, scaleRawAmount(t.total_supply_raw, decimals));
       done++;
     }
@@ -1057,6 +1079,40 @@ export class ElysiumIngestionService {
     // Leftovers (budget spent) are picked up on the next, sooner run.
     return processed < addresses.length ? 5_000 : TOKEN_STATS_INTERVAL_MS;
   }
+  /**
+   * A token whose figures the provider would not give: counted, left alone for a while, and the
+   * run goes on with the next one. `inARow` such tokens in a row is the provider failing, not
+   * the tokens: the error is thrown, so the stream records it and backs off like any other.
+   */
+  private setTokenAside(stream: ElysiumStream, token: string, error: unknown, inARow: number): void {
+    if (error instanceof IngestStoppedError) throw error;
+    if (inARow >= TOKEN_FAILURES_IN_A_ROW) throw error;
+    const now = Date.now();
+    this.unreadableUntil.delete(token);
+    if (this.unreadableUntil.size >= UNREADABLE_TOKENS_MAX) {
+      const oldest = this.unreadableUntil.keys().next().value;
+      if (oldest !== undefined) this.unreadableUntil.delete(oldest);
+    }
+    this.unreadableUntil.set(token, now + TOKEN_RETRY_AFTER_MS);
+    const message = error instanceof Error ? error.message : String(error);
+    this.rejects.note(stream, 'token-unreadable', `${token} ${message.slice(0, 160)}`);
+  }
+
+  private isSetAside(token: string): boolean {
+    const until = this.unreadableUntil.get(token);
+    if (until === undefined) return false;
+    if (Date.now() < until) return true;
+    this.unreadableUntil.delete(token);
+    return false;
+  }
+
+  /** The tokens still set aside, for the queries that pick the next ones to read. */
+  private tokensSetAside(): string[] {
+    const now = Date.now();
+    for (const [token, until] of this.unreadableUntil) if (now >= until) this.unreadableUntil.delete(token);
+    return [...this.unreadableUntil.keys()];
+  }
+
   // ---------------------------------------------------------------------------
   // launchpad stream (Chainzy, CorePad, Signal, Neuriio: launches, graduations, trades)
   // ---------------------------------------------------------------------------
@@ -1227,16 +1283,30 @@ export class ElysiumIngestionService {
       LAUNCH_STATS_BATCH,
       LAUNCH_STATS_PRIORITY,
       LAUNCH_STATS_ACTIVE_MAX_AGE_S,
-      LAUNCH_STATS_QUIET_MAX_AGE_S
+      LAUNCH_STATS_QUIET_MAX_AGE_S,
+      this.tokensSetAside()
     );
     let done = 0;
     let processed = 0;
+    let failedInARow = 0;
     for (const t of targets) {
       this.ensureRunning();
       if (Date.now() >= deadline) break;
       processed++;
-      await this.throttle.wait();
-      const raw = await this.client.fetchIngestTokenHolders(t.token, LAUNCH_HOLDERS_LIMIT);
+      let raw: unknown[];
+      let detail: Record<string, unknown> | null = null;
+      try {
+        await this.throttle.wait();
+        raw = await this.client.fetchIngestTokenHolders(t.token, LAUNCH_HOLDERS_LIMIT);
+        if (raw.length >= LAUNCH_HOLDERS_LIMIT) {
+          await this.throttle.wait();
+          detail = await this.client.fetchIngestToken(t.token);
+        }
+        failedInARow = 0;
+      } catch (error) {
+        this.setTokenAside('launchstats', t.token, error, ++failedInARow);
+        continue;
+      }
       const holders = raw
         .map((h) => (h && typeof h === 'object' ? (h as Record<string, unknown>) : null))
         .filter((h): h is Record<string, unknown> => h !== null)
@@ -1244,9 +1314,7 @@ export class ElysiumIngestionService {
         .filter((h) => /^0x[0-9a-f]{40}$/.test(h.address) && Number.isFinite(h.share) && h.share > 0);
 
       let count = holders.length;
-      if (raw.length >= LAUNCH_HOLDERS_LIMIT) {
-        await this.throttle.wait();
-        const detail = await this.client.fetchIngestToken(t.token);
+      if (detail) {
         const n = Number(detail.holders);
         if (Number.isInteger(n) && n >= 0) count = n;
       }
