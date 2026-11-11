@@ -40,7 +40,7 @@ export const ELYSIUM_RPC_ALLOWED_METHODS: ReadonlySet<string> = new Set([
  * Calls in one request. The builder tools send single calls (viem folds their
  * contract reads into one Multicall3 `eth_call`), so a batch is only a
  * convenience for other clients; each call in it counts against the caller's
- * rate limit (elysiumRpcRateLimiter).
+ * rate limit (elysiumRpcRateLimiter), at its weight (elysiumRpcCallWeight).
  */
 export const ELYSIUM_RPC_MAX_BATCH = 20;
 
@@ -124,6 +124,58 @@ export function elysiumRpcParamsIssue(method: string, params: readonly unknown[]
     return null;
   }
   return null;
+}
+
+/**
+ * What one call weighs against the caller's rate limit and the proxy's budget
+ * of the minute. A plain read weighs 1; the calls whose parameters size the
+ * node's work weigh more, so that a request cannot carry hundreds of units of
+ * work under the price of one:
+ * - `eth_simulateV1`: one per simulated call (up to 256 in a request);
+ * - `eth_getLogs`: 5 over a block range (the range is the caller's to pick), 2 for one block;
+ * - `eth_getBlockReceipts`: 3; a block with its full transactions: 2;
+ * - `eth_getProof`: 1 plus one per 8 storage keys; `eth_feeHistory`: 1 plus one per 128 blocks.
+ * The node's own price list for the key is not known (Q-21): these are relative sizes.
+ */
+export function elysiumRpcCallWeight(method: string, params: readonly unknown[] | undefined): number {
+  switch (method) {
+    case 'eth_simulateV1': {
+      const payload = params?.[0];
+      const blocks = isRecord(payload) ? payload.blockStateCalls : undefined;
+      if (!Array.isArray(blocks)) return 1;
+      let calls = 0;
+      for (const block of blocks) calls += isRecord(block) && Array.isArray(block.calls) ? Math.max(1, block.calls.length) : 1;
+      return Math.max(1, calls);
+    }
+    case 'eth_getLogs': {
+      const filter = params?.[0];
+      return isRecord(filter) && typeof filter.blockHash === 'string' && filter.blockHash !== '' ? 2 : 5;
+    }
+    case 'eth_getBlockReceipts':
+      return 3;
+    case 'eth_getBlockByNumber':
+    case 'eth_getBlockByHash':
+      return params?.[1] === true ? 2 : 1;
+    case 'eth_getProof': {
+      const keys = params?.[1];
+      return 1 + (Array.isArray(keys) ? Math.ceil(keys.length / 8) : 0);
+    }
+    case 'eth_feeHistory': {
+      const blocks = quantity(params?.[0]);
+      return 1 + (blocks > 0 ? Math.floor(blocks / 128) : 0);
+    }
+    default:
+      return 1;
+  }
+}
+
+/** The weight of a validated request body: its call, or the calls of its batch together. */
+export function elysiumRpcRequestWeight(body: unknown): number {
+  const weigh = (call: unknown): number =>
+    isRecord(call) && typeof call.method === 'string'
+      ? elysiumRpcCallWeight(call.method, Array.isArray(call.params) ? call.params : undefined)
+      : 1;
+  return Array.isArray(body) ? body.reduce((sum: number, call: unknown) => sum + weigh(call), 0) : weigh(body);
 }
 
 const rpcCall = z

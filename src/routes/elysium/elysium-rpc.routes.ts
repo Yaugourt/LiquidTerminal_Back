@@ -1,5 +1,5 @@
 import { Router, Request, Response, RequestHandler } from 'express';
-import { elysiumRpcRateLimiter, marketRateLimiter } from '../../middleware/apiRateLimiter';
+import { elysiumRpcRateLimiter, elysiumRpcWeightOf, marketRateLimiter } from '../../middleware/apiRateLimiter';
 import { validateRequest } from '../../middleware/validation';
 import { elysiumRpcBodySchema } from '../../schemas/elysium-rpc.schema';
 import {
@@ -26,8 +26,9 @@ const LIMIT_EXCEEDED = -32005;
  *
  * Limits, in order: the general per-IP limiter (requests), the validation,
  * then elysiumRpcRateLimiter, which counts every call of the request against
- * the client (it runs after the validation: it needs the batch size). The
- * proxy itself caps what all clients together can send (see the service).
+ * the client at its weight (it runs after the validation: it needs the calls).
+ * The proxy itself caps what all clients together can send and hold, with a
+ * share per client (see the service).
  */
 router.post(
   '/',
@@ -44,12 +45,12 @@ router.post(
       return;
     }
     const body = req.body as { id?: number | string | null } | unknown[];
-    const calls = Array.isArray(body) ? body.length : 1;
     // A whole-request error answers the call's own id; a batch has none to pick.
     const id = Array.isArray(body) ? null : (body.id ?? null);
     try {
-      const text = await proxy.forward(body, calls, rateLimitKeyForIp(req.ip ?? ''));
-      res.status(200).type('application/json').send(text);
+      const answer = await proxy.forward(body, elysiumRpcWeightOf(body), rateLimitKeyForIp(req.ip ?? ''));
+      // Written as received (no decoding, no ETag over megabytes), and released once the client has it.
+      proxy.deliver(answer, res);
     } catch (error) {
       if (error instanceof ElysiumRpcBusyError) {
         res.setHeader('Retry-After', String(error.retryAfterS));

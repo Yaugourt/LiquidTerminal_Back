@@ -4,6 +4,7 @@ import { logDeduplicator } from '../utils/logDeduplicator';
 import { positiveIntEnv } from '../utils/env';
 import { rateLimitKeyForIp } from '../utils/client-ip';
 import { runWithUpstreamCaller, type UpstreamBudgetState } from '../utils/request-context';
+import { elysiumRpcRequestWeight } from '../schemas/elysium-rpc.schema';
 
 // Configuration des limites
 //
@@ -236,7 +237,10 @@ interface IpLimits {
  *
  * `cost` makes one request weigh more than 1 in both windows, for a route
  * where a single request carries several units of work (a JSON-RPC batch). It
- * is read after the body was validated; anything below 1 counts as 1.
+ * is read after the body was validated; anything below 1 counts as 1, and a
+ * request never weighs more than a whole second's budget (it would be refused
+ * for good): the heaviest valid request takes the second, and the minute
+ * window is what holds a client that sends them one after the other.
  */
 function createIpLimiter(
   namespace: string,
@@ -258,7 +262,7 @@ function createIpLimiter(
     }
     // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4.
     const key = rateLimitKeyForIp(ip);
-    const cost = options.cost ? Math.max(1, Math.trunc(options.cost(req)) || 1) : 1;
+    const cost = options.cost ? Math.min(limits.BURST.MAX_REQUESTS, Math.max(1, Math.trunc(options.cost(req)) || 1)) : 1;
     try {
       const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${key}`, windows, cost);
       if (burstCount > limits.BURST.MAX_REQUESTS) {
@@ -324,10 +328,12 @@ export const elysiumSearchRateLimiter = createIpLimiter(
 
 /**
  * Elysium mainnet RPC proxy (`POST /elysium/rpc`): every JSON-RPC call is one
- * call to the keyed archive node, so this counts calls, not requests: a batch
- * of 20 weighs 20. The general limiter in front of it counts requests, and at
- * 6,000 a minute a client sending full batches reached the node hundreds of
- * thousands of times a minute.
+ * call to the keyed archive node, so this counts calls, not requests, each at
+ * its weight (elysiumRpcCallWeight: 1 for a plain read, more for the calls
+ * whose parameters size the node's work): a batch of 20 plain reads weighs 20,
+ * one `eth_simulateV1` of 40 calls weighs 40. The general limiter in front of
+ * it counts requests, and at 6,000 a minute a client sending full batches
+ * reached the node hundreds of thousands of times a minute.
  *
  * The builder tools send single calls: opening one makes about 7 to 15 of
  * them at once (network parameters, token check: counted in the front's code,
@@ -335,15 +341,21 @@ export const elysiumSearchRateLimiter = createIpLimiter(
  * 50 a second lets a few people behind one IP open a tool together, and 1,200
  * a minute is 20 calls a second sustained.
  */
+const ELYSIUM_RPC_BURST = positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_BURST', 50);
 export const elysiumRpcRateLimiter = createIpLimiter(
   'elyrpc',
   {
-    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_BURST', 50) },
+    BURST: { WINDOW: 1, MAX_REQUESTS: ELYSIUM_RPC_BURST },
     MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_MINUTE', 1200) },
   },
   'Elysium RPC',
-  { cost: (req) => (Array.isArray(req.body) ? req.body.length : 1) }
+  { cost: (req) => elysiumRpcRequestWeight(req.body) }
 );
+
+/** The same weight, capped like the limiter caps it: what the proxy counts against its own budgets. */
+export function elysiumRpcWeightOf(body: unknown): number {
+  return Math.min(ELYSIUM_RPC_BURST, Math.max(1, elysiumRpcRequestWeight(body)));
+}
 
 /**
  * Per-address passthrough to the paid indexer (wallet fills, funding, TWAPs,

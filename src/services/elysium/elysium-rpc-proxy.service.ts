@@ -1,10 +1,13 @@
+import type { ServerResponse } from 'http';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { positiveIntEnv } from '../../utils/env';
+import { FairGate, GateBusyError } from '../../utils/fairGate';
 
 /**
- * The proxy has no room for this request right now: too many forwards in
- * flight, or the minute's budget of calls to the archive node is spent. The
- * caller is told when to come back.
+ * The proxy has no room for this request right now: its client's share or the
+ * proxy as a whole is taken (forwards in flight, memory held), or the minute's
+ * budget of calls to the archive node is spent. The caller is told when to
+ * come back.
  */
 export class ElysiumRpcBusyError extends Error {
   constructor(public readonly retryAfterS: number) {
@@ -22,6 +25,23 @@ export class ElysiumRpcResponseTooLargeError extends Error {
 }
 
 /**
+ * The node's answer, as received. It holds a forward slot and its bytes in the
+ * proxy's memory budget until `release` is called: once the client has it, or
+ * is gone (`deliver` does it).
+ */
+export interface ElysiumRpcAnswer {
+  chunks: Buffer[];
+  bytes: number;
+  /** Frees the slot and the memory this answer holds. Calling it twice is harmless. */
+  release(): void;
+}
+
+/** The longest an answer waits to be read by its client before the response is cut. */
+const DELIVERY_TIMEOUT_MS = 30_000;
+/** The longest a call waits for a slot of its client's share. */
+const SLOT_WAIT_MS = 5_000;
+
+/**
  * Forwards read-only JSON-RPC calls to the Elysium mainnet archive RPC.
  *
  * The archive RPC is keyed (the key is in its URL), so it can never be read
@@ -31,15 +51,23 @@ export class ElysiumRpcResponseTooLargeError extends Error {
  * read-only methods through; this service just forwards and never logs the URL.
  *
  * The key is one for everyone, so these ceilings stand between a flood and
- * the node, behind the per-client rate limit of the route:
+ * the node, behind the per-client rate limit of the route. Each has a share
+ * per client (its IP, or /64): a ceiling without one is taken whole by the
+ * client that asks fastest.
  * - forwards in flight, in all (`ELYSIUM_RPC_MAX_IN_FLIGHT`) and per client
- *   (`ELYSIUM_RPC_MAX_IN_FLIGHT_PER_CLIENT`): each holds a socket and its
- *   answer in memory for up to the timeout. The per-client share is what keeps
- *   one client's slow calls from taking every slot from the others;
- * - calls a minute across all clients (`ELYSIUM_RPC_GLOBAL_PER_MINUTE`), per
- *   process: many IPs together still cannot spend the key's quota;
+ *   (`ELYSIUM_RPC_MAX_IN_FLIGHT_PER_CLIENT`): each holds a socket for up to
+ *   the timeout. A client past its share waits for one of its own calls to
+ *   end (up to 32 of them, 5 s), it is not refused: opening a tool fires more
+ *   calls at once than the share;
+ * - bytes of answers held in memory, in all (`ELYSIUM_RPC_MAX_BUFFERED_BYTES`)
+ *   and per client (`ELYSIUM_RPC_MAX_BUFFERED_BYTES_PER_CLIENT`), from the
+ *   first byte read to the moment the client has the answer: an answer can be
+ *   megabytes, and a client that does not read holds it;
+ * - weight of the calls of a minute across all clients
+ *   (`ELYSIUM_RPC_GLOBAL_PER_MINUTE`), per process: many IPs together still
+ *   cannot spend the key's quota;
  * - bytes of one answer (`ELYSIUM_RPC_MAX_RESPONSE_BYTES`): the body is read
- *   up to that size and relayed as text, never parsed here.
+ *   up to that size and relayed as received, never decoded or parsed here.
  */
 export class ElysiumRpcProxyService {
   private static instance: ElysiumRpcProxyService;
@@ -48,15 +76,25 @@ export class ElysiumRpcProxyService {
   /** A wide `eth_getLogs` (10,000 logs) or a full block of receipts is 3 to 5 MB. */
   private readonly maxResponseBytes = positiveIntEnv('ELYSIUM_RPC_MAX_RESPONSE_BYTES', 8 * 1024 * 1024);
   private readonly maxInFlight = positiveIntEnv('ELYSIUM_RPC_MAX_IN_FLIGHT', 64);
-  /** Opening a tool fires about 7 to 15 calls together (see elysiumRpcRateLimiter): room for one such page load, a quarter of the total. */
-  private readonly maxInFlightPerClient = positiveIntEnv('ELYSIUM_RPC_MAX_IN_FLIGHT_PER_CLIENT', 16);
-  /** 200 calls a second across all clients, ten times one client's own ceiling. */
+  /** An eighth of the total: eight clients with slow calls are needed to take every slot, where four were. */
+  private readonly maxInFlightPerClient = positiveIntEnv('ELYSIUM_RPC_MAX_IN_FLIGHT_PER_CLIENT', 8);
+  /** Twelve answers of the largest size, in all; three of them for one client. */
+  private readonly maxBufferedBytes = positiveIntEnv('ELYSIUM_RPC_MAX_BUFFERED_BYTES', 96 * 1024 * 1024);
+  private readonly maxBufferedBytesPerClient = positiveIntEnv('ELYSIUM_RPC_MAX_BUFFERED_BYTES_PER_CLIENT', 24 * 1024 * 1024);
+  /** 200 units a second across all clients, ten times one client's own ceiling. */
   private readonly globalPerMinute = positiveIntEnv('ELYSIUM_RPC_GLOBAL_PER_MINUTE', 12_000);
 
-  private inFlight = 0;
-  /** Forwards in flight per client key; an entry is removed when it reaches 0. */
-  private readonly inFlightByClient = new Map<string, number>();
-  /** Calls forwarded in the current fixed minute. */
+  private readonly gate = new FairGate({
+    max: this.maxInFlight,
+    maxPerClient: this.maxInFlightPerClient,
+    maxWaiting: positiveIntEnv('ELYSIUM_RPC_MAX_WAITING', 256),
+    maxWaitingPerClient: positiveIntEnv('ELYSIUM_RPC_MAX_WAITING_PER_CLIENT', 32),
+    maxWaitMs: SLOT_WAIT_MS,
+  });
+  /** Bytes of answers held (being read, or waiting for their client), in all and per client key. */
+  private buffered = 0;
+  private readonly bufferedByClient = new Map<string, number>();
+  /** Weight forwarded in the current fixed minute. */
   private minute = { index: 0, calls: 0 };
 
   public static getInstance(): ElysiumRpcProxyService {
@@ -76,20 +114,46 @@ export class ElysiumRpcProxyService {
     return this.url() !== null;
   }
 
-  /** Takes `calls` from the minute's budget, or throws with the wait until the minute rolls over. */
-  private spend(calls: number): void {
+  /** Forwards in flight (waiting for the node or for their client) and bytes held: diagnostics and tests. */
+  public get load(): { inFlight: number; waiting: number; bufferedBytes: number; clients: number } {
+    const { running, waiting } = this.gate.stats;
+    return { inFlight: running, waiting, bufferedBytes: this.buffered, clients: this.bufferedByClient.size };
+  }
+
+  /** Takes `weight` from the minute's budget, or throws with the wait until the minute rolls over. */
+  private spend(weight: number): void {
     const now = Date.now();
     const index = Math.floor(now / 60_000);
     if (this.minute.index !== index) this.minute = { index, calls: 0 };
-    if (this.minute.calls + calls > this.globalPerMinute) {
+    if (this.minute.calls + weight > this.globalPerMinute) {
       logDeduplicator.warn('Elysium RPC proxy: global minute budget spent', { budget: this.globalPerMinute });
       throw new ElysiumRpcBusyError(Math.max(1, 60 - Math.floor((now % 60_000) / 1000)));
     }
-    this.minute.calls += calls;
+    this.minute.calls += weight;
   }
 
-  /** The body as text, read no further than the ceiling. */
-  private async readCapped(res: Response): Promise<string> {
+  /** Counts `bytes` more held for `client`, or throws when its share or the proxy's memory budget is full. */
+  private hold(client: string, bytes: number): void {
+    const mine = this.bufferedByClient.get(client) ?? 0;
+    // The client's own share first: its refusal is its own doing and is not logged as a shortage.
+    if (mine + bytes > this.maxBufferedBytesPerClient) throw new ElysiumRpcBusyError(1);
+    if (this.buffered + bytes > this.maxBufferedBytes) {
+      logDeduplicator.warn('Elysium RPC proxy: answers held in memory at the ceiling', { maxBytes: this.maxBufferedBytes });
+      throw new ElysiumRpcBusyError(1);
+    }
+    this.buffered += bytes;
+    this.bufferedByClient.set(client, mine + bytes);
+  }
+
+  private unhold(client: string, bytes: number): void {
+    this.buffered -= bytes;
+    const left = (this.bufferedByClient.get(client) ?? bytes) - bytes;
+    if (left <= 0) this.bufferedByClient.delete(client);
+    else this.bufferedByClient.set(client, left);
+  }
+
+  /** The body's chunks, read no further than the ceiling, each counted against `client` as it arrives. */
+  private async readCapped(res: Response, client: string, held: { bytes: number }): Promise<Buffer[]> {
     const tooLarge = (): ElysiumRpcResponseTooLargeError => {
       logDeduplicator.warn('Elysium RPC proxy: upstream answer over the size ceiling', {
         maxBytes: this.maxResponseBytes,
@@ -102,50 +166,73 @@ export class ElysiumRpcProxyService {
       void res.body?.cancel().catch(() => undefined);
       throw tooLarge();
     }
-    if (!res.body) return '';
+    if (!res.body) return [];
     const reader = res.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > this.maxResponseBytes) {
-        void reader.cancel().catch(() => undefined);
-        throw tooLarge();
+    const chunks: Buffer[] = [];
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (held.bytes + value.byteLength > this.maxResponseBytes) throw tooLarge();
+        this.hold(client, value.byteLength);
+        held.bytes += value.byteLength;
+        // A view on the same memory, not a copy.
+        chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
       }
-      chunks.push(value);
+    } catch (error) {
+      void reader.cancel().catch(() => undefined);
+      throw error;
     }
-    return Buffer.concat(chunks, total).toString('utf8');
+    return chunks;
+  }
+
+  /** True when the first byte that is not white space opens a JSON object or array. */
+  private static looksLikeJsonRpc(chunks: Buffer[]): boolean {
+    for (const chunk of chunks) {
+      for (const byte of chunk) {
+        if (byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d) continue;
+        return byte === 0x5b || byte === 0x7b;
+      }
+    }
+    return false;
   }
 
   /**
-   * Forwards a validated JSON-RPC body (one call or a batch of `calls`) for
-   * `client` (its rate-limit key) and returns the upstream JSON-RPC response
-   * as received, unparsed: the answer can be megabytes, and parsing then
-   * re-serialising it would hold the event loop for nothing. Throws
-   * ElysiumRpcBusyError / ElysiumRpcResponseTooLargeError for the ceilings
-   * above, a plain Error on a transport or upstream failure; no error ever
-   * carries the keyed URL.
+   * Forwards a validated JSON-RPC body (one call or a batch, weighing `weight`)
+   * for `client` (its rate-limit key) and returns the upstream JSON-RPC
+   * response as received, undecoded: the answer can be megabytes, and decoding,
+   * parsing or re-serialising it would hold the event loop for nothing. The
+   * answer keeps its slot and its bytes until it is released (see `deliver`).
+   * Throws ElysiumRpcBusyError / ElysiumRpcResponseTooLargeError for the
+   * ceilings above, a plain Error on a transport or upstream failure; no error
+   * ever carries the keyed URL.
    */
-  public async forward(body: unknown, calls = 1, client = ''): Promise<string> {
+  public async forward(body: unknown, weight = 1, client = ''): Promise<ElysiumRpcAnswer> {
     const url = this.url();
     if (!url) throw new Error('ELYSIUM_MAINNET_RPC_NOT_CONFIGURED');
 
-    const mine = this.inFlightByClient.get(client) ?? 0;
-    // The client's own share first: its refusal is its own doing and is not logged as a shortage.
-    if (mine >= this.maxInFlightPerClient) throw new ElysiumRpcBusyError(1);
-    if (this.inFlight >= this.maxInFlight) {
-      logDeduplicator.warn('Elysium RPC proxy: too many forwards in flight', { max: this.maxInFlight });
-      throw new ElysiumRpcBusyError(1);
-    }
-    this.spend(calls);
-
-    this.inFlight += 1;
-    this.inFlightByClient.set(client, mine + 1);
+    let freeSlot: () => void;
     try {
+      freeSlot = await this.gate.acquire(client);
+    } catch (error) {
+      if (!(error instanceof GateBusyError)) throw error;
+      // The client's own share is its own doing; only a shortage of the proxy is logged.
+      if (!error.ownShare) logDeduplicator.warn('Elysium RPC proxy: too many forwards in flight', { max: this.maxInFlight });
+      throw new ElysiumRpcBusyError(error.retryAfterS);
+    }
+    const held = { bytes: 0 };
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      freeSlot();
+      this.unhold(client, held.bytes);
+    };
+
+    try {
+      this.spend(weight);
       let res: Response;
-      let text: string;
+      let chunks: Buffer[];
       try {
         res = await fetch(url, {
           method: 'POST',
@@ -159,9 +246,9 @@ export class ElysiumRpcProxyService {
           logDeduplicator.warn('Elysium RPC proxy upstream status', { status: res.status });
           throw new Error('ELYSIUM_MAINNET_RPC_UPSTREAM');
         }
-        text = await this.readCapped(res);
+        chunks = await this.readCapped(res, client, held);
       } catch (error) {
-        if (error instanceof ElysiumRpcResponseTooLargeError) throw error;
+        if (error instanceof ElysiumRpcResponseTooLargeError || error instanceof ElysiumRpcBusyError) throw error;
         if (error instanceof Error && error.message === 'ELYSIUM_MAINNET_RPC_UPSTREAM') throw error;
         // Keep the URL out of the message: it carries the key.
         logDeduplicator.warn('Elysium RPC proxy transport error', {
@@ -171,16 +258,40 @@ export class ElysiumRpcProxyService {
       }
       // A JSON-RPC answer is an object or an array; anything else (an HTML
       // error page behind a 200) must not reach the client as JSON.
-      if (!/^\s*[[{]/.test(text)) {
+      if (!ElysiumRpcProxyService.looksLikeJsonRpc(chunks)) {
         logDeduplicator.warn('Elysium RPC proxy: upstream answer is not JSON-RPC');
         throw new Error('ELYSIUM_MAINNET_RPC_UPSTREAM');
       }
-      return text;
-    } finally {
-      this.inFlight -= 1;
-      const left = (this.inFlightByClient.get(client) ?? 1) - 1;
-      if (left <= 0) this.inFlightByClient.delete(client);
-      else this.inFlightByClient.set(client, left);
+      return { chunks, bytes: held.bytes, release };
+    } catch (error) {
+      release();
+      throw error;
     }
+  }
+
+  /**
+   * Writes `answer` to `res` as the JSON it is, and releases it when the
+   * client has it or has gone. A client that has not read it after
+   * DELIVERY_TIMEOUT_MS is cut: the bytes of an unread answer sit in this
+   * process, and a slot of its client's share with them.
+   */
+  public deliver(answer: ElysiumRpcAnswer, res: ServerResponse): void {
+    const timer = setTimeout(() => {
+      logDeduplicator.warn('Elysium RPC proxy: client did not read its answer, connection cut');
+      res.destroy();
+    }, DELIVERY_TIMEOUT_MS);
+    timer.unref();
+    const done = (): void => {
+      clearTimeout(timer);
+      answer.release();
+    };
+    // 'finish': everything was handed to the socket. 'close': the client went away first.
+    res.once('finish', done);
+    res.once('close', done);
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Length', String(answer.bytes));
+    for (const chunk of answer.chunks) res.write(chunk);
+    res.end();
   }
 }

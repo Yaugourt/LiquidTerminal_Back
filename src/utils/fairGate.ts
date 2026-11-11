@@ -62,12 +62,27 @@ export class FairGate {
 
   /** Runs `fn` when the gate and the client's share have room; rejects with GateBusyError otherwise. */
   public async run<T>(client: string, fn: () => Promise<T>): Promise<T> {
-    await this.enter(client);
+    const release = await this.acquire(client);
     try {
       return await fn();
     } finally {
-      this.leave(client);
+      release();
     }
+  }
+
+  /**
+   * Takes a slot for `client` (waiting for one when it must) and returns what
+   * frees it, for a hold that outlives one function call. Freeing twice is
+   * harmless. Rejects with GateBusyError like `run`.
+   */
+  public async acquire(client: string): Promise<() => void> {
+    await this.enter(client);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      this.leave(client);
+    };
   }
 
   /** Runs in flight and callers waiting (diagnostics, tests). */

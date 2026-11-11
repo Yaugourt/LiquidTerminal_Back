@@ -3,6 +3,8 @@ import {
   elysiumRpcParamsIssue,
   ELYSIUM_RPC_ALLOWED_METHODS,
   ELYSIUM_RPC_MAX_BATCH,
+  elysiumRpcCallWeight,
+  elysiumRpcRequestWeight,
 } from '../../../src/schemas/elysium-rpc.schema';
 
 const parse = (body: unknown) => elysiumRpcBodySchema.safeParse({ body });
@@ -92,6 +94,35 @@ describe('elysium rpc proxy schema', () => {
 
   it('checks every call of a batch', () => {
     expect(parse([{ method: 'eth_chainId' }, { method: 'eth_getLogs', params: [{ fromBlock: 'earliest' }] }]).success).toBe(false);
+  });
+
+  it('weighs a call by the work its parameters size', () => {
+    const call = { from: TOKEN, to: TOKEN, data: '0x' };
+    expect(elysiumRpcCallWeight('eth_blockNumber', undefined)).toBe(1);
+    expect(elysiumRpcCallWeight('eth_call', [{ to: TOKEN, data: '0x' }, 'latest'])).toBe(1);
+    // One per simulated call, an empty block still one.
+    expect(elysiumRpcCallWeight('eth_simulateV1', [{ blockStateCalls: [{ calls: [call, call, call] }] }, 'latest'])).toBe(3);
+    expect(elysiumRpcCallWeight('eth_simulateV1', [{ blockStateCalls: [{ calls: Array.from({ length: 64 }, () => call) }, { calls: [] }, {}] }, 'latest'])).toBe(66);
+    expect(elysiumRpcCallWeight('eth_simulateV1', [])).toBe(1);
+    expect(elysiumRpcCallWeight('eth_getLogs', [{ address: TOKEN, fromBlock: '0x0', toBlock: 'latest' }])).toBe(5);
+    expect(elysiumRpcCallWeight('eth_getLogs', [{ blockHash: '0x' + 'ab'.repeat(32) }])).toBe(2);
+    expect(elysiumRpcCallWeight('eth_getBlockReceipts', ['latest'])).toBe(3);
+    expect(elysiumRpcCallWeight('eth_getBlockByNumber', ['0x1', true])).toBe(2);
+    expect(elysiumRpcCallWeight('eth_getBlockByNumber', ['0x1', false])).toBe(1);
+    expect(elysiumRpcCallWeight('eth_getProof', [TOKEN, Array.from({ length: 32 }, () => '0x0'), 'latest'])).toBe(5);
+    expect(elysiumRpcCallWeight('eth_getProof', [TOKEN, [], 'latest'])).toBe(1);
+    expect(elysiumRpcCallWeight('eth_feeHistory', ['0x400', 'latest', []])).toBe(9);
+    expect(elysiumRpcCallWeight('eth_feeHistory', [4, 'latest', []])).toBe(1);
+  });
+
+  it('weighs a request as its calls together', () => {
+    const plain = { jsonrpc: '2.0', id: 1, method: 'eth_chainId' };
+    const logs = { jsonrpc: '2.0', id: 2, method: 'eth_getLogs', params: [{ address: TOKEN }] };
+    expect(elysiumRpcRequestWeight(plain)).toBe(1);
+    expect(elysiumRpcRequestWeight([plain, plain, logs])).toBe(7);
+    expect(elysiumRpcRequestWeight(Array.from({ length: 20 }, () => plain))).toBe(20);
+    // Never below one unit, whatever reaches it.
+    expect(elysiumRpcRequestWeight(null)).toBe(1);
   });
 
   it('leaves the other methods to the node', () => {

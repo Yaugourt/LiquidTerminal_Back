@@ -1,6 +1,6 @@
 /**
- * elysiumRpcRateLimiter on its Redis path: one request weighs as many units
- * as it carries JSON-RPC calls, in both windows, in a single round trip.
+ * elysiumRpcRateLimiter on its Redis path: one request weighs what its
+ * JSON-RPC calls weigh together, in both windows, in a single round trip.
  */
 import type { NextFunction, Request, Response } from 'express';
 
@@ -89,6 +89,27 @@ describe('elysiumRpcRateLimiter (Redis path)', () => {
     expect(counts()).toEqual([21, 21]);
     expect(mockRedis.execCalls).toBe(2);
     expect([...mockRedis.counters.keys()].every((k) => k.startsWith('ratelimit:elyrpc:203.0.113.7:'))).toBe(true);
+  });
+
+  it('adds the weight of the calls: a simulation its number of calls, never more than a whole second', async () => {
+    const tx = { to: '0x' + '22'.repeat(20), data: '0x' };
+    const simulate = (calls: number, blocks = 1) => ({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_simulateV1',
+      params: [{ blockStateCalls: Array.from({ length: blocks }, () => ({ calls: Array.from({ length: calls }, () => tx) })) }, 'latest'],
+    });
+    expect((await hit(simulate(40))).status).toBe(200);
+    expect(counts()).toEqual([40, 40]);
+    // 256 simulated calls would be refused for good at their full weight: counted as the whole second, 50.
+    now += 1000;
+    expect((await hit(simulate(64, 4), '203.0.113.9')).status).toBe(200);
+    expect(counts()).toContain(50);
+    expect(counts()).not.toContain(256);
+    // And it does take the second: the same client's next call waits for the next one.
+    expect((await hit(call, '203.0.113.9')).status).toBe(429);
+    // The other cases start on a whole minute.
+    now -= 1000;
   });
 
   it('refuses past 50 calls in a second, whatever the number of requests', async () => {
