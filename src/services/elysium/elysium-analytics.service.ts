@@ -161,6 +161,7 @@ export class ElysiumAnalyticsService {
       streams: Array<Record<string, unknown>>;
       rollups: Record<string, unknown>;
       rejects: Array<Record<string, unknown>>;
+      completeness: Record<string, unknown>;
       views: Array<Record<string, unknown>>;
     }>
   > {
@@ -179,9 +180,10 @@ export class ElysiumAnalyticsService {
     streams: Array<Record<string, unknown>>;
     rollups: Record<string, unknown>;
     rejects: Array<Record<string, unknown>>;
+    completeness: Record<string, unknown>;
   }> {
-    return this.view('status', 'v3', CADENCE.status, async () => {
-      const [all, days, sizes, rejects] = await Promise.all([
+    return this.view('status', 'v4', CADENCE.status, async () => {
+      const [all, days, sizes, rejects, checks] = await Promise.all([
         ElysiumIngestRepository.getInstance().listStates(),
         prismaHistoricalPages.$queryRaw<Array<{ day: string; built_ms: number | null }>>`
           SELECT day::text AS day, (extract(epoch FROM built_at) * 1000)::float8 AS built_ms
@@ -206,6 +208,32 @@ export class ElysiumAnalyticsService {
           WHERE day >= (now() AT TIME ZONE 'UTC')::date - 6
           GROUP BY stream, reason
           ORDER BY stream, reason`.catch(() => []),
+        // Each closed day of the last week against the provider's own count of it (ElysiumDayCheckService).
+        prismaHistoricalPages.$queryRaw<
+          Array<{
+            day: string;
+            status: string;
+            provider_txs: number;
+            provider_spam: number;
+            our_txs: number;
+            our_spam: number;
+            checked_ms: number;
+            gap_ms: number | null;
+            repaired_ms: number | null;
+            rereads: number;
+            rows_added: number;
+            rows_corrected: number;
+            rows_removed: number;
+          }>
+        >`
+          SELECT day::text AS day, status, provider_txs, provider_spam, our_txs, our_spam,
+                 (extract(epoch FROM checked_at) * 1000)::float8 AS checked_ms,
+                 (extract(epoch FROM gap_since) * 1000)::float8 AS gap_ms,
+                 (extract(epoch FROM repaired_at) * 1000)::float8 AS repaired_ms,
+                 rereads, rows_added, rows_corrected, rows_removed
+          FROM elysium_day_check
+          WHERE day >= (now() AT TIME ZONE 'UTC')::date - 8
+          ORDER BY day`.catch(() => []),
       ]);
       // Markers (a one-time rebuild, a position in a listing) are not streams: they have no lag to show.
       const rows = all.filter((r) => !ELYSIUM_STATE_MARKERS.has(r.stream));
@@ -235,6 +263,26 @@ export class ElysiumAnalyticsService {
           sizeBytes: sizes[0] ? Number(sizes[0].rollups) : null,
           txTableBytes: sizes[0] ? Number(sizes[0].tx) : null,
           lastError: errorCategory(builder?.lastError ?? null),
+        },
+        // Whether each closed day holds what the provider counts for it: `differing` is what to look at.
+        completeness: {
+          lastCheckedAt: iso(checks.reduce<number | null>((m, c) => (m === null || Number(c.checked_ms) > m ? Number(c.checked_ms) : m), null)),
+          differing: checks.filter((c) => c.status !== 'ok').length,
+          days: checks.map((c) => ({
+            day: c.day.slice(0, 10),
+            status: c.status,
+            txs: Number(c.our_txs),
+            providerTxs: Number(c.provider_txs),
+            spam: Number(c.our_spam),
+            providerSpam: Number(c.provider_spam),
+            checkedAt: iso(Number(c.checked_ms)),
+            differsSince: iso(c.gap_ms === null ? null : Number(c.gap_ms)),
+            repairedAt: iso(c.repaired_ms === null ? null : Number(c.repaired_ms)),
+            rereads: Number(c.rereads),
+            rowsAdded: Number(c.rows_added),
+            rowsCorrected: Number(c.rows_corrected),
+            rowsRemoved: Number(c.rows_removed),
+          })),
         },
         // Counts only: the stored example of each stays in the database.
         rejects: rejects.map((r) => ({

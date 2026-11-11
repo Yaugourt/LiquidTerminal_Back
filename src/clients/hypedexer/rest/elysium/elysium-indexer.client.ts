@@ -1,3 +1,4 @@
+import { HttpApiError } from '../../../../core/base.api.service';
 import { CircuitBreakerService } from '../../../../core/circuit.breaker.service';
 import { RateLimiterService } from '../../../../core/hyperLiquid.ratelimiter.service';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
@@ -34,6 +35,19 @@ export interface ElysiumIngestPageQuery {
   start_time?: string;
   end_time?: string;
   [key: string]: QueryValue;
+}
+
+/**
+ * A UTC day as the provider counts it, in the terms of elysium_tx: `txs` are its user and
+ * bridge transactions (what we store as non-spam; system transactions are never stored), `spam`
+ * and `bridge` the two parts of them the provider also gives. Equal to our own counts, to the
+ * unit, on the 9 closed days compared on 2026-11-11.
+ */
+export interface ElysiumProviderDay {
+  day: string;
+  txs: number;
+  spam: number;
+  bridge: number;
 }
 
 /** One page of an upstream list, as the ingestion reads it. */
@@ -244,6 +258,46 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
     );
     if (!Array.isArray(data)) throw new Error('Elysium ingest: expected a holder array');
     return data;
+  }
+
+  /**
+   * The provider's own count of each of the last `days` UTC days (its /stats/daily), for the
+   * ingestion service: what a closed day of elysium_tx is compared with.
+   */
+  public async fetchIngestDaily(days: number): Promise<ElysiumProviderDay[]> {
+    const data = await this.ingestCircuitBreaker.execute(() =>
+      this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}/stats/daily${buildQuery({ days })}`)
+    );
+    if (!Array.isArray(data)) throw new Error('Elysium ingest: expected a daily array');
+    const out: ElysiumProviderDay[] = [];
+    for (const raw of data) {
+      if (!raw || typeof raw !== 'object') continue;
+      const r = raw as Record<string, unknown>;
+      const count = (v: unknown): number | null => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null);
+      const [user, spam, bridge] = [count(r.user_transactions), count(r.spam_transactions), count(r.bridge_transactions)];
+      // A day without one of its three counts cannot be compared: left out, never guessed.
+      if (typeof r.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(r.day) || user === null || spam === null || bridge === null) continue;
+      out.push({ day: r.day, txs: user + bridge, spam, bridge });
+    }
+    return out;
+  }
+
+  /**
+   * Whether the provider still lists a transaction (its /transactions/{hash}), for the
+   * ingestion service: false only on its 404. The 404 is an answer, not a failure: it is read
+   * inside the breaker so that asking about transactions that are gone never opens it.
+   */
+  public async fetchIngestTxListed(txHash: string): Promise<boolean> {
+    if (!/^0x[0-9a-f]{64}$/.test(txHash)) throw new Error('Elysium ingest: invalid tx hash');
+    return this.ingestCircuitBreaker.execute(async () => {
+      try {
+        await this.get<unknown>(`${ELYSIUM_PREFIX}/transactions/${txHash}`);
+        return true;
+      } catch (error) {
+        if (error instanceof HttpApiError && error.statusCode === 404) return false;
+        throw error;
+      }
+    });
   }
 
   /**

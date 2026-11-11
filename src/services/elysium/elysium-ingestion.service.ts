@@ -11,6 +11,7 @@ import { ELYSIUM_PROJECTS } from '../../constants/elysium-projects';
 import { BLOCK_BATCH, ElysiumRpcLogs } from './elysium-rpc-logs';
 import { ElysiumRollupService } from './elysium-rollup.service';
 import { IngestRejects } from './elysium-ingest-rejects';
+import { ElysiumDayCheckService } from './elysium-day-check.service';
 import {
   dedupeBy,
   ELYSIUM_GENESIS,
@@ -226,6 +227,8 @@ const LAUNCH_STATS_BATCH = 60;
 const LAUNCH_STATS_PRIORITY = 40;
 /** Holder page size: launch tokens have far fewer holders, a full page falls back to the detail count. */
 const LAUNCH_HOLDERS_LIMIT = 1000;
+/** Daily comparison with the provider: wait after a run that failed or found its lock taken. */
+const DAY_CHECK_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
 /** Day rollups: wait after a pass that failed or found the builder's lock taken. */
 const ROLLUP_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
 /**
@@ -321,6 +324,26 @@ export class ElysiumIngestionService {
   private readonly countedUpTo = new Map<ElysiumStream, number>();
   /** Tokens whose holder figures could not be read, and when each may be tried again. */
   private readonly unreadableUntil = new Map<string, number>();
+  /** The daily comparison of elysium_tx with the provider's own figures, run as one more loop here. */
+  private readonly dayCheck = new ElysiumDayCheckService({
+    ensureRunning: () => this.ensureRunning(),
+    wait: () => this.throttle.wait(),
+    head: async () => (await this.ingestHorizon()).head,
+    txCursor: async () => (await this.repo.getState('tx'))?.cursor ?? null,
+    fetchDaily: (days) => this.client.fetchIngestDaily(days),
+    pageTxs: async (start, end, onPage) => {
+      await this.pageAll(
+        'check',
+        '/transactions',
+        { start_time: toUpstreamTime(start), end_time: toUpstreamTime(end), include_spam: true, include_system: false },
+        // Rows without their fields were counted when the stream first read them.
+        (raw) => onPage(dedupeBy(raw.map(normalizeTx).filter((r): r is TxRow => r !== null), (r) => r.tx_hash))
+      );
+    },
+    insertTxs: (rows) => this.writeRows('check', rows, async (part) => (await this.repo.insertTxs(part)).inserted, (r) => r.tx_hash),
+    txListed: (hash) => this.client.fetchIngestTxListed(hash),
+    rejects: this.rejects,
+  });
   /** Last read of the provider's head, null until the first successful read. */
   private head: { at: number; value: Date | null } | null = null;
 
@@ -361,6 +384,11 @@ export class ElysiumIngestionService {
     return (process.env.ELYSIUM_INGEST_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
   }
 
+  /** The daily comparison with the provider (and the re-read of a day that differs) can be switched off on its own. */
+  public static isDayCheckEnabled(): boolean {
+    return (process.env.ELYSIUM_DAY_CHECK_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+  }
+
   public startPolling(): void {
     if (!ElysiumIngestionService.isEnabled()) {
       logDeduplicator.info('Elysium ingestion disabled by ELYSIUM_INGEST_ENABLED');
@@ -379,6 +407,7 @@ export class ElysiumIngestionService {
     this.schedule('launchpad', 25_000, () => this.launchpadTick());
     this.schedule('launchstats', 120_000, () => this.launchStatsTick());
     if (ElysiumRollupService.isEnabled()) this.schedule('rollup', 60_000, () => this.rollups.tick());
+    if (ElysiumIngestionService.isDayCheckEnabled()) this.schedule('check', 150_000, () => this.dayCheck.tick());
     logDeduplicator.info('Elysium ingestion started');
   }
 
@@ -464,6 +493,7 @@ export class ElysiumIngestionService {
     if (stream === 'launchpad') return LAUNCHPAD_LIVE_INTERVAL_MS;
     if (stream === 'launchstats') return LAUNCH_STATS_INTERVAL_MS;
     if (stream === 'rollup') return ROLLUP_RETRY_INTERVAL_MS;
+    if (stream === 'check') return DAY_CHECK_RETRY_INTERVAL_MS;
     return TOKENS_INTERVAL_MS;
   }
 

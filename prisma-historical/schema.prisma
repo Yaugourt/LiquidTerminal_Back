@@ -411,6 +411,30 @@ model ElysiumTxLive {
   @@map("elysium_tx_live")
 }
 
+/// One row per closed UTC day compared with the provider's own daily figures
+/// (ElysiumDayCheckService): what the provider counts, what elysium_tx holds, and where the
+/// re-read of a day that differs stands (`progress`: its 144 ten-minute slots, '1' once read again).
+model ElysiumDayCheck {
+  day            DateTime  @id @db.Date
+  providerTxs    Int       @map("provider_txs")
+  providerSpam   Int       @map("provider_spam")
+  providerBridge Int       @map("provider_bridge")
+  ourTxs         Int       @map("our_txs")
+  ourSpam        Int       @map("our_spam")
+  ourBridge      Int       @map("our_bridge")
+  status         String    @db.VarChar(16)
+  checkedAt      DateTime  @default(now()) @map("checked_at") @db.Timestamptz(3)
+  gapSince       DateTime? @map("gap_since") @db.Timestamptz(3)
+  progress       String?   @db.VarChar(144)
+  rereads        Int       @default(0)
+  rowsAdded      Int       @default(0) @map("rows_added")
+  rowsCorrected  Int       @default(0) @map("rows_corrected")
+  rowsRemoved    Int       @default(0) @map("rows_removed")
+  repairedAt     DateTime? @map("repaired_at") @db.Timestamptz(3)
+
+  @@map("elysium_day_check")
+}
+
 /// What the ingestion read and did not store, counted per stream, reason and UTC day
 /// (a refused row, an unknown launch emitter, a window cut at the page cap). `sample`
 /// keeps one example per day; the public status only shows the counts.
