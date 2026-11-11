@@ -37,7 +37,8 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 const pass = (_req: Request, _res: Response, next: NextFunction) => next();
 jest.mock('../../../src/middleware/apiRateLimiter', () => ({
   marketRateLimiter: (req: Request, res: Response, next: NextFunction) => pass(req, res, next),
-  countUpstreamCall: jest.fn(),
+  countUpstreamCredits: jest.fn(),
+  UPSTREAM_CALL_BASE_CREDITS: 2,
 }));
 
 import activeUsersRouter from '../../../src/routes/activeusers/activeusers.routes';

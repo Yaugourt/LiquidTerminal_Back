@@ -1,7 +1,7 @@
 /**
- * Per-client budget of billed HypeDexer calls. Decided once per request, on
- * entry (peek, no increment), then counted exactly and never refused while
- * counting: the upstream-caller context (open while the request is answered),
+ * Budget of what HypeDexer bills for a client's requests, in credits (it counted
+ * calls until 2026-11-12). Decided once per request, on entry (peek, no
+ * increment), then counted as it is known and never refused while counting: the upstream-caller context (open while the request is answered),
  * the Redis counters with their in-memory fallback, and the gate every
  * HypeDexer REST call passes. Cache hits never get here; single-flight
  * joiners, retries, background work and the export (no context) never count.
@@ -12,8 +12,12 @@ import { EventEmitter } from 'events';
 import type { NextFunction, Request, Response } from 'express';
 
 // Small budgets so the tests do not make hundreds of calls. Read at module load.
-process.env.HYPEDEXER_MISS_BUDGET_MINUTE = '5';
-process.env.HYPEDEXER_MISS_BUDGET_HOUR = '8';
+process.env.HYPEDEXER_CREDIT_BUDGET_MINUTE = '5';
+process.env.HYPEDEXER_CREDIT_BUDGET_HOUR = '8';
+// The common ceiling and the /48's share have their own cases below; here they stay out of the way.
+process.env.HYPEDEXER_CREDIT_BUDGET_GLOBAL_MINUTE = '1000';
+process.env.HYPEDEXER_CREDIT_RESERVE_MINUTE = '3';
+process.env.HYPEDEXER_CREDIT_BUDGET_V6_SITE_FACTOR = '2';
 
 const mockRedis = {
   counters: new Map<string, number>(),
@@ -30,9 +34,10 @@ jest.mock('../../../src/core/redis.service', () => ({
     getClient: () => {
       const ops: (() => [Error | null, unknown])[] = [];
       const pipeline = {
-        incr: (key: string) => {
+        incr: (key: string) => pipeline.incrby(key, 1),
+        incrby: (key: string, by: number) => {
           ops.push(() => {
-            const next = (mockRedis.counters.get(key) ?? 0) + 1;
+            const next = (mockRedis.counters.get(key) ?? 0) + by;
             mockRedis.counters.set(key, next);
             return [null, next];
           });
@@ -77,7 +82,7 @@ import {
   passthroughRateLimiter,
   addressLookupRateLimiter,
   peekUpstreamBudget,
-  countUpstreamCall,
+  countUpstreamCredits,
 } from '../../../src/middleware/apiRateLimiter';
 import { HypeDexerBaseClient } from '../../../src/clients/hypedexer/rest/shared/hypedexer-base.client';
 import { CircuitBreakerService } from '../../../src/core/circuit.breaker.service';
@@ -119,6 +124,9 @@ function exchange(ip: string): { req: Request; res: Response & EventEmitter } {
   return { req: { ip, path: '/x', query: {} } as Request, res };
 }
 
+/** One credit billed to `ipKey` (an IPv4 client: no /48). */
+const countUpstreamCall = (ipKey: string): void => countUpstreamCredits({ ipKey }, 1);
+
 const WITHIN: UpstreamBudgetState = { exhausted: false, retryAfterS: 0 };
 const EXHAUSTED: UpstreamBudgetState = { exhausted: true, retryAfterS: 17 };
 
@@ -152,10 +160,10 @@ const resetRedis = (): void => {
 /** Minute-window count of one client in the fake Redis. */
 const spentBy = (ipKey: string): number =>
   [...mockRedis.counters]
-    .filter(([key]) => key.startsWith(`ratelimit:hdmiss:${ipKey}:minute:`))
+    .filter(([key]) => key.startsWith(`ratelimit:hdcr:${ipKey}:minute:`))
     .reduce((n, [, c]) => n + c, 0);
-const spent = (): number =>
-  [...mockRedis.counters].filter(([key]) => key.includes('hdmiss') && key.includes(':minute:')).reduce((n, [, c]) => n + c, 0);
+/** Credits counted this minute for all clients together (the common counter). */
+const spent = (): number => spentBy('all');
 /** Lets the counting pipelines (not awaited by the calls) land. */
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
@@ -186,9 +194,12 @@ describe('upstream caller context', () => {
     await expect(lateTimer).resolves.toBeUndefined();
   });
 
-  it('keys IPv6 callers by their /64', async () => {
+  it('keys IPv6 callers by their /64, with the /48 it sits in; an IPv4 caller has none', async () => {
     const seen = await asCaller('2001:db8:1:2:aaaa:bbbb:cccc:dddd', async () => currentUpstreamCaller());
     expect(seen?.ipKey).toBe('2001:db8:1:2::/64');
+    expect(seen?.siteKey).toBe('2001:db8:1::/48');
+    const v4 = await asCaller('1.2.3.4', async () => currentUpstreamCaller());
+    expect(v4 && 'siteKey' in v4).toBe(false);
   });
 
   it('peeks once when two limiters of a route stack', async () => {
@@ -269,7 +280,7 @@ describe('a request whose client drops the connection', () => {
     );
     await settle();
     expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(spentBy('8.8.8.9')).toBe(1);
+    expect(spentBy('8.8.8.9')).toBe(2);
   });
 
   it('is no caller once the grace is over: a timer it started is released', async () => {
@@ -352,7 +363,7 @@ describe('limiters that set the context', () => {
 
   it('marks the request exhausted on entry when the client is at its limit, and still admits it', async () => {
     const nowS = Math.floor(Date.now() / 1000);
-    mockRedis.counters.set(`ratelimit:hdmiss:7.7.7.6:minute:${Math.floor(nowS / 60)}`, 5);
+    mockRedis.counters.set(`ratelimit:hdcr:7.7.7.6:minute:${Math.floor(nowS / 60)}`, 5);
     const { req, res } = exchange('7.7.7.6');
     let seen: unknown = 'not called';
     await passthroughRateLimiter(req, res, () => {
@@ -406,15 +417,25 @@ describe('peekUpstreamBudget and countUpstreamCall', () => {
     expect(mockRedis.mgetCalls).toBe(3);
   });
 
-  it('counts with the limiter key scheme: INCR + EXPIRE of the minute and hour windows', async () => {
+  it('counts with the limiter key scheme: INCRBY + EXPIRE of the minute and hour windows, for the client and for everyone', async () => {
     countUpstreamCall('10.0.0.1');
     await settle();
     expect(spentBy('10.0.0.1')).toBe(1);
-    expect(mockRedis.counters.size).toBe(2);
+    expect(spent()).toBe(1);
+    expect(mockRedis.execCalls).toBe(1);
+    expect(mockRedis.counters.size).toBe(4);
     for (const [key, ttl] of mockRedis.ttls) {
-      expect(key.startsWith('ratelimit:hdmiss:10.0.0.1:')).toBe(true);
+      expect(key.startsWith('ratelimit:hdcr:10.0.0.1:') || key.startsWith('ratelimit:hdcr:all:')).toBe(true);
       expect(ttl).toBe(key.includes(':minute:') ? 120 : 7200);
     }
+  });
+
+  it('counts what was billed, rounded up, and nothing for a cost that is not one', async () => {
+    countUpstreamCredits({ ipKey: '10.0.0.11' }, 2);
+    countUpstreamCredits({ ipKey: '10.0.0.11' }, 0.4);
+    for (const none of [0, -3, NaN, Infinity]) countUpstreamCredits({ ipKey: '10.0.0.11' }, none);
+    await settle();
+    expect(spentBy('10.0.0.11')).toBe(3);
   });
 
   it('is exhausted at the minute limit, until the minute rolls over', async () => {
@@ -491,6 +512,74 @@ describe('peekUpstreamBudget and countUpstreamCall', () => {
     expect(spent()).toBe(0);
   });
 
+  /**
+   * Nothing bounded what all clients spent together: a scan spread over a thousand addresses,
+   * each within its own budget, spent a thousand budgets. (Here: 1,000 credits a minute for
+   * everyone, a reserve of 3 per client.)
+   */
+  describe('the ceiling common to all clients', () => {
+    const everyone = (credits: number): void => {
+      mockRedis.counters.set(`ratelimit:hdcr:all:minute:${Math.floor(now / 60_000)}`, credits);
+    };
+
+    it('past it, a client that has spent its reserve this minute is held back; one that has not goes on', async () => {
+      for (let i = 0; i < 3; i++) countUpstreamCall('10.1.0.1');
+      countUpstreamCall('10.1.0.2');
+      await settle();
+      everyone(999);
+      expect(await peekUpstreamBudget('10.1.0.1')).toEqual({ exhausted: false, retryAfterS: 0 });
+      everyone(1000);
+      now += 15_000;
+      expect(await peekUpstreamBudget('10.1.0.1')).toEqual({ exhausted: true, retryAfterS: 45 });
+      // An ordinary visitor, and one who has not asked for anything yet, are not refused for the flood of others.
+      expect(await peekUpstreamBudget('10.1.0.2')).toEqual({ exhausted: false, retryAfterS: 0 });
+      expect(await peekUpstreamBudget('10.1.0.3')).toEqual({ exhausted: false, retryAfterS: 0 });
+    });
+
+    it('past twice it, nobody starts new billed work until the minute rolls over', async () => {
+      everyone(2000);
+      expect(await peekUpstreamBudget('10.1.0.4')).toEqual({ exhausted: true, retryAfterS: 60 });
+      now += 60_000;
+      expect(await peekUpstreamBudget('10.1.0.4')).toEqual({ exhausted: false, retryAfterS: 0 });
+    });
+
+    it('holds with the in-memory counters too, when Redis cannot answer', async () => {
+      mockRedis.fail = true;
+      // 400 clients spend 5 credits each: 2,000 in all, each within its own budget.
+      for (let c = 0; c < 400; c++) countUpstreamCredits({ ipKey: `10.2.${c >> 8}.${c & 255}` }, 5);
+      await settle();
+      expect(await peekUpstreamBudget('10.3.0.1')).toMatchObject({ exhausted: true });
+    });
+  });
+
+  /** A /64 is one subnet; whoever holds a /48 had 65,536 budgets. (Here: a /48 gets 2 clients' worth.) */
+  describe('the /48 of an IPv6 client', () => {
+    const site = '2001:db8:42::/48';
+    const subnet = (n: number): string => `2001:db8:42:${n.toString(16)}::/64`;
+
+    it('is counted too, in the same round trip, and holds its subnets to a few clients\' worth', async () => {
+      // Four subnets of one /48 spend 3 credits each: each is under its own 5, the /48 is past its 10.
+      for (let n = 0; n < 4; n++) countUpstreamCredits({ ipKey: subnet(n), siteKey: site }, 3);
+      await settle();
+      expect(mockRedis.execCalls).toBe(4);
+      expect(spentBy(`site:${site}`)).toBe(12);
+      expect(await peekUpstreamBudget(subnet(0), site)).toMatchObject({ exhausted: true });
+      // A subnet of the same /48 that has spent nothing is held with it.
+      expect(await peekUpstreamBudget(subnet(9), site)).toMatchObject({ exhausted: true });
+      // Another /48, and an IPv4 client, are untouched.
+      expect(await peekUpstreamBudget('2001:db8:43:1::/64', '2001:db8:43::/48')).toEqual({ exhausted: false, retryAfterS: 0 });
+      expect(await peekUpstreamBudget('10.4.0.1')).toEqual({ exhausted: false, retryAfterS: 0 });
+    });
+
+    it('shares one reserve between its subnets once the common ceiling is passed', async () => {
+      for (let n = 0; n < 3; n++) countUpstreamCredits({ ipKey: subnet(n), siteKey: site }, 1);
+      await settle();
+      mockRedis.counters.set(`ratelimit:hdcr:all:minute:${Math.floor(now / 60_000)}`, 1000);
+      // Each subnet has spent 1 credit, the /48 has spent the reserve of 3.
+      expect(await peekUpstreamBudget(subnet(7), site)).toMatchObject({ exhausted: true });
+    });
+  });
+
   it('uses the in-memory counters at once when the Redis circuit is open', async () => {
     mockRedis.healthy = false;
     for (let i = 0; i < 5; i++) countUpstreamCall('10.0.0.7');
@@ -553,7 +642,34 @@ describe('HypeDexer client gate', () => {
     });
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(spent()).toBe(4);
+    // The price any call has when it starts (2 credits); these answers say nothing more.
+    expect(spent()).toBe(8);
+  });
+
+  it('counts what the answer says the call cost: 2 credits when it starts, the rest when it is billed', async () => {
+    const billed = (credits: string): Response =>
+      new Response(JSON.stringify({ data: [1] }), { status: 200, headers: { 'content-type': 'application/json', 'x-credit-cost': credits } });
+    fetchMock
+      .mockResolvedValueOnce(billed('12')) // 100 rows
+      .mockResolvedValueOnce(billed('102')) // 1,000 rows
+      .mockResolvedValueOnce(billed('2')) // an empty page
+      .mockResolvedValueOnce(billed('n/a'));
+    await asCaller('9.9.9.9', async () => {
+      await client.one('/hundred');
+      await client.one('/thousand');
+      await client.one('/empty');
+      await client.one('/unpriced');
+    });
+    await settle();
+    expect(spentBy('9.9.9.9')).toBe(12 + 102 + 2 + 2);
+    expect(spent()).toBe(118);
+  });
+
+  it('a call that fails is not billed, and keeps the price it started with', async () => {
+    fetchMock.mockResolvedValue(json({}, 500));
+    await expect(asCaller('9.9.9.9', () => client.oneSingleAttempt('/down'))).rejects.toThrow();
+    await settle();
+    expect(spentBy('9.9.9.9')).toBe(2);
   });
 
   it('does not count a retry again', async () => {
@@ -561,7 +677,7 @@ describe('HypeDexer client gate', () => {
     await asCaller('9.9.9.9', () => client.one('/flaky'));
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(spent()).toBe(1);
+    expect(spent()).toBe(2);
   });
 
   it('never counts a caller that joins an in-flight call, and never refuses one', async () => {
@@ -582,7 +698,7 @@ describe('HypeDexer client gate', () => {
     await expect(Promise.all([first, ...joiners])).resolves.toEqual([[1], [1], [1]]);
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(spentBy('9.9.9.1')).toBe(1);
+    expect(spentBy('9.9.9.1')).toBe(2);
     expect(spentBy('9.9.9.2')).toBe(0);
     expect(spentBy('9.9.9.3')).toBe(0);
   });
@@ -594,7 +710,7 @@ describe('HypeDexer client gate', () => {
     });
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(12);
-    expect(spentBy('9.9.9.9')).toBe(12);
+    expect(spentBy('9.9.9.9')).toBe(24);
     // Its next request finds the counter where it ended.
     expect(await peekUpstreamBudget('9.9.9.9')).toMatchObject({ exhausted: true });
   });
@@ -626,7 +742,7 @@ describe('HypeDexer client gate', () => {
     await expect(other).resolves.toEqual([1]);
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(spentBy('9.9.7.7')).toBe(1);
+    expect(spentBy('9.9.7.7')).toBe(2);
     expect(spentBy('9.9.9.9')).toBe(0);
   });
 

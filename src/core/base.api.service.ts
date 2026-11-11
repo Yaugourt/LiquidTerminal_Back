@@ -252,11 +252,10 @@ export abstract class BaseApiService {
         });
 
         // HypeDexer bills each successful call; nothing else sends this header.
-        hypedexerCreditMeter.record(
-          fullUrl,
-          response.headers.get('x-credit-cost'),
-          response.headers.get('x-credit-balance')
-        );
+        const billed = response.headers.get('x-credit-cost');
+        hypedexerCreditMeter.record(fullUrl, billed, response.headers.get('x-credit-balance'));
+        const credits = billed === null || billed === '' ? NaN : Number(billed);
+        if (Number.isFinite(credits) && credits > 0) this.onBilled(credits);
 
         // Refuse an oversized body before buffering it into memory (defence in
         // depth: the param caps already bound every legit response).
@@ -318,6 +317,14 @@ export abstract class BaseApiService {
         clearTimeout(timeout);
         releaseOutboundSlot();
       }
+    }
+
+    /**
+     * Called with what the upstream billed for the call that just answered (its `x-credit-cost`
+     * header), for a client that keeps a budget in that unit. Nothing by default.
+     */
+    protected onBilled(_credits: number): void {
+      // no budget to count against
     }
 
     // Méthode pour gérer les retries

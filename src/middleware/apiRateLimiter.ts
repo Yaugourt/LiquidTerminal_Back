@@ -151,20 +151,25 @@ const inMemoryCounters = new Map<string, MemoryEntry>();
 const FALLBACK_MAX_IPS = 10000;
 
 /** Counts `cost` under `key` in each of `windows`, in this process, and returns the counts (like countRequest). */
-function countInMemory(key: string, windows: readonly RateWindow[], cost: number | readonly number[] = 1): number[] {
+function countInMemory(
+  key: string,
+  windows: readonly RateWindow[],
+  cost: number | readonly number[] = 1,
+  counters: Map<string, MemoryEntry> = inMemoryCounters
+): number[] {
   const nowS = Math.floor(Date.now() / 1000);
-  let entry = inMemoryCounters.get(key);
+  let entry = counters.get(key);
   if (entry) {
     // Re-inserted: the entries stay in the order of their last request, the oldest leaves first.
-    inMemoryCounters.delete(key);
+    counters.delete(key);
   } else {
-    if (inMemoryCounters.size >= FALLBACK_MAX_IPS) {
-      const firstKey = inMemoryCounters.keys().next().value;
-      if (firstKey !== undefined) inMemoryCounters.delete(firstKey);
+    if (counters.size >= FALLBACK_MAX_IPS) {
+      const firstKey = counters.keys().next().value;
+      if (firstKey !== undefined) counters.delete(firstKey);
     }
     entry = { slots: windows.map(() => ({ index: -1, count: 0 })), untilS: 0 };
   }
-  inMemoryCounters.set(key, entry);
+  counters.set(key, entry);
   const slots = entry.slots;
   return windows.map((window, i) => {
     const index = Math.floor(nowS / window.seconds);
@@ -275,7 +280,7 @@ interface IpLimits {
  * `upstreamCaller` marks the routes whose cache keys the caller picks: the
  * admitted request then runs with its client as the upstream caller, whose
  * budget of billed HypeDexer calls is read once on entry (peekUpstreamBudget)
- * and counted by the client gate (countUpstreamCall). Both paths below admit,
+ * and counted by the client gate (countUpstreamCredits). Both paths below admit,
  * so the Redis-down fallback keeps the budget too.
  *
  * `cost` makes one request weigh more than 1 in both windows, for a route
@@ -456,15 +461,30 @@ export const namesWriteRateLimiter = createIpLimiter(
   'name write'
 );
 
-// Per-client budget of billed HypeDexer calls (cache misses only: a hit costs
-// nothing upstream and is never counted). The passthrough limiter above counts
-// every request, hits included, so on its own one IP could still make 4,000
-// billed calls a minute with unique cache keys (credits = 2 + ceil(rows/10)
-// each). Sizing, measured: a wallet page makes ~6 per-address misses when it
-// opens and ~5 a minute while it stays open; a cold settled HIP-4 question
-// ~45 in its first second. 600 a minute is ~13 cold HIP-4 questions or ~100
-// cold wallets a minute behind one IP; 15,000 an hour is ~50 wallet pages kept
+// Budget of what HypeDexer bills for a client's requests (cache misses only: a hit
+// costs nothing upstream and is never counted), in the unit that is billed: credits.
+//
+// It used to count calls: 600 a minute and 15,000 an hour per client, whatever
+// they cost. A call is billed 2 credits plus 1 per 10 rows it returns (3 flat on
+// /info), so the same 15,000 calls were 45,000 credits of small reads or 1.5
+// million of 1,000-row pages, and nothing bounded what all clients spent together.
+//
+// Per client (IP, /64 for IPv6): 6,000 credits a minute and 150,000 an hour, which
+// is the old budget at 10 credits a call. Measured costs: a wallet page makes ~6
+// misses when it opens (3 to 12 credits each for an ordinary wallet) and ~5 a
+// minute while it stays open; a cold settled HIP-4 question ~45 reads of 3 to 7
+// credits in its first second. 6,000 a minute is ~19 cold HIP-4 questions or ~150
+// cold wallets a minute behind one IP; 150,000 an hour is ~50 wallet pages kept
 // open behind one IP. Only floods and scripts get near them.
+//
+// Per /48 for IPv6 (a site: 65,536 subnets, each of which had a budget of its
+// own): 8 clients' worth.
+//
+// For all clients together: 120,000 credits a minute. Past it, a client that has
+// spent less than its reserve this minute (600 credits: a few cold pages) still
+// goes on, so that a flood from many addresses cannot leave an ordinary visitor
+// with nothing; past twice it, nobody starts new billed work until the minute
+// rolls over. What every visitor together can spend is bounded either way.
 //
 // The budget covers the routes whose cache keys the caller picks (the limiters
 // above that set the upstream caller). Shared aggregates are not charged to
@@ -472,21 +492,40 @@ export const namesWriteRateLimiter = createIpLimiter(
 // volumes and the TWAP source sit behind marketRateLimiter only, run without a
 // caller and are never counted or refused.
 //
-// The budget is decided once per request, on entry (peekUpstreamBudget); the
-// calls are counted exactly (countUpstreamCall) and never refused while they
-// are counted: a request that started within budget is served whole, and the
-// client's next request finds the counter where it ended.
-const UPSTREAM_BUDGET = {
-  MINUTE: { WINDOW: 60, MAX_CALLS: positiveIntEnv('HYPEDEXER_MISS_BUDGET_MINUTE', 600) },
-  HOUR: { WINDOW: 3600, MAX_CALLS: positiveIntEnv('HYPEDEXER_MISS_BUDGET_HOUR', 15000) },
+// The budget is decided once per request, on entry (peekUpstreamBudget); what is
+// billed is counted as it is known (countUpstreamCredits: the price every call
+// has when it starts, the rest when its answer says what it cost) and never
+// refused while it is counted: a request that started within budget is served
+// whole, and the client's next request finds the counters where they ended.
+const CREDIT_BUDGET = {
+  MINUTE: { WINDOW: 60, MAX: positiveIntEnv('HYPEDEXER_CREDIT_BUDGET_MINUTE', 6_000) },
+  HOUR: { WINDOW: 3600, MAX: positiveIntEnv('HYPEDEXER_CREDIT_BUDGET_HOUR', 150_000) },
 };
+/** How many clients' budgets the /48 of an IPv6 client may spend. */
+const CREDIT_SITE_FACTOR = positiveIntEnv('HYPEDEXER_CREDIT_BUDGET_V6_SITE_FACTOR', 8);
+/** What all clients together may spend in a minute before the big spenders are held back. */
+const CREDIT_GLOBAL_MINUTE = positiveIntEnv('HYPEDEXER_CREDIT_BUDGET_GLOBAL_MINUTE', 120_000);
+/** Past this many times the common ceiling, nobody starts new billed work. */
+const CREDIT_GLOBAL_HARD_FACTOR = 2;
+/** What a client can spend in a minute and still go on once the common ceiling is passed. */
+const CREDIT_RESERVE_MINUTE = positiveIntEnv('HYPEDEXER_CREDIT_RESERVE_MINUTE', 600);
 
-const UPSTREAM_BUDGET_WINDOWS: readonly RateWindow[] = [
-  { name: 'minute', seconds: UPSTREAM_BUDGET.MINUTE.WINDOW },
-  { name: 'hour', seconds: UPSTREAM_BUDGET.HOUR.WINDOW },
+/** What any HypeDexer call is billed at least: counted when the call starts, before its answer says the rest. */
+export const UPSTREAM_CALL_BASE_CREDITS = 2;
+
+const CREDIT_WINDOWS: readonly RateWindow[] = [
+  { name: 'minute', seconds: CREDIT_BUDGET.MINUTE.WINDOW },
+  { name: 'hour', seconds: CREDIT_BUDGET.HOUR.WINDOW },
 ];
 
-const upstreamBudgetPrefix = (ipKey: string): string => `ratelimit:hdmiss:${ipKey}`;
+const creditPrefix = (ipKey: string): string => `ratelimit:hdcr:${ipKey}`;
+const creditSitePrefix = (siteKey: string): string => `ratelimit:hdcr:site:${siteKey}`;
+const CREDIT_GLOBAL_PREFIX = 'ratelimit:hdcr:all';
+
+/** The counters a client's credits are counted under: its own, its /48's when it has one, everyone's. */
+function creditPrefixes(ipKey: string, siteKey?: string): string[] {
+  return siteKey ? [creditPrefix(ipKey), CREDIT_GLOBAL_PREFIX, creditSitePrefix(siteKey)] : [creditPrefix(ipKey), CREDIT_GLOBAL_PREFIX];
+}
 
 /**
  * The longest a refused client is told to wait. The hour window can be
@@ -498,115 +537,110 @@ const upstreamBudgetPrefix = (ipKey: string): string => `ratelimit:hdmiss:${ipKe
  */
 const MAX_RETRY_AFTER_S = 60;
 
-/** Where a client stands, from its minute and hour counts: at a limit counts as spent (the next call would pass it). */
-function budgetState(minuteCount: number, hourCount: number, minuteLeftS: number, hourLeftS: number): UpstreamBudgetState {
+/**
+ * Where a client stands, from the credits counted this minute and this hour under its own key,
+ * its /48's (IPv6 only) and everyone's: at a limit counts as spent (the next call would pass it).
+ */
+function budgetState(
+  counts: { client: readonly number[]; global: readonly number[]; site?: readonly number[] },
+  minuteLeftS: number,
+  hourLeftS: number
+): UpstreamBudgetState {
   let retryAfterS = 0;
-  if (minuteCount >= UPSTREAM_BUDGET.MINUTE.MAX_CALLS) retryAfterS = Math.max(retryAfterS, minuteLeftS);
-  if (hourCount >= UPSTREAM_BUDGET.HOUR.MAX_CALLS) retryAfterS = Math.max(retryAfterS, hourLeftS);
+  const [minute, hour] = counts.client;
+  if (minute >= CREDIT_BUDGET.MINUTE.MAX) retryAfterS = Math.max(retryAfterS, minuteLeftS);
+  if (hour >= CREDIT_BUDGET.HOUR.MAX) retryAfterS = Math.max(retryAfterS, hourLeftS);
+  if (counts.site) {
+    if (counts.site[0] >= CREDIT_BUDGET.MINUTE.MAX * CREDIT_SITE_FACTOR) retryAfterS = Math.max(retryAfterS, minuteLeftS);
+    if (counts.site[1] >= CREDIT_BUDGET.HOUR.MAX * CREDIT_SITE_FACTOR) retryAfterS = Math.max(retryAfterS, hourLeftS);
+  }
+  // The common ceiling. The reserve is per /48 for IPv6: a site's subnets share one, not 65,536.
+  const everyone = counts.global[0];
+  const mine = counts.site ? counts.site[0] : minute;
+  if (everyone >= CREDIT_GLOBAL_MINUTE * CREDIT_GLOBAL_HARD_FACTOR || (everyone >= CREDIT_GLOBAL_MINUTE && mine >= CREDIT_RESERVE_MINUTE)) {
+    retryAfterS = Math.max(retryAfterS, minuteLeftS);
+  }
   return retryAfterS > 0
     ? { exhausted: true, retryAfterS: Math.min(MAX_RETRY_AFTER_S, Math.max(1, retryAfterS)) }
     : { exhausted: false, retryAfterS: 0 };
 }
 
-// Same idea as inMemoryCounters, with the minute and hour windows of the budget.
-type InMemoryBudget = { minute: { count: number; resetAt: number }; hour: { count: number; resetAt: number } };
-const inMemoryBudgets = new Map<string, InMemoryBudget>();
+// The same counters in this process, for when Redis cannot answer (same windows, same limits).
+const inMemoryCredits = new Map<string, MemoryEntry>();
 
-/** The entry of `ipKey` with expired windows reset; undefined when it has none and `create` is false. */
-function inMemoryBudgetOf(ipKey: string, create: boolean): InMemoryBudget | undefined {
-  const now = Date.now();
-  let entry = inMemoryBudgets.get(ipKey);
-  if (!entry) {
-    if (!create) return undefined;
-    // Evict oldest if at capacity
-    if (inMemoryBudgets.size >= FALLBACK_MAX_IPS) {
-      const firstKey = inMemoryBudgets.keys().next().value;
-      if (firstKey) inMemoryBudgets.delete(firstKey);
-    }
-    entry = {
-      minute: { count: 0, resetAt: now + UPSTREAM_BUDGET.MINUTE.WINDOW * 1000 },
-      hour: { count: 0, resetAt: now + UPSTREAM_BUDGET.HOUR.WINDOW * 1000 },
-    };
-    inMemoryBudgets.set(ipKey, entry);
-  }
-  if (now > entry.minute.resetAt) entry.minute = { count: 0, resetAt: now + UPSTREAM_BUDGET.MINUTE.WINDOW * 1000 };
-  if (now > entry.hour.resetAt) entry.hour = { count: 0, resetAt: now + UPSTREAM_BUDGET.HOUR.WINDOW * 1000 };
-  return entry;
-}
-
-function countInMemoryBudget(ipKey: string): void {
-  const entry = inMemoryBudgetOf(ipKey, true);
-  if (!entry) return;
-  entry.minute.count++;
-  entry.hour.count++;
-}
-
-function peekInMemoryBudget(ipKey: string): UpstreamBudgetState {
-  const entry = inMemoryBudgetOf(ipKey, false);
-  if (!entry) return { exhausted: false, retryAfterS: 0 };
-  const now = Date.now();
-  return budgetState(
-    entry.minute.count,
-    entry.hour.count,
-    Math.ceil((entry.minute.resetAt - now) / 1000),
-    Math.ceil((entry.hour.resetAt - now) / 1000)
-  );
+/** The counts of `key` in `windows` in this process, without counting anything. */
+function peekInMemory(counters: Map<string, MemoryEntry>, key: string, windows: readonly RateWindow[]): number[] {
+  const nowS = Math.floor(Date.now() / 1000);
+  const slots = counters.get(key)?.slots;
+  return windows.map((window, i) => (slots?.[i]?.index === Math.floor(nowS / window.seconds) ? slots[i].count : 0));
 }
 
 setInterval(() => {
-  const now = Date.now();
-  for (const [ipKey, entry] of inMemoryBudgets) {
-    if (now > entry.hour.resetAt) inMemoryBudgets.delete(ipKey);
+  const nowS = Math.floor(Date.now() / 1000);
+  for (const [key, entry] of inMemoryCredits) {
+    if (entry.untilS <= nowS) inMemoryCredits.delete(key);
   }
 }, 60000).unref();
 
+function peekInMemoryBudget(ipKey: string, siteKey?: string): UpstreamBudgetState {
+  const [client, global, site] = creditPrefixes(ipKey, siteKey).map((prefix) => peekInMemory(inMemoryCredits, prefix, CREDIT_WINDOWS));
+  return budgetState({ client, global, site }, secondsUntilRollover(CREDIT_BUDGET.MINUTE.WINDOW), secondsUntilRollover(CREDIT_BUDGET.HOUR.WINDOW));
+}
+
 /**
- * Where this client (IP, /64 for IPv6) stands against its budget, read without
- * counting anything: one MGET of the current minute and hour windows, the same
- * keys countUpstreamCall increments. Read once per request, on entry. When
- * Redis cannot answer, the in-memory counters (same limits) answer instead.
+ * Where this client (IP, /64 for IPv6; `siteKey` is its /48) stands against the
+ * budget, read without counting anything: one MGET of the current minute and
+ * hour windows, the same keys countUpstreamCredits increments. Read once per
+ * request, on entry. When Redis cannot answer, the in-memory counters (same
+ * limits) answer instead.
  */
-export async function peekUpstreamBudget(ipKey: string): Promise<UpstreamBudgetState> {
+export async function peekUpstreamBudget(ipKey: string, siteKey?: string): Promise<UpstreamBudgetState> {
   try {
     // Circuit open: don't queue on a wedged connection, use the fallback now.
     if (!redisService.isHealthy()) throw new Error('Redis circuit open');
     const nowS = Math.floor(Date.now() / 1000);
-    const prefix = upstreamBudgetPrefix(ipKey);
-    const [minute, hour] = (await redisService.getClient().mget(
-      ...UPSTREAM_BUDGET_WINDOWS.map((window) => windowKey(prefix, window, nowS))
+    const prefixes = creditPrefixes(ipKey, siteKey);
+    const values = (await redisService.getClient().mget(
+      ...prefixes.flatMap((prefix) => CREDIT_WINDOWS.map((window) => windowKey(prefix, window, nowS)))
     )) as (string | null)[];
+    const of = (p: number): number[] => CREDIT_WINDOWS.map((_, i) => Number(values[p * CREDIT_WINDOWS.length + i] ?? 0));
     return budgetState(
-      Number(minute ?? 0),
-      Number(hour ?? 0),
-      secondsUntilRollover(UPSTREAM_BUDGET.MINUTE.WINDOW),
-      secondsUntilRollover(UPSTREAM_BUDGET.HOUR.WINDOW)
+      { client: of(0), global: of(1), site: siteKey ? of(2) : undefined },
+      secondsUntilRollover(CREDIT_BUDGET.MINUTE.WINDOW),
+      secondsUntilRollover(CREDIT_BUDGET.HOUR.WINDOW)
     );
   } catch (error) {
     logDeduplicator.error('Upstream budget Redis error, using in-memory fallback', {
       error: error instanceof Error ? error.message : String(error),
       ip: ipKey,
     });
-    return peekInMemoryBudget(ipKey);
+    return peekInMemoryBudget(ipKey, siteKey);
   }
 }
 
 /**
- * Counts one billed HypeDexer call that really goes upstream against this
- * client's minute and hour windows (INCR + EXPIRE in one round trip). Never
- * refuses, never waits: the call goes ahead and the pipeline runs behind it,
- * so a Redis error is handled here (the in-memory counters take the call) and
- * nothing is thrown at the caller.
+ * Counts `credits` billed by HypeDexer for this client against its minute and
+ * hour windows, its /48's and everyone's (INCRBY + EXPIRE in one round trip).
+ * Never refuses, never waits: the call goes ahead and the pipeline runs behind
+ * it, so a Redis error is handled here (the in-memory counters take the
+ * credits) and nothing is thrown at the caller.
  */
-export function countUpstreamCall(ipKey: string): void {
+export function countUpstreamCredits(caller: { ipKey: string; siteKey?: string }, credits: number): void {
+  const amount = Math.ceil(credits);
+  if (!Number.isFinite(amount) || amount <= 0) return;
+  const prefixes = creditPrefixes(caller.ipKey, caller.siteKey);
+  const inMemory = (): void => {
+    for (const prefix of prefixes) countInMemory(prefix, CREDIT_WINDOWS, amount, inMemoryCredits);
+  };
   if (!redisService.isHealthy()) {
-    countInMemoryBudget(ipKey);
+    inMemory();
     return;
   }
-  countRequest(upstreamBudgetPrefix(ipKey), UPSTREAM_BUDGET_WINDOWS).catch((error: unknown) => {
+  countRequests(prefixes, CREDIT_WINDOWS, amount).catch((error: unknown) => {
     logDeduplicator.error('Upstream budget Redis error, using in-memory fallback', {
       error: error instanceof Error ? error.message : String(error),
-      ip: ipKey,
+      ip: caller.ipKey,
     });
-    countInMemoryBudget(ipKey);
+    inMemory();
   });
 }

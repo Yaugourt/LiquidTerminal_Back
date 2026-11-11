@@ -1,7 +1,7 @@
 import { BaseApiService } from '../../../../core/base.api.service';
 import { unwrapHypeDexerApiPayload } from '../../../../utils/hypedexer-api-response.util';
 import { currentUpstreamCaller, upstreamRefusal } from '../../../../utils/request-context';
-import { countUpstreamCall } from '../../../../middleware/apiRateLimiter';
+import { countUpstreamCredits, UPSTREAM_CALL_BASE_CREDITS } from '../../../../middleware/apiRateLimiter';
 
 /**
  * Module-level in-flight request map for single-flight dedup.
@@ -46,7 +46,9 @@ export abstract class HypeDexerBaseClient extends BaseApiService {
   /**
    * Every HypeDexer REST call is billed. The one that really goes upstream
    * for a client's request (no joining, no cache hit: those never get here)
-   * is counted against that client's budget; a client that was already over
+   * is counted against that client's budget, in credits: the price any call
+   * has when it starts, the rest when its answer says what it cost
+   * (onBilled). A client that was already over
    * budget when its request came in (decided once, on entry) is refused
    * instead, before anything starts. A call for a client that is within
    * budget is never refused, even when this very call takes its counter past
@@ -59,7 +61,17 @@ export abstract class HypeDexerBaseClient extends BaseApiService {
     const caller = currentUpstreamCaller();
     if (!caller) return;
     this.refuseExhaustedCaller();
-    countUpstreamCall(caller.ipKey);
+    countUpstreamCredits(caller, UPSTREAM_CALL_BASE_CREDITS);
+  }
+
+  /**
+   * The answer says what the call cost (2 credits plus 1 per 10 rows): what it costs past the
+   * price counted when it started is counted for the client it was made for, while its request
+   * is still open. A call that fails is not billed, and keeps the price it started with.
+   */
+  protected override onBilled(credits: number): void {
+    const caller = currentUpstreamCaller();
+    if (caller && credits > UPSTREAM_CALL_BASE_CREDITS) countUpstreamCredits(caller, credits - UPSTREAM_CALL_BASE_CREDITS);
   }
 
   private refuseExhaustedCaller(): void {

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import type { NextFunction, Request, Response } from 'express';
-import { rateLimitKeyForIp } from './client-ip';
+import { rateLimitKeyForIp, siteKeyForIp } from './client-ip';
 import { UpstreamBudgetExceededError } from '../errors/upstreamBudget.errors';
 
 /** Where a client stands against its budget of billed HypeDexer calls (see peekUpstreamBudget). */
@@ -13,7 +13,7 @@ export interface UpstreamBudgetState {
 
 /**
  * The client a billed upstream call is made for: the per-IP key its budget is
- * counted under (see countUpstreamCall). `open` is true while its request is
+ * counted under (see countUpstreamCredits). `open` is true while its request is
  * still being answered. `exhausted` is decided once, when the request enters,
  * and never changes while it runs: a request that starts within budget is
  * served whole, even when the calls it makes (or a shared computation it
@@ -21,6 +21,8 @@ export interface UpstreamBudgetState {
  */
 export interface UpstreamCaller extends UpstreamBudgetState {
   ipKey: string;
+  /** The /48 of an IPv6 client: its credits are counted under it too. */
+  siteKey?: string;
   open: boolean;
 }
 
@@ -57,7 +59,7 @@ export async function runWithUpstreamCaller(
   req: Request,
   res: Response,
   next: NextFunction,
-  peek: (ipKey: string) => Promise<UpstreamBudgetState>
+  peek: (ipKey: string, siteKey?: string) => Promise<UpstreamBudgetState>
 ): Promise<void> {
   // Two limiters on one route (passthrough, then per-address) share one caller.
   if (currentUpstreamCaller()) {
@@ -65,14 +67,15 @@ export async function runWithUpstreamCaller(
     return;
   }
   const ipKey = rateLimitKeyForIp(req.ip ?? '');
+  const siteKey = siteKeyForIp(req.ip ?? '');
   let state: UpstreamBudgetState;
   try {
-    state = await peek(ipKey);
+    state = await peek(ipKey, siteKey);
   } catch {
     // Never block a visitor because the budget could not be read.
     state = { exhausted: false, retryAfterS: 0 };
   }
-  const caller: UpstreamCaller = { ipKey, open: true, exhausted: state.exhausted, retryAfterS: state.retryAfterS };
+  const caller: UpstreamCaller = { ipKey, ...(siteKey ? { siteKey } : {}), open: true, exhausted: state.exhausted, retryAfterS: state.retryAfterS };
   let graceTimer: NodeJS.Timeout | undefined;
   const close = (): void => {
     if (graceTimer) clearTimeout(graceTimer);

@@ -8,8 +8,8 @@
  * the key's last copy, or its refusal, and leaves no ":fail" marker and no
  * partial result behind.
  */
-process.env.HYPEDEXER_MISS_BUDGET_MINUTE = '5';
-process.env.HYPEDEXER_MISS_BUDGET_HOUR = '1000';
+process.env.HYPEDEXER_CREDIT_BUDGET_MINUTE = '5';
+process.env.HYPEDEXER_CREDIT_BUDGET_HOUR = '1000';
 
 import { EventEmitter } from 'events';
 import type { NextFunction, Request, Response } from 'express';
@@ -50,9 +50,10 @@ const mockRedis = {
     pipeline: () => {
       const ops: (() => [Error | null, unknown])[] = [];
       const pipeline = {
-        incr: (key: string) => {
+        incr: (key: string) => pipeline.incrby(key, 1),
+        incrby: (key: string, by: number) => {
           ops.push(() => {
-            const next = Number(mockRedis.store.get(key) ?? 0) + 1;
+            const next = Number(mockRedis.store.get(key) ?? 0) + by;
             mockRedis.store.set(key, String(next));
             return [null, next];
           });
@@ -77,7 +78,10 @@ jest.mock('../../../src/utils/logDeduplicator', () => ({
 import { CacheService } from '../../../src/core/cache.service';
 import { withRedisCache } from '../../../src/clients/hypedexer/rest/shared/hypedexer-cache.helper';
 import { HypeDexerBaseClient } from '../../../src/clients/hypedexer/rest/shared/hypedexer-base.client';
-import { passthroughRateLimiter, peekUpstreamBudget, countUpstreamCall } from '../../../src/middleware/apiRateLimiter';
+import { passthroughRateLimiter, peekUpstreamBudget, countUpstreamCredits } from '../../../src/middleware/apiRateLimiter';
+
+/** One credit billed to `ipKey`. */
+const countUpstreamCall = (ipKey: string): void => countUpstreamCredits({ ipKey }, 1);
 import { currentUpstreamCaller, runWithUpstreamCaller } from '../../../src/utils/request-context';
 import { UpstreamBudgetExceededError } from '../../../src/errors/upstreamBudget.errors';
 
@@ -109,13 +113,13 @@ function request<T>(ip: string, inside: () => Promise<T>): Promise<T> {
   });
 }
 
-/** Puts `ip` at its minute limit (5), as if it had just made 5 billed calls. */
+/** Puts `ip` at its minute limit (5 credits), as if it had just been billed 5. */
 function exhaust(ip: string): void {
-  mockRedis.store.set(`ratelimit:hdmiss:${ip}:minute:${Math.floor(Date.now() / 1000 / 60)}`, '5');
+  mockRedis.store.set(`ratelimit:hdcr:${ip}:minute:${Math.floor(Date.now() / 1000 / 60)}`, '5');
 }
 
 const counted = (ip: string): number =>
-  [...mockRedis.store].filter(([key]) => key.startsWith(`ratelimit:hdmiss:${ip}:minute:`)).reduce((n, [, v]) => n + Number(v), 0);
+  [...mockRedis.store].filter(([key]) => key.startsWith(`ratelimit:hdcr:${ip}:minute:`)).reduce((n, [, v]) => n + Number(v), 0);
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 const later = <T>(value: T, ms = 30): Promise<T> => new Promise((resolve) => setTimeout(() => resolve(value), ms));
 
@@ -151,8 +155,8 @@ describe('budget and shared work', () => {
 
   describe('a caller within budget on entry', () => {
     it('completes a fan-out recompute with every read made, however far it takes the counter', async () => {
-      // 5 a minute, 2 already spent: within budget on entry. The recompute makes 12 reads.
-      mockRedis.store.set(`ratelimit:hdmiss:4.4.4.4:minute:${Math.floor(Date.now() / 1000 / 60)}`, '2');
+      // 5 credits a minute, 2 already spent: within budget on entry. The recompute makes 12 reads of 2 credits.
+      mockRedis.store.set(`ratelimit:hdcr:4.4.4.4:minute:${Math.floor(Date.now() / 1000 / 60)}`, '2');
       const value = await request('4.4.4.4', () => cache.getOrSet('resolutions', fanOut(12), 3600));
       await settle();
 
@@ -160,7 +164,7 @@ describe('budget and shared work', () => {
       // Not one read was refused: nothing missing from what everyone is served.
       expect(value).toHaveLength(12);
       expect(value.every((read) => read !== undefined)).toBe(true);
-      expect(counted('4.4.4.4')).toBe(14);
+      expect(counted('4.4.4.4')).toBe(26);
 
       // Every other visitor is served that complete result.
       await expect(request('5.5.5.5', () => cache.getOrSet('resolutions', fanOut(12), 3600))).resolves.toEqual(value);
@@ -208,7 +212,7 @@ describe('budget and shared work', () => {
       expect(refreshed).toBe(true);
       expect(value).toBe('new');
       await settle();
-      expect(counted('4.4.4.4')).toBe(1);
+      expect(counted('4.4.4.4')).toBe(2);
     });
   });
 
