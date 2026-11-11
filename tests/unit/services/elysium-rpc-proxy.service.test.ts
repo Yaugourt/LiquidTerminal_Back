@@ -299,6 +299,72 @@ describe('ElysiumRpcProxyService', () => {
     }
   });
 
+  it('releases at once an answer whose client already left: a closed response emits no further close', async () => {
+    const { service } = load();
+    fetchMock.mockImplementation(async () => response(['{"result":1}']));
+    for (const state of [{ destroyed: true }, { writableEnded: true }, { socket: { destroyed: true } }]) {
+      const res = Object.assign(fakeResponse(), state) as ReturnType<typeof fakeResponse>;
+      service.deliver(await service.forward(CALL, 1, 'a'), res);
+      // Nothing written to a response that is gone, and nothing left held.
+      expect(res.written).toEqual([]);
+      expect(service.load).toEqual({ inFlight: 0, waiting: 0, bufferedBytes: 0, clients: 0 });
+    }
+  });
+
+  it('releases on the delivery timeout even when cutting the response emits nothing', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service } = load();
+      fetchMock.mockImplementation(async () => response(['{"result":1}']));
+      const silent = fakeResponse();
+      silent.destroy = (() => silent) as typeof silent.destroy;
+      service.deliver(await service.forward(CALL, 1, 'a'), silent);
+      jest.advanceTimersByTime(30_001);
+      expect(service.load).toEqual({ inFlight: 0, waiting: 0, bufferedBytes: 0, clients: 0 });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('holds nothing for a client that leaves: before the call, while it waits for a slot, or at the node', async () => {
+    const { service, mod } = load({ ELYSIUM_RPC_MAX_IN_FLIGHT_PER_CLIENT: '1' });
+    const pending: Array<{ resolve: (r: Response) => void; signal: AbortSignal }> = [];
+    fetchMock.mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((resolve, reject) => {
+          const signal = init.signal as AbortSignal;
+          pending.push({ resolve, signal });
+          signal.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted')));
+        })
+    );
+
+    // Already gone: not even a slot.
+    const before = new AbortController();
+    before.abort();
+    await expect(service.forward(CALL, 1, 'a', before.signal)).rejects.toBeInstanceOf(mod.ElysiumRpcClientGoneError);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // One call at the node, a second waiting for the client's only slot.
+    const atNode = new AbortController();
+    const waiting = new AbortController();
+    const first = service.forward(CALL, 1, 'a', atNode.signal);
+    const second = service.forward(CALL, 1, 'a', waiting.signal);
+    await turn();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The waiting one leaves, then the first one too: its call to the node is cut.
+    waiting.abort();
+    atNode.abort();
+    await expect(first).rejects.toBeInstanceOf(mod.ElysiumRpcClientGoneError);
+    expect(pending[0].signal.aborted).toBe(true);
+    // The second got the slot the first freed, saw its client gone, and sent nothing.
+    await expect(second).rejects.toBeInstanceOf(mod.ElysiumRpcClientGoneError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(service.load).toEqual({ inFlight: 0, waiting: 0, bufferedBytes: 0, clients: 0 });
+    // Not logged as a failure of the node.
+    expect(mockLog.warn).not.toHaveBeenCalledWith('Elysium RPC proxy transport error', expect.anything());
+  });
+
   it('caps the weight of a minute across all clients, counting each call of a batch', async () => {
     const { service, mod } = load({ ELYSIUM_RPC_GLOBAL_PER_MINUTE: '25' });
     let now = Date.parse('2026-11-10T10:00:20.000Z');

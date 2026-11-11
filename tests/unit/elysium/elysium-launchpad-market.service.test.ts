@@ -502,6 +502,46 @@ describe('ElysiumLaunchpadMarketService', () => {
     expect(state.peak).toBe(2);
   });
 
+  it('lets everyone who arrives while a page is being read join it, without a slot each', async () => {
+    const { svc, internals } = service(large());
+    await svc.getPage({ sort: 'hot', limit: 50 });
+    const { state, drain } = blocking(internals, (sql) => sql.includes('ORDER BY l.created_at DESC') || sql.includes('l.token = ANY'));
+    // The snapshot just changed: 200 visitors ask for the same page within the time of its read.
+    const herd = Array.from({ length: 200 }, (_, i) => svc.getPage({ sort: 'new', limit: 50 }, `visitor-${i}`).then((p) => p.tokens.length, (e: Error) => e.name));
+    await turn();
+    // One read, one slot, nobody waiting for one; another page still has two slots to start in.
+    expect(state.running).toBe(1);
+    expect(internals.pageGate.stats).toMatchObject({ running: 1, waiting: 0 });
+    await drain();
+    expect(await Promise.all(herd)).toEqual(Array<number>(200).fill(50));
+    expect(state.peak).toBe(1);
+  });
+
+  it('does not keep, for the new snapshot, what a read begun under the old one produces', async () => {
+    const { svc, internals } = service(large());
+    await svc.getPage({ sort: 'hot', limit: 50 });
+    // Only the page reads of one launchpad are held: the snapshot's own reads go through.
+    const { state, drain } = blocking(internals, (sql) => sql.includes('l.launchpad ='));
+    const old = svc.getPage({ sort: 'new', pad: 'Signal', limit: 50 }, 'a');
+    await turn();
+    expect(state.running).toBe(1);
+
+    // A minute later the snapshot is replaced while that read is still out.
+    (Date.now as jest.Mock).mockReturnValue(NOW + 61_000);
+    await svc.getPage({ sort: 'hot', limit: 50 });
+    await turn();
+    await turn();
+    expect(internals.snapshot?.at).toBe(NOW + 61_000);
+    expect(internals.orders.size).toBe(0);
+    expect(internals.pages.size).toBe(0);
+
+    // The old read ends: its request is answered, and nothing of it enters the new caches.
+    await drain();
+    expect((await old).tokens).toHaveLength(50);
+    expect(internals.orders.size).toBe(0);
+    expect(internals.pages.size).toBe(0);
+  });
+
   it('gives each client a share of the page reads: a flood of new pages only delays itself', async () => {
     const { svc, internals } = service(large());
     await svc.getPage({ sort: 'hot', limit: 50 });
@@ -516,14 +556,14 @@ describe('ElysiumLaunchpadMarketService', () => {
     // Two reads at once for this client and eight waiting, however many pages it asks for.
     expect(internals.pageGate.stats).toMatchObject({ running: 2, waiting: 8 });
 
-    // A visitor asks for a page the flood has waiting in its own queue: the visitor's
-    // share starts the read, it does not wait behind the flood.
-    const other = svc.getPage({ sort: 'new', limit: 200 }, 'visitor');
+    // A visitor asks for a page the flood has waiting in its own queue (the fifth of its list):
+    // the visitor's share starts the read, it does not wait behind the flood.
+    const other = svc.getPage({ sort: 'new', pad: 'Signal', limit: 200 }, 'visitor');
     await turn();
     expect(internals.pageGate.stats).toMatchObject({ running: 3, waiting: 8 });
 
     await drain();
-    expect((await other).tokens).toHaveLength(200);
+    expect((await other).tokens).toHaveLength(150);
     const results = await Promise.all(flood);
     // One of the fourteen was already built (the first hot page, above): it took no slot. Of the
     // other thirteen, two ran and eight waited; three were refused. Nobody else was.

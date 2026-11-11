@@ -6,8 +6,9 @@
  * depend on Redis, so it lives here. It is per process on purpose: what it
  * protects is this process's own loop, so two instances each keep their own.
  *
- * Memory is bounded: at most `maxClients` entries, the oldest one leaves when
- * a new client arrives at the cap.
+ * Memory is bounded: at most `maxClients` entries; when a new client arrives
+ * at the cap, the one that asked longest ago leaves (a client that is
+ * spending its budget, or being refused, is never the one dropped).
  */
 export class ClientBudget {
   private readonly entries = new Map<string, { window: number; used: number }>();
@@ -35,6 +36,9 @@ export class ClientBudget {
     const window = this.windowOf(now);
     const entry = this.entries.get(key);
     if (entry && entry.window === window) {
+      // Re-inserted, refused or not: the entries stay in the order of their last attempt.
+      this.entries.delete(key);
+      this.entries.set(key, entry);
       if (entry.used + units > this.limit) return false;
       entry.used += units;
       return true;
@@ -44,7 +48,6 @@ export class ClientBudget {
       const oldest = this.entries.keys().next().value;
       if (oldest !== undefined) this.entries.delete(oldest);
     }
-    // Re-inserted, so a client seen again is the newest entry.
     this.entries.delete(key);
     this.entries.set(key, { window, used: units });
     return true;

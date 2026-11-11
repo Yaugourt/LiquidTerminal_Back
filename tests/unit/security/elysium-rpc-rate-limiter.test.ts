@@ -91,7 +91,7 @@ describe('elysiumRpcRateLimiter (Redis path)', () => {
     expect([...mockRedis.counters.keys()].every((k) => k.startsWith('ratelimit:elyrpc:203.0.113.7:'))).toBe(true);
   });
 
-  it('adds the weight of the calls: a simulation its number of calls, never more than a whole second', async () => {
+  it('adds the weight of the calls: a simulation its number of calls, a whole second at most, its full weight in the minute', async () => {
     const tx = { to: '0x' + '22'.repeat(20), data: '0x' };
     const simulate = (calls: number, blocks = 1) => ({
       jsonrpc: '2.0',
@@ -101,15 +101,28 @@ describe('elysiumRpcRateLimiter (Redis path)', () => {
     });
     expect((await hit(simulate(40))).status).toBe(200);
     expect(counts()).toEqual([40, 40]);
-    // 256 simulated calls would be refused for good at their full weight: counted as the whole second, 50.
+    // 256 simulated calls would be refused for good at 256 in the second: they take the whole second, 50,
+    // and their full weight in the minute.
     now += 1000;
     expect((await hit(simulate(64, 4), '203.0.113.9')).status).toBe(200);
-    expect(counts()).toContain(50);
-    expect(counts()).not.toContain(256);
+    const mine = (): number[] => [...mockRedis.counters.entries()].filter(([k]) => k.includes('203.0.113.9')).map(([, v]) => v);
+    expect(mine()).toEqual([50, 256]);
     // And it does take the second: the same client's next call waits for the next one.
     expect((await hit(call, '203.0.113.9')).status).toBe(429);
+    // Four of them a minute: the fifth passes the 1,200 of the minute, in whatever second it comes.
+    for (let i = 0; i < 3; i++) {
+      now += 1000;
+      expect((await hit(simulate(64, 4), '203.0.113.9')).status).toBe(200);
+    }
+    now += 1000;
+    expect((await hit(simulate(64, 4), '203.0.113.9')).status).toBe(429);
+    // A batch of 20 such simulations weighs the whole minute: admitted alone at the start of one, once.
+    now += 60_000 - 5000;
+    expect((await hit(Array.from({ length: 20 }, () => simulate(64, 4)), '203.0.113.9')).status).toBe(200);
+    now += 1000;
+    expect((await hit(call, '203.0.113.9')).status).toBe(429);
     // The other cases start on a whole minute.
-    now -= 1000;
+    now -= 60_000 + 1000;
   });
 
   it('refuses past 50 calls in a second, whatever the number of requests', async () => {

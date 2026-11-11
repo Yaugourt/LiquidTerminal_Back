@@ -24,19 +24,21 @@ const CONTROL_CHARS = /[\x00-\x1F\x7F-\x9F]/g;
  *
  * This middleware runs before every route, so before every route limiter, and
  * the HTML parser is its expensive part: up to 9 microseconds to start on a
- * string, then up to 0.4 per `<` (measured 2026-11-11). A 74 kB body of 12,375
- * strings `"<a>"` held the event loop 90 ms, a 16 kB query string of `<` about
- * 6 ms, on any path, as often as the caller liked.
+ * string, up to 0.4 per `<`, and about 0.03 per character inside a long tag
+ * (measured 2026-11-11). A 74 kB body of 12,375 strings `"<a>"` held the event
+ * loop 90 ms, a 16 kB query string of `<` about 6 ms, on any path, as often as
+ * the caller liked.
  *
  * So only the strings that carry markup (`<`, `>` or `&`) go to the parser,
  * and what they cost is counted per client: a unit is one string, plus one per
- * 8 markup characters, plus one per 1,024 characters (9 microseconds a unit at
- * worst). The largest legitimate case is a bulk import of 1,000 wallets whose
- * names all carry a `&` or a `<`: 1,000 units. 1,536 a window is at most about
- * 14 ms of parsing per client per 10 s, whatever it sends; a request that
- * needs more than a whole window is refused for good (400), one that finds the
- * window spent is told when to retry (429). In memory: it holds when Redis is
- * down.
+ * 8 markup characters, plus one per 256 characters (about 9 microseconds a
+ * unit at worst, whatever the shape: many small strings, one string of `<`, or
+ * one long tag with thousands of attributes). The largest legitimate case is a
+ * bulk import of 1,000 wallets whose names all carry a `&` or a `<`: 1,000
+ * units. 1,536 a window is about 14 ms of parsing per client per 10 s,
+ * whatever it sends; a request that needs more than a whole window is refused
+ * for good (400), one that finds the window spent is told when to retry (429).
+ * In memory: it holds when Redis is down.
  */
 const SANITIZE_WINDOW_MS = 10_000;
 const sanitizeBudget = new ClientBudget(positiveIntEnv('SANITIZE_UNITS_PER_WINDOW', 1536), SANITIZE_WINDOW_MS);
@@ -184,7 +186,7 @@ function collect(work: ParseWork, holder: Record<string, unknown>, key: string, 
     // < > &
     if (c === 60 || c === 62 || c === 38) markup++;
   }
-  const units = 1 + Math.floor(markup / 8) + Math.floor(value.length / 1024);
+  const units = 1 + Math.floor(markup / 8) + Math.floor(value.length / 256);
   work.units += units;
   work.pending.push({ holder, key, value, units });
 }

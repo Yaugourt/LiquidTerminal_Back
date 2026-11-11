@@ -120,6 +120,30 @@ describe('FairGate', () => {
     await expect(latest).resolves.toBe('latest');
   });
 
+  it('tryAcquire takes a free slot at once and never waits', async () => {
+    const gate = new FairGate({ max: 2, maxPerClient: 1, maxWaiting: 5, maxWaitingPerClient: 5 });
+    const first = gate.tryAcquire('a');
+    expect(first).not.toBeNull();
+    // The client's own share is taken, then the gate's.
+    expect(gate.tryAcquire('a')).toBeNull();
+    const second = gate.tryAcquire('b');
+    expect(second).not.toBeNull();
+    expect(gate.tryAcquire('c')).toBeNull();
+    expect(gate.stats).toEqual({ running: 2, waiting: 0, clients: 2 });
+
+    // A waiter is served when a slot taken this way is freed; freeing twice changes nothing.
+    const waiting = job();
+    const run = gate.run('c', waiting.run);
+    first?.();
+    first?.();
+    await turn();
+    expect(waiting.started).toBe(true);
+    waiting.finish();
+    await run;
+    second?.();
+    expect(gate.stats).toEqual({ running: 0, waiting: 0, clients: 0 });
+  });
+
   it('frees the slot when the job throws', async () => {
     const gate = new FairGate({ max: 1, maxPerClient: 1, maxWaiting: 5, maxWaitingPerClient: 5 });
     const failing = job();

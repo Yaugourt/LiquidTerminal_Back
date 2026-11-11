@@ -227,6 +227,24 @@ describe('sanitizeInput', () => {
     }
   });
 
+  it('counts a long tag by its length: one string of thousands of attributes is not one unit', async () => {
+    // About 87 kB: `<a a0 a1 ... >`, 3 ms of parsing for a single string and a single `<`.
+    const heavy = `<a ${Array.from({ length: 14_000 }, (_, i) => `a${i}`).join(' ')}>`;
+    expect(heavy.length).toBeGreaterThan(80_000);
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    try {
+      // Each is about 340 units: four fit in the 1,536 of a window, the fifth does not.
+      for (let i = 0; i < 4; i++) {
+        const { req, next } = await run({ body: { v: heavy } }, '203.0.113.50');
+        expect(next).toBe(true);
+        expect((req.body as { v: string }).v).toBe('');
+      }
+      expect((await run({ body: { v: heavy } }, '203.0.113.50')).status).toBe(429);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('leaves what is nested deeper than the depth guard untouched, as before', async () => {
     let deep: Record<string, unknown> = { v: ' <b>x</b> ' };
     for (let i = 0; i < 9; i++) deep = { d: deep };

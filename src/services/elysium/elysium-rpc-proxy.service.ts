@@ -16,6 +16,14 @@ export class ElysiumRpcBusyError extends Error {
   }
 }
 
+/** The client went away before its answer was ready: there is nobody to answer. */
+export class ElysiumRpcClientGoneError extends Error {
+  constructor() {
+    super('ELYSIUM_MAINNET_RPC_CLIENT_GONE');
+    this.name = 'ElysiumRpcClientGoneError';
+  }
+}
+
 /** The archive node's answer is larger than the proxy relays. */
 export class ElysiumRpcResponseTooLargeError extends Error {
   constructor() {
@@ -206,10 +214,15 @@ export class ElysiumRpcProxyService {
    * Throws ElysiumRpcBusyError / ElysiumRpcResponseTooLargeError for the
    * ceilings above, a plain Error on a transport or upstream failure; no error
    * ever carries the keyed URL.
+   *
+   * `gone` aborts when the client's connection closes: a call still waiting
+   * for a slot is then not sent, and one at the node is cut, with
+   * ElysiumRpcClientGoneError. Nothing is held for a client that left.
    */
-  public async forward(body: unknown, weight = 1, client = ''): Promise<ElysiumRpcAnswer> {
+  public async forward(body: unknown, weight = 1, client = '', gone?: AbortSignal): Promise<ElysiumRpcAnswer> {
     const url = this.url();
     if (!url) throw new Error('ELYSIUM_MAINNET_RPC_NOT_CONFIGURED');
+    if (gone?.aborted) throw new ElysiumRpcClientGoneError();
 
     let freeSlot: () => void;
     try {
@@ -230,16 +243,19 @@ export class ElysiumRpcProxyService {
     };
 
     try {
+      // It left while it waited for the slot: no call to the node, nothing spent.
+      if (gone?.aborted) throw new ElysiumRpcClientGoneError();
       this.spend(weight);
       let res: Response;
       let chunks: Buffer[];
       try {
+        const timeout = AbortSignal.timeout(this.TIMEOUT_MS);
         res = await fetch(url, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
           // Covers the body too: the signal stays on the response stream.
-          signal: AbortSignal.timeout(this.TIMEOUT_MS),
+          signal: gone ? AbortSignal.any([timeout, gone]) : timeout,
         });
         if (!res.ok) {
           void res.body?.cancel().catch(() => undefined);
@@ -250,6 +266,8 @@ export class ElysiumRpcProxyService {
       } catch (error) {
         if (error instanceof ElysiumRpcResponseTooLargeError || error instanceof ElysiumRpcBusyError) throw error;
         if (error instanceof Error && error.message === 'ELYSIUM_MAINNET_RPC_UPSTREAM') throw error;
+        // Cut because the client left, not a failure of the node.
+        if (gone?.aborted) throw new ElysiumRpcClientGoneError();
         // Keep the URL out of the message: it carries the key.
         logDeduplicator.warn('Elysium RPC proxy transport error', {
           error: error instanceof Error ? error.name : 'unknown',
@@ -274,11 +292,21 @@ export class ElysiumRpcProxyService {
    * client has it or has gone. A client that has not read it after
    * DELIVERY_TIMEOUT_MS is cut: the bytes of an unread answer sit in this
    * process, and a slot of its client's share with them.
+   *
+   * The release never rests on an event alone: a response that is already
+   * closed when this is called (the client left while the node was answering)
+   * emits no further 'close', so it is released here, and the timeout releases
+   * whatever the events did not.
    */
   public deliver(answer: ElysiumRpcAnswer, res: ServerResponse): void {
+    if (res.destroyed || res.writableEnded || res.socket?.destroyed) {
+      answer.release();
+      return;
+    }
     const timer = setTimeout(() => {
       logDeduplicator.warn('Elysium RPC proxy: client did not read its answer, connection cut');
       res.destroy();
+      answer.release();
     }, DELIVERY_TIMEOUT_MS);
     timer.unref();
     const done = (): void => {

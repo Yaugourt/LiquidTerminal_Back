@@ -491,7 +491,7 @@ export class InternalWebSocketServer {
     const verdict = this.checkMessageRateLimit(clientId);
     if (verdict !== 'ok') {
       // One answer for the first frame over the limit, none for the rest of the second.
-      if (verdict === 'first-excess' || (verdict === 'close' && client.isAuthenticated)) {
+      if (verdict.first) {
         this.sendMessage(ws, {
           type: 'error',
           error: 'Rate limit exceeded',
@@ -500,7 +500,7 @@ export class InternalWebSocketServer {
         });
       }
       // The authenticated bot is never cut for its rate: its alerts would be lost.
-      if (verdict === 'close' && !client.isAuthenticated) {
+      if (verdict.close && !client.isAuthenticated) {
         logDeduplicator.warn('InternalWebSocketServer: Closing client over the message rate', { clientId, ip: client.ip });
         ws.close(1008, 'Rate limit exceeded');
         // A client that ignores the close frame keeps the socket: cut it shortly after.
@@ -1359,23 +1359,25 @@ export class InternalWebSocketServer {
   }
 
   /**
-   * Counts one frame of a client against its second.
-   * - 'ok': within the limit.
-   * - 'first-excess': the first frame over it in this second (the one that is answered).
-   * - 'excess': a further one.
-   * - 'close': too many over it in this second, or over it too many seconds in a row.
+   * Counts one frame of a client against its second. 'ok' within the limit;
+   * over it, `first` marks the first such frame of the second (the one that
+   * is answered) and `close` a socket that sent too many over it in this
+   * second, or went over it too many seconds in a row.
    */
-  private checkMessageRateLimit(clientId: string): 'ok' | 'first-excess' | 'excess' | 'close' {
+  private checkMessageRateLimit(clientId: string): 'ok' | { first: boolean; close: boolean } {
     const now = Date.now();
     const counter = this.messageCounters.get(clientId);
 
     if (!counter || now > counter.resetAt) {
-      // A new second: the one before counts as a strike when it went over the limit.
-      const over = counter ? counter.count > InternalWebSocketServer.MAX_MESSAGES_PER_SECOND : false;
+      // A new second. The one before counts as a strike when it went over the limit AND
+      // this one follows it directly: a quiet second in between forgives what came before,
+      // so a client that bursts now and then is never cut for it.
+      const inARow = counter !== undefined && now <= counter.resetAt + 1000;
+      const over = inARow && counter.count > InternalWebSocketServer.MAX_MESSAGES_PER_SECOND;
       this.messageCounters.set(clientId, {
         count: 1,
         resetAt: now + 1000,
-        strikes: over ? counter!.strikes + 1 : 0,
+        strikes: over ? counter.strikes + 1 : 0,
       });
       return 'ok';
     }
@@ -1383,13 +1385,13 @@ export class InternalWebSocketServer {
     counter.count++;
     const excess = counter.count - InternalWebSocketServer.MAX_MESSAGES_PER_SECOND;
     if (excess <= 0) return 'ok';
-    if (excess > InternalWebSocketServer.MAX_EXCESS_MESSAGES) return 'close';
-    if (excess === 1) {
-      // Over the limit again, right after seconds that already were.
-      if (counter.strikes + 1 >= InternalWebSocketServer.MAX_SECONDS_OVER_LIMIT) return 'close';
-      return 'first-excess';
-    }
-    return 'excess';
+    return {
+      first: excess === 1,
+      close:
+        excess > InternalWebSocketServer.MAX_EXCESS_MESSAGES ||
+        // Over the limit again, right after seconds that already were.
+        counter.strikes + 1 >= InternalWebSocketServer.MAX_SECONDS_OVER_LIMIT,
+    };
   }
 
   /**

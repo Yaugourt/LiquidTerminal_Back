@@ -194,6 +194,24 @@ describe('InternalWebSocketServer against abuse', () => {
     expect(messages.filter((m) => m.code === 'RATE_LIMIT')).toHaveLength(8);
   });
 
+  it('does not hold occasional bursts against a socket: only seconds in a row count', async () => {
+    await start();
+    let clock = 1_800_000_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    const outcome = await connect('198.51.100.45');
+    if (!outcome.open) throw new Error('not connected');
+    const { messages } = watch(outcome.ws);
+    const ping = JSON.stringify({ method: 'ping' });
+    // Eight bursts of 14 frames, a minute apart, then eight more three seconds apart.
+    for (const gap of [...Array<number>(8).fill(60_000), ...Array<number>(8).fill(3_000)]) {
+      for (let i = 0; i < 14; i++) outcome.ws.send(ping);
+      await tick(60);
+      clock += gap;
+    }
+    expect(outcome.ws.readyState).toBe(WebSocket.OPEN);
+    expect(messages.filter((m) => m.code === 'RATE_LIMIT')).toHaveLength(16);
+  });
+
   it('never closes the authenticated bot for its rate: it is told, and kept', async () => {
     await start({ TELEGRAM_BOT_API_KEY: BOT_KEY });
     const outcome = await connect('198.51.100.43', { Authorization: `Bot ${BOT_KEY}` });
@@ -203,7 +221,8 @@ describe('InternalWebSocketServer against abuse', () => {
     await tick(150);
     expect(outcome.ws.readyState).toBe(WebSocket.OPEN);
     expect(messages.filter((m) => m.type === 'heartbeat')).toHaveLength(10);
-    expect(messages.filter((m) => m.code === 'RATE_LIMIT').length).toBeGreaterThan(0);
+    // Told once for the second, not once per frame.
+    expect(messages.filter((m) => m.code === 'RATE_LIMIT')).toHaveLength(1);
   });
 
   it('does not send a client its own message back in an error', async () => {

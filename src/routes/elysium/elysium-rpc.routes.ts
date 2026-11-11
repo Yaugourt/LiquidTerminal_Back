@@ -4,6 +4,7 @@ import { validateRequest } from '../../middleware/validation';
 import { elysiumRpcBodySchema } from '../../schemas/elysium-rpc.schema';
 import {
   ElysiumRpcBusyError,
+  ElysiumRpcClientGoneError,
   ElysiumRpcProxyService,
   ElysiumRpcResponseTooLargeError,
 } from '../../services/elysium/elysium-rpc-proxy.service';
@@ -47,11 +48,20 @@ router.post(
     const body = req.body as { id?: number | string | null } | unknown[];
     // A whole-request error answers the call's own id; a batch has none to pick.
     const id = Array.isArray(body) ? null : (body.id ?? null);
+    // A client that closes its connection before the answer is ready (its own timeout, a closed
+    // tab) must not keep a slot waiting, a call at the node, or an answer in memory.
+    const gone = new AbortController();
+    const onClose = (): void => {
+      if (!res.writableEnded) gone.abort();
+    };
+    res.once('close', onClose);
     try {
-      const answer = await proxy.forward(body, elysiumRpcWeightOf(body), rateLimitKeyForIp(req.ip ?? ''));
+      const answer = await proxy.forward(body, elysiumRpcWeightOf(body), rateLimitKeyForIp(req.ip ?? ''), gone.signal);
       // Written as received (no decoding, no ETag over megabytes), and released once the client has it.
       proxy.deliver(answer, res);
     } catch (error) {
+      // Nobody left to answer.
+      if (error instanceof ElysiumRpcClientGoneError) return;
       if (error instanceof ElysiumRpcBusyError) {
         res.setHeader('Retry-After', String(error.retryAfterS));
         res.status(429).json({

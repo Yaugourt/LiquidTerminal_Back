@@ -79,19 +79,21 @@ function windowKey(prefix: string, window: RateWindow, nowS: number): string {
  * swallowing it returned a count of 0, which let everything through.
  *
  * `cost` is what this request weighs in every window (1 unless the limiter
- * counts something else than requests, see `createIpLimiter`).
+ * counts something else than requests, see `createIpLimiter`), or one weight
+ * per window, in the order of `windows`.
  */
-async function countRequest(prefix: string, windows: readonly RateWindow[], cost = 1): Promise<number[]> {
+async function countRequest(prefix: string, windows: readonly RateWindow[], cost: number | readonly number[] = 1): Promise<number[]> {
   // Circuit open: don't queue on a wedged connection, use the fallback now.
   if (!redisService.isHealthy()) throw new Error('Redis circuit open');
   const now = Math.floor(Date.now() / 1000);
   const pipeline = redisService.getClient().pipeline();
-  for (const window of windows) {
+  windows.forEach((window, i) => {
     const key = windowKey(prefix, window, now);
-    if (cost === 1) pipeline.incr(key);
-    else pipeline.incrby(key, cost);
+    const weight = typeof cost === 'number' ? cost : cost[i];
+    if (weight === 1) pipeline.incr(key);
+    else pipeline.incrby(key, weight);
     pipeline.expire(key, window.seconds * 2);
-  }
+  });
 
   const results = await pipeline.exec();
   if (!results) {
@@ -237,10 +239,10 @@ interface IpLimits {
  *
  * `cost` makes one request weigh more than 1 in both windows, for a route
  * where a single request carries several units of work (a JSON-RPC batch). It
- * is read after the body was validated; anything below 1 counts as 1, and a
- * request never weighs more than a whole second's budget (it would be refused
- * for good): the heaviest valid request takes the second, and the minute
- * window is what holds a client that sends them one after the other.
+ * is read after the body was validated; anything below 1 counts as 1, and in
+ * each window a request never weighs more than the window's whole budget (it
+ * would be refused for good): the heaviest valid request takes the second, and
+ * weighs its full weight in the minute, up to the whole minute.
  */
 function createIpLimiter(
   namespace: string,
@@ -262,9 +264,13 @@ function createIpLimiter(
     }
     // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4.
     const key = rateLimitKeyForIp(ip);
-    const cost = options.cost ? Math.min(limits.BURST.MAX_REQUESTS, Math.max(1, Math.trunc(options.cost(req)) || 1)) : 1;
+    const weight = options.cost ? Math.max(1, Math.trunc(options.cost(req)) || 1) : 1;
+    const cost = Math.min(limits.BURST.MAX_REQUESTS, weight);
     try {
-      const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${key}`, windows, cost);
+      const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${key}`, windows, [
+        cost,
+        Math.min(limits.MINUTE.MAX_REQUESTS, weight),
+      ]);
       if (burstCount > limits.BURST.MAX_REQUESTS) {
         return sendLimitExceededResponse(res, `Too many ${what} requests per second`, limits.BURST.WINDOW);
       }
@@ -331,7 +337,8 @@ export const elysiumSearchRateLimiter = createIpLimiter(
  * call to the keyed archive node, so this counts calls, not requests, each at
  * its weight (elysiumRpcCallWeight: 1 for a plain read, more for the calls
  * whose parameters size the node's work): a batch of 20 plain reads weighs 20,
- * one `eth_simulateV1` of 40 calls weighs 40. The general limiter in front of
+ * one `eth_simulateV1` of 40 calls weighs 40, and one of 256 calls takes its
+ * second whole and 256 of the minute. The general limiter in front of
  * it counts requests, and at 6,000 a minute a client sending full batches
  * reached the node hundreds of thousands of times a minute.
  *
@@ -341,20 +348,20 @@ export const elysiumSearchRateLimiter = createIpLimiter(
  * 50 a second lets a few people behind one IP open a tool together, and 1,200
  * a minute is 20 calls a second sustained.
  */
-const ELYSIUM_RPC_BURST = positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_BURST', 50);
+const ELYSIUM_RPC_MINUTE = positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_MINUTE', 1200);
 export const elysiumRpcRateLimiter = createIpLimiter(
   'elyrpc',
   {
-    BURST: { WINDOW: 1, MAX_REQUESTS: ELYSIUM_RPC_BURST },
-    MINUTE: { WINDOW: 60, MAX_REQUESTS: positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_MINUTE', 1200) },
+    BURST: { WINDOW: 1, MAX_REQUESTS: positiveIntEnv('ELYSIUM_RPC_RATE_LIMIT_BURST', 50) },
+    MINUTE: { WINDOW: 60, MAX_REQUESTS: ELYSIUM_RPC_MINUTE },
   },
   'Elysium RPC',
   { cost: (req) => elysiumRpcRequestWeight(req.body) }
 );
 
-/** The same weight, capped like the limiter caps it: what the proxy counts against its own budgets. */
+/** The same weight, capped like the limiter caps it in its minute: what the proxy counts against its own minute. */
 export function elysiumRpcWeightOf(body: unknown): number {
-  return Math.min(ELYSIUM_RPC_BURST, Math.max(1, elysiumRpcRequestWeight(body)));
+  return Math.min(ELYSIUM_RPC_MINUTE, Math.max(1, elysiumRpcRequestWeight(body)));
 }
 
 /**

@@ -85,6 +85,23 @@ export class FairGate {
     };
   }
 
+  /**
+   * Takes a slot for `client` if one is free right now, without waiting, and
+   * returns what frees it; null when the caller would have to wait (then
+   * `acquire` or `run`). For work that must start in the same turn as the
+   * decision to start it.
+   */
+  public tryAcquire(client: string): (() => void) | null {
+    if (!this.canStart(client)) return null;
+    this.start(client);
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      this.leave(client);
+    };
+  }
+
   /** Runs in flight and callers waiting (diagnostics, tests). */
   public get stats(): { running: number; waiting: number; clients: number } {
     return { running: this.running, waiting: this.queue.length, clients: this.runningBy.size };

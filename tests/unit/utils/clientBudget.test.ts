@@ -30,6 +30,21 @@ describe('ClientBudget', () => {
     expect(budget.retryAfterS(29_999)).toBe(1);
   });
 
+  it('never drops a client that is spending its budget to make room', () => {
+    const budget = new ClientBudget(10, 1_000, 3);
+    budget.take('heavy', 9, 0);
+    budget.take('b', 1, 0);
+    budget.take('c', 1, 0);
+    // 'heavy' takes again: it is now the most recent, although it came first.
+    budget.take('heavy', 1, 1);
+    budget.take('d', 1, 2);
+    budget.take('e', 1, 3);
+    expect(budget.size).toBe(3);
+    // Its spent budget was not forgotten.
+    expect(budget.remaining('heavy', 4)).toBe(0);
+    expect(budget.take('heavy', 1, 4)).toBe(false);
+  });
+
   it('keeps at most maxClients entries, dropping the oldest', () => {
     const budget = new ClientBudget(10, 1_000, 3);
     budget.take('a', 10, 0);

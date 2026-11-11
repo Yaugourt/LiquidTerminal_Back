@@ -172,6 +172,11 @@ class SharedRead<T> {
     return this.result;
   }
 
+  /** True while the read is running: joining it then costs nothing more. */
+  public get started(): boolean {
+    return this.running !== null;
+  }
+
   public run(): Promise<T> {
     this.running ??= this.read().then(
       (value) => {
@@ -752,7 +757,9 @@ export class ElysiumLaunchpadMarketService {
     order.catch(() => {
       if (this.orders.get(key) === entry) this.orders.delete(key);
     });
-    ElysiumLaunchpadMarketService.remember(this.orders, key, entry, ORDER_CACHE_MAX);
+    // Kept for the current snapshot only: a read that began before the snapshot changed
+    // would take a place in the new snapshot's cache for a key nobody will ask for again.
+    if (snap === this.snapshot) ElysiumLaunchpadMarketService.remember(this.orders, key, entry, ORDER_CACHE_MAX);
     return order;
   }
 
@@ -765,7 +772,8 @@ export class ElysiumLaunchpadMarketService {
    * the totals and the mini lists. Orders and pages are kept for the snapshot
    * they were built from. A page that is not built yet is read in a slot of
    * `client`'s own share (a search in the search slots), and that one read
-   * serves everyone asking for the page.
+   * serves everyone asking for the page: whoever arrives while it runs joins
+   * it without taking a slot, however many they are.
    */
   public async getPage(query: ElysiumLaunchpadQuery, client = ''): Promise<ElysiumLaunchpadPage> {
     const snap = await this.getSnapshot();
@@ -786,11 +794,25 @@ export class ElysiumLaunchpadMarketService {
       );
       entry = created;
     }
-    ElysiumLaunchpadMarketService.remember(this.pages, pageKey, entry, PAGE_CACHE_MAX);
+    // For the current snapshot only (see orderFor).
+    if (snap === this.snapshot) ElysiumLaunchpadMarketService.remember(this.pages, pageKey, entry, PAGE_CACHE_MAX);
     const shared = entry;
-    const page = shared.settled
-      ? shared.settled.value
-      : await this.gated(q ? this.searchGate : this.pageGate, client, q !== undefined, () => shared.run());
+    const gate = q ? this.searchGate : this.pageGate;
+    let page: LaunchPage;
+    if (shared.settled) {
+      page = shared.settled.value;
+    } else if (shared.started) {
+      // Already running in someone's slot: joined as it is. A slot is only needed to START a read,
+      // so the visitors that arrive together after a snapshot change do not queue for one each.
+      page = await shared.run();
+    } else {
+      // A free slot of this client's share starts the read in this same turn, so that whoever
+      // comes next finds it running. Otherwise the client waits for a slot of its own, and the
+      // read starts with the first of the clients waiting for it that gets one.
+      const release = gate.tryAcquire(client);
+      if (release) page = await shared.run().finally(release);
+      else page = await this.gated(gate, client, q !== undefined, () => shared.run());
+    }
     return {
       tokens: limit >= page.tokens.length ? page.tokens : page.tokens.slice(0, limit),
       total: page.total,
