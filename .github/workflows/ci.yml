@@ -50,3 +50,59 @@ jobs:
         # Tests now gate the merge (was continue-on-error: true, which let a
         # broken suite land silently). These are mock-based unit/integration
         # tests with no real DB dependency, so they are safe to make blocking.
+
+  # The Elysium SQL on a real Postgres (tests/db). The tests of the build job mock the database:
+  # until this job, no statement of the ingestion or of the views ran anywhere before production
+  # (a refused value, a lock order, a time read in the session's zone were found there, or by hand).
+  db:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          # The tests empty the Elysium tables, and refuse a database whose name does not say "test".
+          POSTGRES_DB: elysium_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d elysium_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgresql://user:pass@localhost:5432/db
+      HISTORICAL_DATABASE_URL: postgresql://test:test@localhost:5432/elysium_test
+      TEST_HISTORICAL_DATABASE_URL: postgresql://test:test@localhost:5432/elysium_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      # The schema the tests run on is the one the migrations build, as in production.
+      - name: Apply the historical migrations
+        run: npm run prisma:migrate:historical
+
+      # Sessions in a zone other than UTC: a time read back in the session's zone and taken for
+      # UTC is off by the zone's offset, and on a UTC database that mistake shows nowhere.
+      - name: Use a session time zone other than UTC
+        run: |
+          psql "$TEST_HISTORICAL_DATABASE_URL" -q -c "ALTER DATABASE elysium_test SET timezone TO 'America/New_York'"
+          psql "$TEST_HISTORICAL_DATABASE_URL" -At -c "SHOW timezone"
+
+      - name: Test on Postgres
+        run: npm run test:db

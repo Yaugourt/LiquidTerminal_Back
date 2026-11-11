@@ -16,6 +16,7 @@ export default tseslint.config(
       '.agents/**',
       '*.mjs',
       'jest.config.js',
+      'jest.db.config.js',
       'scripts/**/*.mjs',
     ],
   },
