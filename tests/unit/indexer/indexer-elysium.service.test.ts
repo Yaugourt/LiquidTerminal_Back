@@ -1,4 +1,4 @@
-import { IndexerElysiumService } from '../../../src/services/indexer/indexer-elysium.service';
+import { DAILY_SIZES, IndexerElysiumService, LIST_SIZES, sizeFor } from '../../../src/services/indexer/indexer-elysium.service';
 import { cacheService } from '../../../src/core/cache.service';
 import { HypeDexerElysiumIndexerClient } from '../../../src/clients/hypedexer/rest/elysium/elysium-indexer.client';
 import { HYPEDEXER_TTL } from '../../../src/constants/hypedexer.cache';
@@ -81,6 +81,85 @@ describe('IndexerElysiumService cache keys', () => {
     // The client still gets the network it was asked for: it picks the upstream path.
     expect(client.getStats).toHaveBeenNthCalledWith(2, { network: 'testnet' });
     expect(client.getStats).toHaveBeenNthCalledWith(3, { network: 'mainnet' });
+  });
+
+  /**
+   * `limit` (1 to 100) and `days` (1 to 365) each made a cache key per value: a client walking
+   * them made as many billed calls. A list is read at one of a few sizes and cut to what was asked.
+   */
+  describe('the sizes a list is read in', () => {
+    const rows = (n: number): Array<{ n: number }> => Array.from({ length: n }, (_, i) => ({ n: i }));
+    const lists = {
+      getBlocks: jest.fn(async (p?: { limit?: number }) => rows(p?.limit ?? 20)),
+      getBatches: jest.fn(async (p?: { limit?: number }) => rows(p?.limit ?? 50)),
+      getStatsDaily: jest.fn(async (p?: { days?: number }) => rows(p?.days ?? 30)),
+      getTransactions: jest.fn(async () => ({ not: 'a list' })),
+      getUserActivity: jest.fn(async (_a: string, p?: { limit?: number }) => rows(p?.limit ?? 50)),
+      getTokenHolders: jest.fn(async (_a: string, p?: { limit?: number }) => rows(p?.limit ?? 50)),
+    };
+    /** A cache that keeps what it is given, so that two reads of one key make one call. */
+    const kept = new Map<string, unknown>();
+
+    beforeEach(() => {
+      kept.clear();
+      (HypeDexerElysiumIndexerClient.getInstance as jest.Mock).mockReturnValue(lists);
+      getOrSet.mockImplementation(async (key: string, fetcher: () => Promise<unknown>) => {
+        if (!kept.has(key)) kept.set(key, await fetcher());
+        return kept.get(key);
+      });
+    });
+
+    it('picks the first size that holds what is asked', () => {
+      expect([1, 10, 11, 14, 25, 26, 50, 51, 100].map((n) => sizeFor(n, LIST_SIZES))).toEqual([10, 10, 25, 25, 25, 50, 50, 100, 100]);
+      expect([1, 7, 8, 30, 31, 90, 91, 365].map((n) => sizeFor(n, DAILY_SIZES))).toEqual([7, 7, 30, 30, 90, 90, 365, 365]);
+      expect(sizeFor(undefined, LIST_SIZES)).toBeUndefined();
+    });
+
+    it('reads 4 keys for the 100 values of limit, and returns as many rows as asked', async () => {
+      const svc = IndexerElysiumService.getInstance();
+      for (let limit = 1; limit <= 100; limit++) {
+        const got = (await svc.getBlocks({ limit })) as unknown[];
+        expect(got).toHaveLength(limit);
+        expect(got[0]).toEqual({ n: 0 });
+      }
+      expect(lists.getBlocks.mock.calls.map(([p]) => p?.limit)).toEqual([10, 25, 50, 100]);
+      expect(kept.size).toBe(4);
+    });
+
+    it('reads 4 keys for the 365 values of days', async () => {
+      const svc = IndexerElysiumService.getInstance();
+      for (let days = 1; days <= 365; days++) expect((await svc.getStatsDaily({ days })) as unknown[]).toHaveLength(days);
+      expect(lists.getStatsDaily.mock.calls.map(([p]) => p?.days)).toEqual([7, 30, 90, 365]);
+    });
+
+    it('never asks the provider for more batches than it gives (50)', async () => {
+      const svc = IndexerElysiumService.getInstance();
+      expect((await svc.getBatches({ limit: 50 })) as unknown[]).toHaveLength(50);
+      expect((await svc.getBatches({ limit: 16 })) as unknown[]).toHaveLength(16);
+      expect(lists.getBatches.mock.calls.map(([p]) => p?.limit)).toEqual([50, 25]);
+    });
+
+    it('leaves a call with no size to the provider\'s default, under its own key', async () => {
+      const svc = IndexerElysiumService.getInstance();
+      expect((await svc.getBlocks({})) as unknown[]).toHaveLength(20);
+      expect(lists.getBlocks).toHaveBeenCalledWith({});
+      expect([...kept.keys()]).toEqual(['hypedexer:elysium:blocks']);
+    });
+
+    it('returns as it is an answer that is not a list', async () => {
+      expect(await IndexerElysiumService.getInstance().getTransactions({ limit: 14 })).toEqual({ not: 'a list' });
+    });
+
+    it('sizes the lists of an address the same way, with the other parameters kept', async () => {
+      const svc = IndexerElysiumService.getInstance();
+      const a = '0x' + 'Ab'.repeat(20);
+      expect((await svc.getUserActivity(a, { limit: 14, offset: 200 })) as unknown[]).toHaveLength(14);
+      expect((await svc.getUserActivity(a, { limit: 20, offset: 200 })) as unknown[]).toHaveLength(20);
+      expect(lists.getUserActivity).toHaveBeenCalledTimes(1);
+      expect(lists.getUserActivity).toHaveBeenCalledWith(a.toLowerCase(), { limit: 25, offset: 200 });
+      expect((await svc.getTokenHolders(a, { limit: 20, network: 'mainnet' })) as unknown[]).toHaveLength(20);
+      expect(lists.getTokenHolders).toHaveBeenCalledWith(a.toLowerCase(), { network: 'mainnet', limit: 25 });
+    });
   });
 
   describe('per-address lookups', () => {

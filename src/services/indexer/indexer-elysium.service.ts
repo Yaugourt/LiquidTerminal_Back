@@ -25,6 +25,23 @@ import { currentUpstreamCaller } from '../../utils/request-context';
 const ELYSIUM_CACHE_DOMAIN = 'elysium';
 
 /**
+ * The sizes a list is read from the provider in. The routes accept any `limit` from 1 to 100
+ * and any `days` from 1 to 365, and each value used to be a cache key of its own: 100 keys per
+ * list and filter, 365 for the daily figures, each one a billed call when it expires. A list is
+ * now read at the first of these sizes that holds what was asked, kept under that size, and cut
+ * to what was asked: the same rows as before (the lists are newest first, or largest first),
+ * from 4 keys instead of 100.
+ */
+export const LIST_SIZES: readonly number[] = [10, 25, 50, 100];
+export const DAILY_SIZES: readonly number[] = [7, 30, 90, 365];
+
+/** The first of `sizes` that holds `asked` (the largest when none does); undefined when nothing was asked. */
+export function sizeFor(asked: number | undefined, sizes: readonly number[]): number | undefined {
+  if (asked === undefined) return undefined;
+  return sizes.find((size) => asked <= size) ?? sizes[sizes.length - 1];
+}
+
+/**
  * Elysium testnet pass-through. Every cache key includes the query params so a
  * filtered call never shares an entry with the unfiltered one.
  */
@@ -69,40 +86,52 @@ export class IndexerElysiumService {
     return cacheService.getOrSet<unknown>(key, fetcher, ttl);
   }
 
+  /**
+   * A list read at one of a few sizes and cut to the size asked (see LIST_SIZES). `field` is
+   * the parameter that sizes it. A call with no size keeps the provider's default, as before.
+   */
+  private async sized<P extends object>(
+    method: string,
+    params: P | undefined,
+    ttl: number,
+    fetcher: (read: P | undefined) => Promise<unknown>,
+    field: 'limit' | 'days' = 'limit',
+    sizes: readonly number[] = LIST_SIZES
+  ): Promise<unknown> {
+    const asked = (params as Record<string, unknown> | undefined)?.[field] as number | undefined;
+    const size = sizeFor(asked, sizes);
+    const read = size === undefined || size === asked ? params : ({ ...params, [field]: size } as P);
+    const data = await this.cached(method, read, ttl, () => fetcher(read));
+    return asked !== undefined && Array.isArray(data) && data.length > asked ? data.slice(0, asked) : data;
+  }
+
   public getStats(params?: ElysiumNetworkQuery): Promise<unknown> {
     return this.cached('stats', params, HYPEDEXER_TTL.elysiumStats, () => this.client.getStats(params));
   }
 
   public getStatsDaily(params?: ElysiumStatsDailyQuery): Promise<unknown> {
-    return this.cached('stats:daily', params, HYPEDEXER_TTL.elysiumStatsDaily, () =>
-      this.client.getStatsDaily(params)
-    );
+    return this.sized('stats:daily', params, HYPEDEXER_TTL.elysiumStatsDaily, (read) => this.client.getStatsDaily(read), 'days', DAILY_SIZES);
   }
 
   public getBlocks(params?: ElysiumBlocksQuery): Promise<unknown> {
-    return this.cached('blocks', params, HYPEDEXER_TTL.elysiumBlocks, () => this.client.getBlocks(params));
+    return this.sized('blocks', params, HYPEDEXER_TTL.elysiumBlocks, (read) => this.client.getBlocks(read));
   }
 
   public getTransactions(params?: ElysiumTransactionsQuery): Promise<unknown> {
-    return this.cached('transactions', params, HYPEDEXER_TTL.elysiumTransactions, () =>
-      this.client.getTransactions(params)
-    );
+    return this.sized('transactions', params, HYPEDEXER_TTL.elysiumTransactions, (read) => this.client.getTransactions(read));
   }
 
   public getBatches(params?: ElysiumBatchesQuery): Promise<unknown> {
-    return this.cached('batches', params, HYPEDEXER_TTL.elysiumBatches, () => this.client.getBatches(params));
+    // The provider takes at most 50 batches a call.
+    return this.sized('batches', params, HYPEDEXER_TTL.elysiumBatches, (read) => this.client.getBatches(read), 'limit', [10, 25, 50]);
   }
 
   public getBridgeTransfers(params?: ElysiumBridgeTransfersQuery): Promise<unknown> {
-    return this.cached('bridge:transfers', params, HYPEDEXER_TTL.elysiumBridgeTransfers, () =>
-      this.client.getBridgeTransfers(params)
-    );
+    return this.sized('bridge:transfers', params, HYPEDEXER_TTL.elysiumBridgeTransfers, (read) => this.client.getBridgeTransfers(read));
   }
 
   public getBridgeRetryables(params?: ElysiumBridgeRetryablesQuery): Promise<unknown> {
-    return this.cached('bridge:retryables', params, HYPEDEXER_TTL.elysiumBridgeRetryables, () =>
-      this.client.getBridgeRetryables(params)
-    );
+    return this.sized('bridge:retryables', params, HYPEDEXER_TTL.elysiumBridgeRetryables, (read) => this.client.getBridgeRetryables(read));
   }
 
   public getBridgeReserves(params: ElysiumBridgeReservesQuery): Promise<unknown> {
@@ -112,13 +141,11 @@ export class IndexerElysiumService {
   }
 
   public getBridgeTokens(params?: ElysiumBridgeTokensQuery): Promise<unknown> {
-    return this.cached('bridge:tokens', params, HYPEDEXER_TTL.elysiumBridgeTokens, () =>
-      this.client.getBridgeTokens(params)
-    );
+    return this.sized('bridge:tokens', params, HYPEDEXER_TTL.elysiumBridgeTokens, (read) => this.client.getBridgeTokens(read));
   }
 
   public getTokens(params?: ElysiumTokensQuery): Promise<unknown> {
-    return this.cached('tokens', params, HYPEDEXER_TTL.elysiumTokens, () => this.client.getTokens(params));
+    return this.sized('tokens', params, HYPEDEXER_TTL.elysiumTokens, (read) => this.client.getTokens(read));
   }
 
   /** Addresses are lower-cased so checksum variants share one cache entry. */
@@ -162,22 +189,22 @@ export class IndexerElysiumService {
   /** Largest holders of a token; same per-address budget, cached like the user lookups. */
   public getTokenHolders(address: string, params?: ElysiumNetworkQuery & { limit?: number }): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.cached('token:holders', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, () =>
-      this.userLookup(() => this.client.getTokenHolders(a, params))
+    return this.sized('token:holders', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, (read) =>
+      this.userLookup(() => this.client.getTokenHolders(a, { network: read?.network, limit: read?.limit }))
     );
   }
 
   public getUserActivity(address: string, params?: ElysiumUserActivityQuery): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.cached('user:activity', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, () =>
-      this.userLookup(() => this.client.getUserActivity(a, params))
+    return this.sized('user:activity', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, (read) =>
+      this.userLookup(() => this.client.getUserActivity(a, { ...params, limit: read?.limit }))
     );
   }
 
   public getUserBridge(address: string, params?: ElysiumUserBridgeQuery): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.cached('user:bridge', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, () =>
-      this.userLookup(() => this.client.getUserBridge(a, params))
+    return this.sized('user:bridge', { address: a, ...params }, HYPEDEXER_TTL.elysiumUser, (read) =>
+      this.userLookup(() => this.client.getUserBridge(a, { ...params, limit: read?.limit }))
     );
   }
 }
