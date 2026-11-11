@@ -146,6 +146,36 @@ describe('rate limiters', () => {
     expect(statuses[200]).toBe(429);
   });
 
+  /**
+   * With Redis down the fallback kept the one-second window only: a client was held to its
+   * burst and nothing else, every second of the outage (12,000 a minute against 6,000).
+   */
+  it('keeps the minute limit while Redis is down: the fallback counts every window', async () => {
+    mockRedis.fail = 'reject';
+    const statuses: number[] = [];
+    for (let second = 0; second < 31; second++) {
+      statuses.push(...(await burst(marketRateLimiter, '4.4.8.8', 195)));
+      now += 1000;
+    }
+    expect(statuses.filter((s) => s === 200).length).toBe(6000);
+    expect(statuses[6000]).toBe(429);
+    // Told to come back when the minute rolls over, not in a second.
+    expect(lastRetryAfter).toBe('30');
+    now += 30_000;
+    expect(await hit(marketRateLimiter, '4.4.8.8')).toBe(200);
+  });
+
+  it('keeps the pass-through minute limit while Redis is down (4,000, it was 18,000)', async () => {
+    mockRedis.fail = 'reject';
+    const statuses: number[] = [];
+    for (let second = 0; second < 14; second++) {
+      statuses.push(...(await burst(passthroughRateLimiter, '4.4.9.9', 290)));
+      now += 1000;
+    }
+    expect(statuses.filter((s) => s === 200).length).toBe(4000);
+    expect(statuses[4000]).toBe(429);
+  });
+
   it('lets a page-load fan-out through the passthrough burst, with its own counters', async () => {
     const statuses = await burst(passthroughRateLimiter, '5.5.5.5', 301);
     expect(statuses.slice(0, 300).every((s) => s === 200)).toBe(true);
@@ -199,6 +229,45 @@ describe('rate limiters', () => {
       expect(await hit(marketRateLimiter, '9.9.9.9')).toBe(429);
       expect(await hit(marketRateLimiter, '::ffff:9.9.9.9')).toBe(429);
       expect(await hit(marketRateLimiter, '9.9.9.10')).toBe(200);
+    });
+
+    /**
+     * A /64 is one subnet, a /48 is 65,536 of them: whoever holds one had 65,536 budgets. The
+     * /48 is counted too, against 16 times a client's limit.
+     */
+    it.each([
+      ['market', marketRateLimiter, 200],
+      ['passthrough', passthroughRateLimiter, 300],
+    ] as const)('%s limiter: the /64s of one /48 share 16 clients\' worth, another /48 and IPv4 do not', async (_name, limiter, max) => {
+      for (let subnet = 0; subnet < 16; subnet++) {
+        const statuses = await burst(limiter, `2001:db8:77:${subnet.toString(16)}::1`, max);
+        expect(statuses.every((s) => s === 200)).toBe(true);
+      }
+      // The 17th subnet of the same /48 has made no request of its own, and is refused.
+      expect(await hit(limiter, '2001:db8:77:ffff::1')).toBe(429);
+      expect(lastRetryAfter).toBe('1');
+      expect(await hit(limiter, '2001:db8:78::1')).toBe(200);
+      expect(await hit(limiter, '198.51.100.7')).toBe(200);
+      // The next second starts a new window for the /48 as for its subnets.
+      now += 1000;
+      expect(await hit(limiter, '2001:db8:77:ffff::1')).toBe(200);
+    });
+
+    it('counts the /48 in the same round trip, and nothing more for IPv4', async () => {
+      await hit(marketRateLimiter, '2001:db8:99:1::1');
+      expect(mockRedis.execCalls).toBe(1);
+      expect([...mockRedis.counters.keys()].filter((k) => k.includes('site:2001:db8:99::/48'))).toHaveLength(3);
+      mockRedis.counters.clear();
+      await hit(marketRateLimiter, '192.0.2.44');
+      expect(mockRedis.execCalls).toBe(2);
+      expect([...mockRedis.counters.keys()].some((k) => k.includes('site:'))).toBe(false);
+    });
+
+    it('applies the /48 count to the in-memory fallback too', async () => {
+      mockRedis.fail = 'reject';
+      for (let subnet = 0; subnet < 16; subnet++) await burst(marketRateLimiter, `2001:db8:55:${subnet.toString(16)}::1`, 200);
+      expect(await hit(marketRateLimiter, '2001:db8:55:ffff::1')).toBe(429);
+      expect(await hit(marketRateLimiter, '2001:db8:56::1')).toBe(200);
     });
 
     it('applies the /64 key to the in-memory fallback too', async () => {

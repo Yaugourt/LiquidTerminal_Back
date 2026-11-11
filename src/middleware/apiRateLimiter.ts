@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { redisService } from '../core/redis.service';
 import { logDeduplicator } from '../utils/logDeduplicator';
 import { positiveIntEnv } from '../utils/env';
-import { rateLimitKeyForIp } from '../utils/client-ip';
+import { rateLimitKeyForIp, siteKeyForIp } from '../utils/client-ip';
 import { runWithUpstreamCaller, type UpstreamBudgetState } from '../utils/request-context';
 import { elysiumRpcRequestWeight } from '../schemas/elysium-rpc.schema';
 
@@ -83,69 +83,115 @@ function windowKey(prefix: string, window: RateWindow, nowS: number): string {
  * per window, in the order of `windows`.
  */
 async function countRequest(prefix: string, windows: readonly RateWindow[], cost: number | readonly number[] = 1): Promise<number[]> {
+  return (await countRequests([prefix], windows, cost))[0];
+}
+
+/** countRequest for several prefixes (a client and the /48 it sits in), still in one round trip: the counts of each, in order. */
+async function countRequests(prefixes: readonly string[], windows: readonly RateWindow[], cost: number | readonly number[] = 1): Promise<number[][]> {
   // Circuit open: don't queue on a wedged connection, use the fallback now.
   if (!redisService.isHealthy()) throw new Error('Redis circuit open');
   const now = Math.floor(Date.now() / 1000);
   const pipeline = redisService.getClient().pipeline();
-  windows.forEach((window, i) => {
-    const key = windowKey(prefix, window, now);
-    const weight = typeof cost === 'number' ? cost : cost[i];
-    if (weight === 1) pipeline.incr(key);
-    else pipeline.incrby(key, weight);
-    pipeline.expire(key, window.seconds * 2);
-  });
+  for (const prefix of prefixes) {
+    windows.forEach((window, i) => {
+      const key = windowKey(prefix, window, now);
+      const weight = typeof cost === 'number' ? cost : cost[i];
+      if (weight === 1) pipeline.incr(key);
+      else pipeline.incrby(key, weight);
+      pipeline.expire(key, window.seconds * 2);
+    });
+  }
 
   const results = await pipeline.exec();
   if (!results) {
     throw new Error('Rate limiter pipeline aborted');
   }
-  return windows.map((_, i) => {
-    const [error, count] = results[i * 2];
-    if (error) throw error;
-    return Number(count);
+  return prefixes.map((_, p) =>
+    windows.map((__, i) => {
+      const [error, count] = results[(p * windows.length + i) * 2];
+      if (error) throw error;
+      return Number(count);
+    })
+  );
+}
+
+/**
+ * How many times a client's limit the /48 it sits in may reach, for IPv6. An address is
+ * counted under its /64 (one subnet) and under its /48 (one site, 65,536 subnets): without the
+ * second count, whoever holds a /48 has 65,536 budgets. 16 leaves room for the many people a
+ * carrier or a campus can put in one /48, and is 4,096 times less than before.
+ */
+const V6_SITE_FACTOR = positiveIntEnv('RATE_LIMIT_V6_SITE_FACTOR', 16);
+
+/** The first window whose count is over its limit (times `factor`), or undefined. */
+function exceeded(counts: readonly number[], windows: readonly RateWindow[], limits: readonly number[], factor = 1): RateWindow | undefined {
+  return windows.find((_, i) => counts[i] > limits[i] * factor);
+}
+
+/** "second" for the one-second window, else the window's own name: what a refusal says. */
+const windowWord = (window: RateWindow): string => (window.seconds === 1 ? 'second' : window.name);
+
+// In-memory fallback when Redis is down (fail-secure).
+//
+// It used to keep the one-second window only: with Redis down a client was held to its burst
+// and nothing else, 200 requests every second for as long as the outage lasted (12,000 a
+// minute against a limit of 6,000, and the pass-through routes at 18,000 against 4,000). The
+// fallback now counts the same fixed windows as Redis does, with the same limits, per process.
+interface MemoryWindow {
+  /** Index of the fixed window the count belongs to (epoch seconds / window length). */
+  index: number;
+  count: number;
+}
+interface MemoryEntry {
+  slots: MemoryWindow[];
+  /** Epoch second at which the longest window counted so far rolls over: the entry is of no use after it. */
+  untilS: number;
+}
+const inMemoryCounters = new Map<string, MemoryEntry>();
+const FALLBACK_MAX_IPS = 10000;
+
+/** Counts `cost` under `key` in each of `windows`, in this process, and returns the counts (like countRequest). */
+function countInMemory(key: string, windows: readonly RateWindow[], cost: number | readonly number[] = 1): number[] {
+  const nowS = Math.floor(Date.now() / 1000);
+  let entry = inMemoryCounters.get(key);
+  if (entry) {
+    // Re-inserted: the entries stay in the order of their last request, the oldest leaves first.
+    inMemoryCounters.delete(key);
+  } else {
+    if (inMemoryCounters.size >= FALLBACK_MAX_IPS) {
+      const firstKey = inMemoryCounters.keys().next().value;
+      if (firstKey !== undefined) inMemoryCounters.delete(firstKey);
+    }
+    entry = { slots: windows.map(() => ({ index: -1, count: 0 })), untilS: 0 };
+  }
+  inMemoryCounters.set(key, entry);
+  const slots = entry.slots;
+  return windows.map((window, i) => {
+    const index = Math.floor(nowS / window.seconds);
+    const slot = slots[i] ?? (slots[i] = { index: -1, count: 0 });
+    if (slot.index !== index) {
+      slot.index = index;
+      slot.count = 0;
+    }
+    slot.count += typeof cost === 'number' ? cost : cost[i];
+    entry.untilS = Math.max(entry.untilS, (index + 1) * window.seconds);
+    return slot.count;
   });
 }
 
-// In-memory fallback when Redis is down (fail-secure)
-const inMemoryCounters = new Map<string, { count: number; resetAt: number }>();
-// Was 10 — below the 15 req/s a single page load actually makes, so a Redis
-// outage would have 429'd every normal user. Aligned with the burst limit.
-const FALLBACK_MAX_PER_SECOND = RATE_LIMITS.BURST_LIMIT.MAX_REQUESTS;
-const FALLBACK_MAX_IPS = 10000;
-
-/** One-second window per key; `maxPerSecond` is the limiter's own burst, `cost` what this request weighs. */
-function checkInMemoryFallback(ip: string, maxPerSecond: number = FALLBACK_MAX_PER_SECOND, cost = 1): boolean {
-  const now = Date.now();
-  const counter = inMemoryCounters.get(ip);
-
-  if (!counter || now > counter.resetAt) {
-    if (cost > maxPerSecond) return false;
-    // Evict oldest if at capacity
-    if (!inMemoryCounters.has(ip) && inMemoryCounters.size >= FALLBACK_MAX_IPS) {
-      const firstKey = inMemoryCounters.keys().next().value;
-      if (firstKey) inMemoryCounters.delete(firstKey);
-    }
-    inMemoryCounters.set(ip, { count: cost, resetAt: now + 1000 });
-    return true;
-  }
-
-  if (counter.count + cost > maxPerSecond) {
-    return false;
-  }
-
-  counter.count += cost;
-  return true;
-}
-
-// Periodic cleanup of stale entries (every 60s)
+// Periodic cleanup: an entry leaves once its longest window has rolled over.
 setInterval(() => {
-  const now = Date.now();
-  for (const [ip, counter] of inMemoryCounters) {
-    if (now > counter.resetAt) {
-      inMemoryCounters.delete(ip);
-    }
+  const nowS = Math.floor(Date.now() / 1000);
+  for (const [key, entry] of inMemoryCounters) {
+    if (entry.untilS <= nowS) inMemoryCounters.delete(key);
   }
 }, 60000).unref();
+
+const MARKET_LIMITS: readonly number[] = [
+  RATE_LIMITS.BURST_LIMIT.MAX_REQUESTS,
+  RATE_LIMITS.MINUTE_LIMIT.MAX_REQUESTS,
+  RATE_LIMITS.HOUR_LIMIT.MAX_REQUESTS,
+];
 
 export const marketRateLimiter = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const ip = req.ip;
@@ -158,42 +204,37 @@ export const marketRateLimiter = async (req: Request, res: Response, next: NextF
     return;
   }
   // An IPv6 host owns a whole /64 and can pick any address in it, so the
-  // budget is per /64 (IPv4 stays per address).
-  const key = rateLimitKeyForIp(ip);
+  // budget is per /64 (IPv4 stays per address); the /48 it sits in is counted too.
+  const prefixes = limiterPrefixes('ratelimit', ip);
 
+  let counts: number[][];
+  let fallback = false;
   try {
     // Vérification multi-niveaux avec Redis
-    const [burstCount, minuteCount, hourCount] = await countRequest(`ratelimit:${key}`, MARKET_WINDOWS);
-
-    // Vérification des limites
-    if (burstCount > RATE_LIMITS.BURST_LIMIT.MAX_REQUESTS) {
-      return sendLimitExceededResponse(res, 'Too many requests per second', RATE_LIMITS.BURST_LIMIT.WINDOW);
-    }
-
-    if (minuteCount > RATE_LIMITS.MINUTE_LIMIT.MAX_REQUESTS) {
-      return sendLimitExceededResponse(res, 'Too many requests per minute', RATE_LIMITS.MINUTE_LIMIT.WINDOW);
-    }
-
-    if (hourCount > RATE_LIMITS.HOUR_LIMIT.MAX_REQUESTS) {
-      return sendLimitExceededResponse(res, 'Too many requests per hour', RATE_LIMITS.HOUR_LIMIT.WINDOW);
-    }
-
-    next();
+    counts = await countRequests(prefixes, MARKET_WINDOWS);
   } catch (error) {
     logDeduplicator.error('Rate limiter Redis error, using in-memory fallback', {
       error: error instanceof Error ? error.message : String(error),
       path: req.path,
       ip: req.ip
     });
-    // Fail-secure: use in-memory fallback instead of letting everything through
-    if (checkInMemoryFallback(key)) {
-      next();
-    } else {
-      // The fallback counts one-second windows.
-      sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
-    }
+    // Fail-secure: the same windows and limits, counted in this process.
+    fallback = true;
+    counts = prefixes.map((prefix) => countInMemory(prefix, MARKET_WINDOWS));
   }
+  const refused = exceeded(counts[0], MARKET_WINDOWS, MARKET_LIMITS) ?? (counts[1] && exceeded(counts[1], MARKET_WINDOWS, MARKET_LIMITS, V6_SITE_FACTOR));
+  if (refused) {
+    return sendLimitExceededResponse(res, fallback ? 'Too many requests (fallback mode)' : `Too many requests per ${windowWord(refused)}`, refused.seconds);
+  }
+  next();
 };
+
+/** The counter prefix of a client under `namespace`, and for IPv6 the one of its /48. */
+function limiterPrefixes(namespace: string, ip: string): string[] {
+  const site = siteKeyForIp(ip);
+  const client = `${namespace}:${rateLimitKeyForIp(ip)}`;
+  return site ? [client, `${namespace}:site:${site}`] : [client];
+}
 
 /** 429 with Retry-After set to the rollover of the window that refused it. */
 function sendLimitExceededResponse(res: Response, message: string, windowSeconds: number): void {
@@ -254,6 +295,7 @@ function createIpLimiter(
     { name: 'burst', seconds: limits.BURST.WINDOW },
     { name: 'minute', seconds: limits.MINUTE.WINDOW },
   ];
+  const maxes: readonly number[] = [limits.BURST.MAX_REQUESTS, limits.MINUTE.MAX_REQUESTS];
   const admit = (req: Request, res: Response, next: NextFunction): Promise<void> | void =>
     options.upstreamCaller ? runWithUpstreamCaller(req, res, next, peekUpstreamBudget) : next();
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -262,22 +304,14 @@ function createIpLimiter(
       res.status(400).json({ error: 'IP address not found', message: 'Could not determine client IP address' });
       return;
     }
-    // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4.
-    const key = rateLimitKeyForIp(ip);
+    // Per /64 for IPv6 (see marketRateLimiter), per address for IPv4; the /48 is counted too.
+    const prefixes = limiterPrefixes(`ratelimit:${namespace}`, ip);
     const weight = options.cost ? Math.max(1, Math.trunc(options.cost(req)) || 1) : 1;
-    const cost = Math.min(limits.BURST.MAX_REQUESTS, weight);
+    const costs = [Math.min(limits.BURST.MAX_REQUESTS, weight), Math.min(limits.MINUTE.MAX_REQUESTS, weight)];
+    let counts: number[][];
+    let fallback = false;
     try {
-      const [burstCount, minuteCount] = await countRequest(`ratelimit:${namespace}:${key}`, windows, [
-        cost,
-        Math.min(limits.MINUTE.MAX_REQUESTS, weight),
-      ]);
-      if (burstCount > limits.BURST.MAX_REQUESTS) {
-        return sendLimitExceededResponse(res, `Too many ${what} requests per second`, limits.BURST.WINDOW);
-      }
-      if (minuteCount > limits.MINUTE.MAX_REQUESTS) {
-        return sendLimitExceededResponse(res, `Too many ${what} requests per minute`, limits.MINUTE.WINDOW);
-      }
-      await admit(req, res, next);
+      counts = await countRequests(prefixes, windows, costs);
     } catch (error) {
       logDeduplicator.error('IP rate limiter Redis error, using in-memory fallback', {
         namespace,
@@ -285,14 +319,15 @@ function createIpLimiter(
         path: req.path,
         ip,
       });
-      // Fail-secure, same as the general limiter, at this limiter's own burst.
-      // Distinct key namespace so the fallbacks don't share a counter.
-      if (checkInMemoryFallback(`${namespace}:${key}`, limits.BURST.MAX_REQUESTS, cost)) {
-        await admit(req, res, next);
-      } else {
-        sendLimitExceededResponse(res, 'Too many requests (fallback mode)', 1);
-      }
+      // Fail-secure, same as the general limiter: this limiter's own windows and limits, in this process.
+      fallback = true;
+      counts = prefixes.map((prefix) => countInMemory(prefix, windows, costs));
     }
+    const refused = exceeded(counts[0], windows, maxes) ?? (counts[1] && exceeded(counts[1], windows, maxes, V6_SITE_FACTOR));
+    if (refused) {
+      return sendLimitExceededResponse(res, fallback ? 'Too many requests (fallback mode)' : `Too many ${what} requests per ${windowWord(refused)}`, refused.seconds);
+    }
+    await admit(req, res, next);
   };
 }
 
