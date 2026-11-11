@@ -13,6 +13,8 @@ class FakeSocket extends EventEmitter {
   public sent: string[] = [];
   public terminated = false;
   public closed = false;
+  /** As the real socket does: 'close' comes later, not from inside close(). */
+  public closesLater = false;
   constructor(
     public readonly url: string,
     public readonly options: { handshakeTimeout?: number }
@@ -29,7 +31,7 @@ class FakeSocket extends EventEmitter {
   }
   close(): void {
     this.closed = true;
-    this.emit('close');
+    if (!this.closesLater) this.emit('close');
   }
   block(n: number): void {
     this.emit('message', Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: 'eth_subscription', params: { result: { number: `0x${n.toString(16)}`, timestamp: '0x1', gasUsed: '0x2', gasLimit: '0x3' } } })));
@@ -127,7 +129,7 @@ describe('ElysiumLiveService', () => {
     expect(waits).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
   });
 
-  it('starts the wait over once a block has arrived', async () => {
+  it('starts the wait over once a socket has given blocks for 30 seconds', async () => {
     svc.start();
     for (let i = 0; i < 4; i++) {
       last().emit('open');
@@ -136,13 +138,57 @@ describe('ElysiumLiveService', () => {
       while (mockSockets.length === before) await jest.advanceTimersByTimeAsync(500);
     }
     // This one works for a while, then drops.
-    last().emit('open');
-    last().block(7);
+    const working = last();
+    working.emit('open');
+    for (let s = 0; s < 31; s++) {
+      working.block(7 + s);
+      await jest.advanceTimersByTimeAsync(1_000);
+    }
+    working.block(99);
     const dropped = Date.now();
-    last().emit('close');
+    working.emit('close');
     const before = mockSockets.length;
     while (mockSockets.length === before) await jest.advanceTimersByTimeAsync(500);
     expect(Date.now() - dropped).toBe(1_000);
+  });
+
+  it('a node that gives one block and closes, every time, is not reconnected to every second either', async () => {
+    svc.start();
+    const waits: number[] = [];
+    let at = Date.now();
+    for (let i = 0; i < 5; i++) {
+      const socket = last();
+      socket.emit('open');
+      socket.block(i);
+      socket.emit('close');
+      const before = mockSockets.length;
+      while (mockSockets.length === before) await jest.advanceTimersByTimeAsync(500);
+      waits.push(Date.now() - at);
+      at = Date.now();
+    }
+    expect(waits).toEqual([1_000, 2_000, 4_000, 8_000, 16_000]);
+  });
+
+  it('the late close of a socket let go of by a stop does not undo the socket opened since', async () => {
+    svc.start();
+    const first = last();
+    first.closesLater = true;
+    first.emit('open');
+    svc.stop();
+    svc.start();
+    const second = last();
+    expect(second).not.toBe(first);
+    second.emit('open');
+    // The first socket's 'close' arrives now, and one last frame of it with it.
+    first.block(1);
+    first.emit('close');
+    await jest.advanceTimersByTimeAsync(5_000);
+    // No third socket was opened for it.
+    expect(mockSockets).toHaveLength(2);
+    // And the second one is still watched: silent for 15 seconds, it is closed and replaced.
+    await jest.advanceTimersByTimeAsync(16_000);
+    expect(second.terminated).toBe(true);
+    expect(mockSockets).toHaveLength(3);
   });
 
   it('spreads the reconnections between 80% and 120% of the wait', async () => {

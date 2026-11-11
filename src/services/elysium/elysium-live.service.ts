@@ -27,8 +27,9 @@ type BlocksListener = (blocks: ElysiumLiveBlock[]) => void;
  * limit, the node's answer to the subscription is read, and a socket that
  * gives no block for SILENCE_MS is closed and opened again. Before, it could
  * stay open and silent until the next restart, with nothing to see. The
- * backoff starts over when a block arrives, not when the socket opens: a node
- * that accepts and then closes was reconnected to every second, for ever.
+ * backoff starts over once a socket has given blocks for a while, not when it
+ * opens nor at its first block: a node that accepts and then closes (or gives
+ * one block and closes) was reconnected to every second, for ever.
  */
 export class ElysiumLiveService {
   private static instance: ElysiumLiveService;
@@ -43,6 +44,8 @@ export class ElysiumLiveService {
   private watchdog: NodeJS.Timeout | null = null;
   /** When the current socket last gave a block (or was opened). */
   private lastBlockAt = 0;
+  /** When the current socket was opened. */
+  private openedAt = 0;
 
   /** One push per second: ~9 blocks batched, not 9 messages. */
   private readonly FLUSH_MS = 1000;
@@ -53,6 +56,8 @@ export class ElysiumLiveService {
   private readonly HANDSHAKE_TIMEOUT_MS = 10_000;
   /** No block for this long on an open socket: it is closed and opened again (the chain makes ~9 blocks a second). */
   private readonly SILENCE_MS = 15_000;
+  /** A socket that has given blocks for this long works: the next reconnection starts from the short wait again. */
+  private readonly HEALTHY_MS = 30_000;
 
   public static getInstance(): ElysiumLiveService {
     if (!ElysiumLiveService.instance) {
@@ -104,6 +109,8 @@ export class ElysiumLiveService {
     this.ws = ws;
 
     ws.on('open', () => {
+      // A socket this service has let go of (stopped, then started again) is not its socket any more.
+      if (this.ws !== ws) return;
       try {
         ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_subscribe', params: ['newHeads'] }));
       } catch {
@@ -120,7 +127,10 @@ export class ElysiumLiveService {
       });
     });
     ws.on('close', () => {
-      if (this.ws === ws) this.ws = null;
+      // The 'close' of a socket let go of earlier can arrive after another one was opened: it
+      // must neither stop that one's watchdog nor open a third.
+      if (this.ws !== ws) return;
+      this.ws = null;
       this.unwatch();
       if (!this.stopped) this.scheduleReconnect();
     });
@@ -130,6 +140,7 @@ export class ElysiumLiveService {
   private watch(ws: WebSocket): void {
     this.unwatch();
     this.lastBlockAt = Date.now();
+    this.openedAt = this.lastBlockAt;
     this.watchdog = setInterval(() => {
       if (Date.now() - this.lastBlockAt < this.SILENCE_MS) return;
       logDeduplicator.warn('ElysiumLiveService: no block on an open socket, reconnecting', {
@@ -155,6 +166,7 @@ export class ElysiumLiveService {
   }
 
   private onMessage(ws: WebSocket, raw: string): void {
+    if (this.ws !== ws) return;
     try {
       const msg = JSON.parse(raw) as {
         id?: number;
@@ -173,9 +185,9 @@ export class ElysiumLiveService {
       if (!h?.number) return;
       const number = parseInt(h.number, 16);
       if (!Number.isFinite(number)) return;
-      // A block: the stream works, so the next reconnection starts from the short wait again.
       this.lastBlockAt = Date.now();
-      this.reconnectAttempts = 0;
+      // Blocks for a while: the stream works, so the next reconnection starts from the short wait again.
+      if (this.lastBlockAt - this.openedAt >= this.HEALTHY_MS) this.reconnectAttempts = 0;
       this.pending.set(number, {
         number,
         timestamp: parseInt(h.timestamp ?? '0x0', 16) || 0,
