@@ -15,6 +15,13 @@ const LAUNCH_MARKET_KEYS_PER_QUERY = 5_000;
 /** Time limit of a rebuild of the launch market state (the one-time fill reads every trade). */
 const REBUILD_TIMEOUT_MS = 600_000;
 
+/**
+ * Limits of the transaction that inserts a page of launch trades. Prisma's own are 2 s to get a
+ * connection and 5 s in all: a page that waits for a rebuild of its launches' state, or for a
+ * connection of a busy pool, must not fail on them.
+ */
+const INSERT_TRADES_LIMITS = { timeout: 60_000, maxWait: 15_000 };
+
 /** Constant SQL list of the bridge tx types (no user input involved). */
 const BRIDGE_TYPES_SQL = BRIDGE_TX_TYPES.map((t) => `'${t}'`).join(', ');
 
@@ -240,7 +247,8 @@ export class ElysiumIngestRepository {
        WHERE direction = 'deposit' AND status IN ('initiated', 'ticket_created', 'redeem_failed')
          AND initiated_at < now() - make_interval(secs => $1::int)
          AND initiated_at >= now() - make_interval(secs => $2::int)
-         AND COALESCE(l1_tx_hash, l2_tx_hash) IS NOT NULL
+         -- A hash stored before hashes were checked for their shape cannot be asked for.
+         AND COALESCE(l1_tx_hash, l2_tx_hash) ~ '^0x[0-9a-f]{64}$'
        ORDER BY initiated_at, transfer_id
        LIMIT $3::int OFFSET $4::int`,
       minAgeS,
@@ -248,6 +256,19 @@ export class ElysiumIngestRepository {
       limit,
       offset
     );
+  }
+
+  /**
+   * When the newest bridge transfer we hold began: the bridge stream's cursor (the data's own
+   * time). Read through the index on initiated_at, and returned as epoch so that the session's
+   * time zone cannot shift it.
+   */
+  public async newestBridgeTransferAt(): Promise<Date | null> {
+    const rows = await prismaHistorical.$queryRawUnsafe<Array<{ ms: number | null }>>(
+      `SELECT (extract(epoch FROM max(initiated_at)) * 1000)::float8 AS ms FROM elysium_bridge_transfer`
+    );
+    const ms = rows[0]?.ms;
+    return ms === null || ms === undefined ? null : new Date(Number(ms));
   }
 
   /**
@@ -661,7 +682,7 @@ export class ElysiumIngestRepository {
         JSON.stringify(rows)
       );
       return result[0]?.n ?? 0;
-    });
+    }, INSERT_TRADES_LIMITS);
   }
 
   /**
@@ -706,11 +727,13 @@ export class ElysiumIngestRepository {
             -- A trade without a price (0) is never a launch's last price.
             SELECT s.token, x.price, x.block_number, x.log_index
             FROM scope s
-            CROSS JOIN LATERAL (
+            -- LEFT: a launch whose trades all lack a price has no last price, and still has what
+            -- its curve sold (a launch without any trade ends as it is, nothing to write).
+            LEFT JOIN LATERAL (
               SELECT tr.price, tr.block_number, tr.log_index FROM elysium_launch_trade tr
               WHERE tr.token = s.token AND tr.price > 0
               ORDER BY tr.block_time DESC, tr.block_number DESC, tr.log_index DESC LIMIT 1
-            ) x
+            ) x ON true
           ),
           sold AS (
             SELECT tr.token, sum(CASE WHEN tr.is_buy THEN tr.token_amount ELSE -tr.token_amount END) AS sold
@@ -758,7 +781,9 @@ export class ElysiumIngestRepository {
     activeMaxAgeS: number,
     quietMaxAgeS: number,
     /** Tokens to leave out of this batch (their figures could not be read a moment ago). */
-    exclude: string[] = []
+    exclude: string[] = [],
+    /** Only launches created up to this time (what the provider has indexed, while it lags); null for all. */
+    createdUpTo: Date | null = null
   ): Promise<LaunchStatsTarget[]> {
     return prismaHistorical.$queryRawUnsafe<LaunchStatsTarget[]>(
       `
@@ -766,6 +791,7 @@ export class ElysiumIngestRepository {
         SELECT * FROM (
           (SELECT l.token, 0 AS pri, -extract(epoch FROM l.created_at) AS ord
            FROM elysium_launch l WHERE l.stats_at IS NULL AND l.token <> ALL($5::text[])
+             AND ($6::timestamptz IS NULL OR l.created_at <= $6::timestamptz)
            ORDER BY l.created_at DESC LIMIT $2::int)
           UNION ALL
           (SELECT l.token, 1 AS pri, extract(epoch FROM l.stats_at) AS ord
@@ -773,6 +799,7 @@ export class ElysiumIngestRepository {
                  WHERE block_time >= now() - interval '24 hours') a
            JOIN elysium_launch l ON l.token = a.token
            WHERE l.stats_at < now() - make_interval(secs => $3::int) AND l.token <> ALL($5::text[])
+             AND ($6::timestamptz IS NULL OR l.created_at <= $6::timestamptz)
            ORDER BY l.stats_at LIMIT $2::int)
         ) p ORDER BY pri, ord LIMIT $2::int
       ),
@@ -782,6 +809,7 @@ export class ElysiumIngestRepository {
         (SELECT l.token, 2 AS pri, extract(epoch FROM l.stats_at) AS ord
          FROM elysium_launch l
          WHERE l.stats_at < now() - make_interval(secs => $4::int) AND l.token <> ALL($5::text[])
+           AND ($6::timestamptz IS NULL OR l.created_at <= $6::timestamptz)
          ORDER BY l.stats_at LIMIT $1::int)
       ),
       best AS (SELECT DISTINCT ON (token) token, pri, ord FROM picks ORDER BY token, pri)
@@ -797,7 +825,8 @@ export class ElysiumIngestRepository {
       priority,
       activeMaxAgeS,
       quietMaxAgeS,
-      exclude
+      exclude,
+      createdUpTo ? createdUpTo.toISOString() : null
     );
   }
 

@@ -1,8 +1,9 @@
 /**
  * The bridge stream (2026-11-11):
- * - its cursor is what the provider has indexed, not the time of the run, and what lies between
- *   the cursor and the live window is read before anything else: after a provider outage longer
- *   than the 26 h window, the transfers begun in between were never read;
+ * - its cursor is the time of the newest transfer it holds, not the time of the run, and what
+ *   lies between that transfer and the live window is read first: after an outage of the
+ *   provider's bridge feed longer than the 26 h window, the transfers begun in between were
+ *   never read;
  * - withdrawals executed more than 8 days after their request were never updated (one in ten):
  *   each wide run reads one more day of older executed withdrawals, walking back 90 days;
  * - a deposit still waiting for its ticket after 26 h is read again by its hash.
@@ -47,6 +48,8 @@ describe('Elysium ingestion: bridge stream', () => {
   let fetchPage: jest.SpyInstance;
   let advance: jest.SpyInstance;
   let openDeposits: jest.SpyInstance;
+  /** When the newest transfer in elysium_bridge_transfer began; null for an empty table. */
+  let newest: number | null;
   let states: Record<string, { cursor: number | null; rows?: number; backfillDone?: boolean } | undefined>;
   const queries = (): Query[] => fetchPage.mock.calls.map((c) => c[1] as Query);
   const plain = (): Query[] => queries().filter((q) => !q.status);
@@ -68,6 +71,9 @@ describe('Elysium ingestion: bridge stream', () => {
     advance = jest.spyOn(repo, 'advance').mockResolvedValue(undefined);
     jest.spyOn(repo, 'upsertBridgeTransfers').mockImplementation(async (rows) => rows.length);
     openDeposits = jest.spyOn(repo, 'listOpenDeposits').mockResolvedValue([]);
+    // The feed is alive: its newest transfer began 20 s ago.
+    newest = NOW - 20_000;
+    jest.spyOn(repo, 'newestBridgeTransferAt').mockImplementation(async () => (newest === null ? null : new Date(newest)));
     states = { bridge: { cursor: NOW - MIN, backfillDone: true } };
     jest.spyOn(repo, 'getState').mockImplementation(async (stream) => {
       const s = states[stream];
@@ -78,79 +84,61 @@ describe('Elysium ingestion: bridge stream', () => {
   afterEach(() => jest.restoreAllMocks());
 
   describe('the cursor and the live window', () => {
-    it('a run a minute after the last one reads the last 15 minutes, once, and moves the cursor to now', async () => {
+    it('a run a minute after the last one reads the last 15 minutes, once, and its cursor is the newest transfer held', async () => {
       narrow();
       await svc.bridgeTick();
       expect(queries()).toEqual([{ start_time: iso(NOW - 15 * MIN), end_time: iso(NOW), limit: 1000, offset: 0 }]);
-      expect(cursors()).toEqual([NOW]);
+      expect(cursors()).toEqual([NOW - 20_000]);
     });
 
-    it('while the provider lags, the cursor is its head, not the clock', async () => {
+    it('the cursor is the data’s time, not the run’s: while the feed stands still it stays at its last transfer', async () => {
       narrow();
-      const head = NOW - 2 * HOUR;
-      fetchHead.mockResolvedValue(new Date(head));
+      newest = NOW - 2 * HOUR;
+      // The cursor stored by the previous release was the time of its last run.
+      states.bridge = { cursor: NOW - MIN, backfillDone: true };
 
       await svc.bridgeTick();
 
-      // Nothing of the last 15 minutes is indexed: not read. The cursor comes back to the head.
-      expect(queries()).toEqual([]);
-      expect(cursors()).toEqual([head]);
+      expect(cursors()).toEqual([NOW - 2 * HOUR]);
+      // The live window is read as always; nothing else between two 15-minute runs.
+      expect(plain().map((q) => [q.start_time, q.end_time])).toEqual([[iso(NOW - 15 * MIN), iso(NOW)]]);
     });
 
-    it('during a stall, reads the 15 minutes before the head once, not on every run', async () => {
-      narrow();
-      const head = NOW - 2 * HOUR;
-      fetchHead.mockResolvedValue(new Date(head));
-      states.bridge = { cursor: head, backfillDone: true };
-
-      await svc.bridgeTick();
-      expect(plain().map((q) => [q.start_time, q.end_time])).toEqual([[iso(head - 15 * MIN), iso(head)]]);
-
-      fetchPage.mockClear();
-      clock += MIN;
-      svc.head = null;
+    it('does not depend on the head of the provider’s transaction index (its bridge feed has stopped on its own before)', async () => {
       narrow();
       await svc.bridgeTick();
-      expect(queries()).toEqual([]);
-      expect(cursors().every((c) => c === head)).toBe(true);
+      expect(fetchHead).not.toHaveBeenCalled();
     });
 
-    it('when the provider moves on, reads what it indexed since, from the cursor', async () => {
-      narrow();
-      const stalledAt = NOW - 30 * HOUR;
-      const head = NOW - 20 * HOUR;
-      fetchHead.mockResolvedValue(new Date(head));
-      states.bridge = { cursor: stalledAt, backfillDone: true };
-
-      await svc.bridgeTick();
-
-      expect(plain().map((q) => [q.start_time, q.end_time])).toEqual([
-        [iso(stalledAt - 15 * MIN), iso(stalledAt - 15 * MIN + 6 * HOUR)],
-        [iso(stalledAt - 15 * MIN + 6 * HOUR), iso(head)],
-      ]);
-      expect(cursors()).toEqual([stalledAt - 15 * MIN + 6 * HOUR, head, head]);
-    });
-
-    it('after 3 days without a run, reads the whole gap in 6 h steps before the 26 h window (it used to read the 26 h only)', async () => {
+    it('a feed that stood still for 3 days: each 15-minute run reads from its last transfer to the 26 h window, in 6 h steps, then the window', async () => {
       const last = NOW - 3 * DAY;
-      states.bridge = { cursor: last, backfillDone: true };
+      newest = last;
 
       await svc.bridgeTick();
 
       const steps = plain().map((q) => [Date.parse(`${q.start_time}Z`), Date.parse(`${q.end_time}Z`)]);
       const live = steps.pop() as number[];
       expect(live).toEqual([NOW - 26 * HOUR, NOW]);
-      // The gap: from 15 minutes before the cursor to the start of the 26 h window, without a hole.
+      // From 15 minutes before the last transfer to the start of the 26 h window, without a hole.
       expect(steps[0][0]).toBe(last - 15 * MIN);
       expect(steps[steps.length - 1][1]).toBe(NOW - 26 * HOUR);
       for (let i = 1; i < steps.length; i++) expect(steps[i][0]).toBe(steps[i - 1][1]);
       expect(steps.every(([a, b]) => b - a <= 6 * HOUR)).toBe(true);
-      expect(cursors()[cursors().length - 1]).toBe(NOW);
     });
 
-    it('out of time in the middle of a gap: stops there, says so with its cursor, and asks to run again at once', async () => {
-      narrow();
-      states.bridge = { cursor: NOW - 10 * DAY, backfillDone: true };
+    it('once the feed is back and its transfers are stored, the cursor follows and the gap is read no more', async () => {
+      newest = NOW - 3 * DAY;
+      await svc.bridgeTick();
+      // The transfers of the three days are in: the newest is seconds old again.
+      newest = NOW + 14 * MIN;
+      clock += 15 * MIN;
+      fetchPage.mockClear();
+      await svc.bridgeTick();
+      expect(plain().map((q) => [q.start_time, q.end_time])).toEqual([[iso(clock - 26 * HOUR), iso(clock)]]);
+    });
+
+    it('out of time in the middle of a gap: asks to run again at once, and goes on from where it stopped', async () => {
+      newest = NOW - 10 * DAY;
       // Each window read takes 15 s of the 40 s a run may take.
       fetchPage.mockImplementation(async () => {
         clock += 15_000;
@@ -158,11 +146,22 @@ describe('Elysium ingestion: bridge stream', () => {
       });
 
       expect(await svc.bridgeTick()).toBe(0);
-
       const from = NOW - 10 * DAY - 15 * MIN;
-      expect(cursors()).toEqual([from + 6 * HOUR, from + 12 * HOUR, from + 18 * HOUR]);
-      // No live read on this run: the gap comes first.
-      expect(plain()).toHaveLength(3);
+      expect(plain().map((q) => q.start_time)).toEqual([iso(from), iso(from + 6 * HOUR), iso(from + 12 * HOUR)]);
+
+      // The next run is not a 15-minute one (the sweeps did not run yet, so it still is wide here): it goes on.
+      fetchPage.mockClear();
+      await svc.bridgeTick();
+      expect(plain()[0].start_time).toBe(iso(from + 18 * HOUR));
+    });
+
+    it('an empty table has no gap to read: the live window only', async () => {
+      narrow();
+      newest = null;
+      await svc.bridgeTick();
+      expect(plain()).toHaveLength(1);
+      // Nothing held: no cursor to publish.
+      expect(advance).toHaveBeenCalledWith('bridge', { addRows: 0 });
     });
   });
 
@@ -204,10 +203,11 @@ describe('Elysium ingestion: bridge stream', () => {
 
     it('never walks back more than 90 days, however old the chain', async () => {
       clock = Date.parse('2027-06-01T00:00:00Z');
-      states.bridge = { cursor: clock - MIN, backfillDone: true };
+      newest = clock - 20_000;
       states.bridgedeep = { cursor: clock - 15 * MIN, rows: 89 };
       await svc.bridgeTick();
       expect(executed()[1]).toMatchObject({ start_time: iso(clock - 90 * DAY), end_time: iso(clock - 89 * DAY) });
+
       expect(advance).toHaveBeenCalledWith('bridgedeep', { cursor: new Date(clock), setRows: 8, backfillDone: true });
     });
 
@@ -243,15 +243,31 @@ describe('Elysium ingestion: bridge stream', () => {
         { transfer_id: 'd:1', tx_hash: HASH('a') },
         { transfer_id: 'd:2', tx_hash: HASH('b') },
       ]);
-      byHash.mockRejectedValueOnce(new Error('API error: 404')).mockResolvedValueOnce([transfer('d:2', 'expired')]);
+      byHash.mockRejectedValueOnce(new Error('API error: 500')).mockResolvedValueOnce([transfer('d:2', 'expired')]);
 
       await svc.bridgeTick();
 
       expect(repo.upsertBridgeTransfers).toHaveBeenCalledWith([expect.objectContaining({ transfer_id: 'd:2', status: 'expired' })]);
       expect(svc.rejects.take()).toEqual([
-        { stream: 'bridge', reason: 'transfer-unreadable', count: 1, sample: 'd:1 API error: 404' },
+        { stream: 'bridge', reason: 'transfer-unreadable', count: 1, sample: 'd:1 API error: 500' },
       ]);
-      expect(cursors()).toEqual([NOW]);
+      expect(cursors()).toEqual([NOW - 20_000]);
+    });
+
+    it('never fails the pass: after three that cannot be read in a row it stops asking, records the run, and starts after them next time', async () => {
+      const batch = Array.from({ length: 6 }, (_, i) => ({ transfer_id: `d:${i}`, tx_hash: HASH('a') }));
+      openDeposits.mockResolvedValue(batch);
+      byHash.mockRejectedValue(new Error('API error: 503'));
+
+      await expect(svc.bridgeTick()).resolves.toBe(MIN);
+
+      expect(byHash).toHaveBeenCalledTimes(3);
+      expect(cursors()).toEqual([NOW - 20_000]);
+      expect(svc.lastBridgeWideAt).toBe(NOW);
+      // The next sweep does not start with the same three.
+      svc.lastBridgeWideAt = 0;
+      await svc.bridgeTick();
+      expect(openDeposits).toHaveBeenLastCalledWith(26 * 3600, 10 * 24 * 3600, 25, 3);
     });
 
     it('walks through them when there are more than a sweep reads, then starts over', async () => {

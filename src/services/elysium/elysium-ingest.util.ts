@@ -127,9 +127,10 @@ export function address(v: unknown): string | null {
   return s && ADDRESS.test(s) ? s : null;
 }
 
-/** True when a field that may be absent is either absent or of the right shape. */
+/** True when a field that may be absent is either absent (null, empty, or a bare "0x") or of the right shape. */
 function absentOr(v: unknown, parsed: string | null): boolean {
-  return parsed !== null || v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
+  if (parsed !== null || v === null || v === undefined) return true;
+  return typeof v === 'string' && (v.trim() === '' || v.trim().toLowerCase() === '0x');
 }
 
 function int(v: unknown): number | null {
@@ -179,6 +180,18 @@ export function scaleRawAmount(raw: unknown, decimals: number | null): string | 
 }
 
 /**
+ * `raw / 10^decimals` for a token whose `decimals` comes from outside. No decimals given: the
+ * raw amount as it is, as before. A decimals that is given and is not one a token can have:
+ * null, because the amount cannot be known (scaled by nothing it would be stored 10^18 too big).
+ */
+export function scaleTokenAmount(raw: unknown, decimals: unknown): string | null {
+  const given = decimals !== null && decimals !== undefined && decimals !== '';
+  const dec = tokenDecimals(decimals);
+  if (given && dec === null) return null;
+  return scaleRawAmount(raw, dec);
+}
+
+/**
  * Arbitrum bridge-driven tx types (deposit, submit retryable, retry). They are
  * ingested (fees, ArbRetryableTx calls) but sent from aliased L1 addresses, so
  * the user tables (active/new/retention) leave them out, like the provider's
@@ -216,7 +229,8 @@ export function normalizeTx(raw: unknown): TxRow | null {
   const to = address(t.to_addr);
   const created = address(t.contract_address);
   if (!absentOr(t.to_addr, to) || !absentOr(t.contract_address, created)) return null;
-  const gasUsed = t.gas_used === null || t.gas_used === undefined ? '0' : int8String(t.gas_used);
+  // Not there yet (the receipt comes later) is 0, as before; there and not a number is not a row.
+  const gasUsed = t.gas_used === null || t.gas_used === undefined || t.gas_used === '' ? '0' : int8String(t.gas_used);
   const price = bigintString(t.effective_gas_price) ?? '0';
   if (gasUsed === null) return null;
   const fee = (BigInt(gasUsed) * BigInt(price)).toString();
@@ -273,7 +287,7 @@ export function normalizeBridgeTransfer(raw: unknown, onCut?: (field: string, va
   if (!id || id.length > 80 || storableText(id) !== id || !initiated) return null;
   const label = (field: string, max: number): string => boundedText(b[field], max, (v) => onCut?.(field, v)) ?? 'unknown';
   const decimals = tokenDecimals(b.decimals);
-  let amount = scaleRawAmount(b.amount_raw, decimals);
+  let amount = scaleTokenAmount(b.amount_raw, b.decimals);
   if (amount === null && typeof b.amount === 'number' && Number.isFinite(b.amount) && Math.abs(b.amount) < 1e60) {
     amount = String(b.amount);
   }

@@ -44,7 +44,8 @@ describe('Elysium ingestion: what it asks the provider', () => {
     svc.stopped = false;
     svc.throttle = { wait: async () => undefined };
     jest.spyOn(Date, 'now').mockReturnValue(NOW);
-    fetchHead = jest.spyOn(client, 'fetchIngestHead');
+    // The provider is current unless a test says otherwise (and no test reaches the network).
+    fetchHead = jest.spyOn(client, 'fetchIngestHead').mockResolvedValue(new Date(NOW - 5_000));
     fetchPage = jest.spyOn(client, 'fetchIngestPage').mockResolvedValue({ rows: [], hasMore: false });
     advance = jest.spyOn(repo, 'advance').mockResolvedValue(undefined);
     getState = jest.spyOn(repo, 'getState');
@@ -196,6 +197,6 @@ describe('Elysium ingestion: what it asks the provider', () => {
   it('holder stats: asks for a batch of 60, 40 of them for the new and the traded launches', async () => {
     const list = jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([]);
     await svc.launchStatsTick();
-    expect(list).toHaveBeenCalledWith(60, 40, 30 * 60, 14 * 60, []);
+    expect(list).toHaveBeenCalledWith(60, 40, 30 * 60, 14 * 60, [], null);
   });
 });

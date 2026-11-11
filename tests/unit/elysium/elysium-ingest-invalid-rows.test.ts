@@ -97,7 +97,19 @@ describe('provider rows', () => {
       l1_tx_hash: `${HASH('a')}00`,
       l2_tx_hash: HASH('b'),
     });
-    expect(row).toMatchObject({ transfer_id: 'w:9', decimals: null, amount: '5', from_addr: null, l1_tx_hash: null, l2_tx_hash: HASH('b') });
+    // An amount that cannot be scaled (a decimals no token has) and no usable figure beside it: unknown, not raw.
+    expect(row).toMatchObject({ transfer_id: 'w:9', decimals: null, amount: null, from_addr: null, l1_tx_hash: null, l2_tx_hash: HASH('b') });
+  });
+
+  it('never stores a raw amount as if it had no decimals when the decimals given is not one a token has', () => {
+    const base = { transfer_id: 'd:5', initiated_time: '2026-11-11T10:00:00', amount_raw: '1000000000000000000' };
+    // 1 token stored as 10^18 tokens would have been the result.
+    expect(normalizeBridgeTransfer({ ...base, decimals: 300 })?.amount).toBeNull();
+    // The provider's own scaled figure is used when it gives one.
+    expect(normalizeBridgeTransfer({ ...base, decimals: 300, amount: 1 })?.amount).toBe('1');
+    expect(normalizeBridgeTransfer({ ...base, decimals: 18 })?.amount).toBe('1');
+    // No decimals given at all: the raw amount, as before.
+    expect(normalizeBridgeTransfer({ ...base })?.amount).toBe('1000000000000000000');
   });
 
   it('leaves out a bridge transfer whose id would have to be cleaned or cut', () => {
@@ -133,6 +145,13 @@ describe('provider rows', () => {
       fee_wei: '42000',
     });
     expect(normalizeTx(tx({ to_addr: null, contract_address: ADDR('c') }))).toMatchObject({ to_addr: null, contract_address: ADDR('c') });
+  });
+
+  it('takes a gas that is not there yet, and a target written as a bare 0x, as the provider may send them', () => {
+    expect(normalizeTx(tx({ gas_used: '' }))).toMatchObject({ gas_used: '0', fee_wei: '0' });
+    expect(normalizeTx(tx({ gas_used: null }))).toMatchObject({ gas_used: '0' });
+    // A contract creation whose target is "0x": kept, as a creation.
+    expect(normalizeTx(tx({ to_addr: '0x', contract_address: ADDR('c') }))).toMatchObject({ to_addr: null, contract_address: ADDR('c') });
   });
 
   it('leaves out a transaction whose hash, target or numbers would not fit their columns', () => {
@@ -263,6 +282,20 @@ describe('Elysium ingestion: a refused row is set aside', () => {
     expect(db.stored.sort((a, b) => a - b)).toEqual(page.filter((r) => r !== 637));
     expect(statements).toBeLessThanOrEqual(21);
     expect(svc.rejects.take()).toEqual([{ stream: 'tokens', reason: 'row-refused', count: 1, sample: '22001 row 637' }]);
+  });
+
+  it('does not search again for a row it set aside when the same rows come back (a window read again)', async () => {
+    const db = database(new Set([637]));
+    await svc.writeRows('tokens', page, db.write, (r) => `row ${r}`);
+    svc.rejects.take();
+    statements = 0;
+
+    expect(await svc.writeRows('tokens', page, db.write, (r) => `row ${r}`)).toBe(999);
+    expect(statements).toBe(1);
+    expect(svc.rejects.take()).toEqual([]);
+    // The same key in another stream is another row.
+    await svc.writeRows('bridge', page, db.write, (r) => `row ${r}`);
+    expect(svc.rejects.take()).toEqual([expect.objectContaining({ stream: 'bridge', count: 1 })]);
   });
 
   it('sets several refused rows aside', async () => {

@@ -11,6 +11,11 @@
  *
  * Counts are gathered in memory while a tick runs and written once it ends
  * (one small statement), so counting costs the streams nothing.
+ *
+ * The streams read the same rows more than once on purpose (a window starts
+ * before its cursor, the bridge re-reads a day of transfers every 15 minutes,
+ * a failed tick is run again): a reject noted with the key of its row is
+ * counted the first time that key is seen by this process, and not again.
  */
 export type RejectReason =
   /** A provider row without the fields a row needs (hash, sender, time, block). */
@@ -47,13 +52,29 @@ export interface RejectCount {
 }
 
 const SAMPLE_MAX = 400;
+/** Row keys remembered as already counted (the oldest is forgotten first). */
+const SEEN_MAX = 20_000;
 
 export class IngestRejects {
   private pending = new Map<string, RejectCount>();
+  private readonly seen = new Map<string, true>();
 
-  /** Counts `count` rows of `stream` left out for `reason`; the first sample of a batch is kept. */
-  public note(stream: string, reason: RejectReason, sample?: string | null, count = 1): void {
+  /**
+   * Counts `count` rows of `stream` left out for `reason`; the first sample of a batch is kept.
+   * With `rowKey` (what identifies the row: a hash, an id, a window), a row already counted for
+   * this reason is not counted again.
+   */
+  public note(stream: string, reason: RejectReason, sample?: string | null, count = 1, rowKey?: string): void {
     if (count <= 0) return;
+    if (rowKey !== undefined) {
+      const seenKey = `${stream}|${reason}|${rowKey}`;
+      if (this.seen.has(seenKey)) return;
+      if (this.seen.size >= SEEN_MAX) {
+        const oldest = this.seen.keys().next().value;
+        if (oldest !== undefined) this.seen.delete(oldest);
+      }
+      this.seen.set(seenKey, true);
+    }
     const key = `${stream}|${reason}`;
     const entry = this.pending.get(key);
     if (entry) {

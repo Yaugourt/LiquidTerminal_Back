@@ -17,6 +17,9 @@ function buildQuery(record: Record<string, QueryValue>): string {
   return s ? `?${s}` : '';
 }
 
+/** What ingestLookup resolves to on the provider's 404. */
+const NOT_FOUND = Symbol('not found');
+
 /** Upstream path prefix for the Elysium testnet API (the ingestion only reads testnet). */
 const ELYSIUM_PREFIX = '/elysium/testnet';
 
@@ -238,24 +241,43 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
     return Number.isNaN(d.getTime()) ? null : d;
   }
 
-  /** Single token detail (holders, supply) for the ingestion service. */
-  public async fetchIngestToken(address: string): Promise<Record<string, unknown>> {
+  /**
+   * A lookup of one thing by its key (a token, a transaction, a transfer), for the ingestion
+   * service: the payload, or NOT_FOUND on the provider's 404. That 404 is an answer about the
+   * thing, not a failure of the provider: it is read inside the breaker, so that asking about
+   * tokens or transactions the provider does not have never opens it for every stream
+   * (5 failures in a row open it for 30 s, and any thrown error counts as one).
+   */
+  private ingestLookup(endpoint: string): Promise<unknown> {
+    return this.ingestCircuitBreaker.execute(async () => {
+      try {
+        return unwrapHypeDexerApiPayload(await this.get<unknown>(endpoint));
+      } catch (error) {
+        if (error instanceof HttpApiError && error.statusCode === 404) return NOT_FOUND;
+        throw error;
+      }
+    });
+  }
+
+  /** Single token detail (holders, supply) for the ingestion service; null when the provider does not know the token. */
+  public async fetchIngestToken(address: string): Promise<Record<string, unknown> | null> {
     if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error('Elysium ingest: invalid token address');
-    const data = await this.ingestCircuitBreaker.execute(() =>
-      this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}/tokens/${address}`)
-    );
+    const data = await this.ingestLookup(`${ELYSIUM_PREFIX}/tokens/${address}`);
+    if (data === NOT_FOUND) return null;
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
       throw new Error('Elysium ingest: expected a token object');
     }
     return data as Record<string, unknown>;
   }
 
-  /** Largest holders of a token, by balance (share is 0..1 of supply), for the ingestion service. */
-  public async fetchIngestTokenHolders(address: string, limit: number): Promise<unknown[]> {
+  /**
+   * Largest holders of a token, by balance (share is 0..1 of supply), for the ingestion service;
+   * null when the provider does not know the token.
+   */
+  public async fetchIngestTokenHolders(address: string, limit: number): Promise<unknown[] | null> {
     if (!/^0x[0-9a-f]{40}$/.test(address)) throw new Error('Elysium ingest: invalid token address');
-    const data = await this.ingestCircuitBreaker.execute(() =>
-      this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}/tokens/${address}/holders${buildQuery({ limit, offset: 0 })}`)
-    );
+    const data = await this.ingestLookup(`${ELYSIUM_PREFIX}/tokens/${address}/holders${buildQuery({ limit, offset: 0 })}`);
+    if (data === NOT_FOUND) return null;
     if (!Array.isArray(data)) throw new Error('Elysium ingest: expected a holder array');
     return data;
   }
@@ -289,15 +311,7 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
    */
   public async fetchIngestTxListed(txHash: string): Promise<boolean> {
     if (!/^0x[0-9a-f]{64}$/.test(txHash)) throw new Error('Elysium ingest: invalid tx hash');
-    return this.ingestCircuitBreaker.execute(async () => {
-      try {
-        await this.get<unknown>(`${ELYSIUM_PREFIX}/transactions/${txHash}`);
-        return true;
-      } catch (error) {
-        if (error instanceof HttpApiError && error.statusCode === 404) return false;
-        throw error;
-      }
-    });
+    return (await this.ingestLookup(`${ELYSIUM_PREFIX}/transactions/${txHash}`)) !== NOT_FOUND;
   }
 
   /**
@@ -306,9 +320,9 @@ export class HypeDexerElysiumIndexerClient extends HypeDexerBaseClient {
    */
   public async fetchIngestBridgeTransfers(txHash: string): Promise<unknown[]> {
     if (!/^0x[0-9a-f]{64}$/.test(txHash)) throw new Error('Elysium ingest: invalid tx hash');
-    const data = await this.ingestCircuitBreaker.execute(() =>
-      this.getUnwrapped<unknown>(`${ELYSIUM_PREFIX}/bridge/transfers/${txHash}`)
-    );
+    const data = await this.ingestLookup(`${ELYSIUM_PREFIX}/bridge/transfers/${txHash}`);
+    // A hash the provider has no transfer for: nothing to store.
+    if (data === NOT_FOUND) return [];
     if (Array.isArray(data)) return data;
     return data && typeof data === 'object' ? [data] : [];
   }

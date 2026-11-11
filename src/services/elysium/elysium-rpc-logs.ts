@@ -79,7 +79,7 @@ export interface UpstreamLogRow {
  */
 export function toUpstreamLog(l: RpcLog, blockSeconds?: number): UpstreamLogRow | null {
   if (l.removed || !l.topics?.length) return null;
-  const seconds = l.blockTimestamp ? parseInt(l.blockTimestamp, 16) : (blockSeconds ?? NaN);
+  const seconds = logSeconds(l) ?? blockSeconds ?? NaN;
   if (!Number.isFinite(seconds)) return null;
   return {
     block_time: new Date(seconds * 1000).toISOString(),
@@ -93,6 +93,13 @@ export function toUpstreamLog(l: RpcLog, blockSeconds?: number): UpstreamLogRow 
     topic3: l.topics[3] ?? '',
     data: l.data,
   };
+}
+
+/** The time a log carries, in seconds; null when it has none or one that does not read as a number. */
+function logSeconds(l: RpcLog): number | null {
+  if (!l.blockTimestamp) return null;
+  const seconds = parseInt(l.blockTimestamp, 16);
+  return Number.isFinite(seconds) ? seconds : null;
 }
 
 /** A transaction as eth_getBlockByNumber(n, true) returns it on Elysium. */
@@ -157,7 +164,7 @@ export class ElysiumRpcLogs {
   private async missingBlockTimes(logs: RpcLog[]): Promise<Map<string, number>> {
     const times = new Map<string, number>();
     for (const l of logs) {
-      if (l.removed || l.blockTimestamp || times.has(l.blockNumber)) continue;
+      if (l.removed || logSeconds(l) !== null || times.has(l.blockNumber)) continue;
       if (times.size >= MISSING_TIME_BLOCKS_MAX) throw new Error('Elysium RPC: logs returned without their block time');
       times.set(l.blockNumber, await this.blockTime(parseInt(l.blockNumber, 16)));
     }

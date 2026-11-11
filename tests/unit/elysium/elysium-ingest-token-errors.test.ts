@@ -1,8 +1,10 @@
 /**
- * A token whose holder figures the provider refuses used to end the run where it stood, and the
- * same token came first on the next run: the tokens behind it were never read (2026-11-11).
- * It is now counted, left alone for 30 minutes, and the run goes on. Three unreadable tokens in
- * a row is the provider failing: the run fails and the stream backs off, as before.
+ * A token whose holder figures the provider would not give used to end the run where it stood,
+ * and the same token came first on the next run: the tokens behind it were never read
+ * (2026-11-11). Now a token the provider does not know (its 404) is counted and left alone for
+ * 30 minutes, without ever counting as a failure; a read that fails is counted, left alone for
+ * 5 minutes, and three of them in a row fail the run (the provider is failing), after every one
+ * of them was set aside. While the provider lags, the launches it cannot know yet are not asked.
  */
 jest.mock('../../../src/core/prisma.historical.service', () => ({ prismaHistorical: {} }));
 jest.mock('../../../src/core/redis.service', () => ({
@@ -39,12 +41,18 @@ describe('Elysium ingestion: a token that cannot be read', () => {
   let update: jest.SpyInstance;
   let advance: jest.SpyInstance;
   const targets = (...ns: number[]) => ns.map((n) => ({ token: TOKEN(n), creator: null, curve: null, pool: null }));
+  /** The provider fails on these tokens (a 5xx), and answers the others. */
   const refusing = (...ns: number[]): void => {
     const bad = new Set(ns.map(TOKEN));
     holders.mockImplementation(async (token: string) => {
-      if (bad.has(token)) throw new Error('API error: 404 Not Found');
+      if (bad.has(token)) throw new Error('API error: 500 Internal Server Error');
       return [{ address: TOKEN(900), share: 0.25 }];
     });
+  };
+  /** The provider does not know these tokens (its 404, which the client returns as null). */
+  const unknown = (...ns: number[]): void => {
+    const bad = new Set(ns.map(TOKEN));
+    holders.mockImplementation(async (token: string) => (bad.has(token) ? null : [{ address: TOKEN(900), share: 0.25 }]));
   };
 
   beforeEach(() => {
@@ -54,6 +62,7 @@ describe('Elysium ingestion: a token that cannot be read', () => {
     svc.throttle = { wait: async () => undefined };
     clock = NOW;
     jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    jest.spyOn(client, 'fetchIngestHead').mockImplementation(async () => new Date(clock - 5_000));
     holders = jest.spyOn(client, 'fetchIngestTokenHolders');
     list = jest.spyOn(repo, 'listLaunchesForStats');
     update = jest.spyOn(repo, 'updateLaunchStats').mockResolvedValue(undefined);
@@ -71,31 +80,76 @@ describe('Elysium ingestion: a token that cannot be read', () => {
     expect(advance).toHaveBeenCalledWith('launchstats', expect.objectContaining({ addRows: 3 }));
     expect(next).toBe(5 * 60_000);
     expect(svc.rejects.take()).toEqual([
-      { stream: 'launchstats', reason: 'token-unreadable', count: 1, sample: `${TOKEN(2)} API error: 404 Not Found` },
+      { stream: 'launchstats', reason: 'token-unreadable', count: 1, sample: `${TOKEN(2)} API error: 500 Internal Server Error` },
     ]);
   });
 
-  it('leaves the token out of the next batches for 30 minutes, then tries it again', async () => {
+  it('a token the provider does not know is an answer, not a failure: any number of them in a row, and the run goes on', async () => {
+    list.mockResolvedValue(targets(1, 2, 3, 4, 5, 6, 7, 8));
+    unknown(1, 2, 3, 4, 5, 6);
+
+    await expect(svc.launchStatsTick()).resolves.toBe(5 * 60_000);
+
+    expect(update.mock.calls.map((c) => c[0])).toEqual([TOKEN(7), TOKEN(8)]);
+    expect(svc.rejects.take()).toEqual([
+      { stream: 'launchstats', reason: 'token-unreadable', count: 6, sample: `${TOKEN(1)} unknown to the provider` },
+    ]);
+    // Left out for 30 minutes, not stored as "0 holders".
+    list.mockResolvedValue([]);
+    clock = NOW + 29 * 60_000;
+    await svc.launchStatsTick();
+    expect((list.mock.calls[list.mock.calls.length - 1][4] as string[]).sort()).toEqual([1, 2, 3, 4, 5, 6].map(TOKEN));
+    clock = NOW + 31 * 60_000;
+    await svc.launchStatsTick();
+    expect(list.mock.calls[list.mock.calls.length - 1][4]).toEqual([]);
+  });
+
+  it('while the provider lags, only asks about the launches created before its head', async () => {
+    const head = new Date(NOW - 3 * 3_600_000);
+    (client.fetchIngestHead as jest.Mock).mockResolvedValue(head);
+    list.mockResolvedValue([]);
+    await svc.launchStatsTick();
+    expect(list).toHaveBeenLastCalledWith(60, 40, 30 * 60, 14 * 60, [], head);
+  });
+
+  it('leaves a token whose read failed out of the next batches for 5 minutes, then tries it again', async () => {
     list.mockResolvedValue(targets(1, 2));
     refusing(2);
     await svc.launchStatsTick();
 
     list.mockResolvedValue([]);
-    clock = NOW + 10 * 60_000;
+    clock = NOW + 4 * 60_000;
     await svc.launchStatsTick();
-    expect(list).toHaveBeenLastCalledWith(60, 40, 30 * 60, 14 * 60, [TOKEN(2)]);
+    expect(list).toHaveBeenLastCalledWith(60, 40, 30 * 60, 14 * 60, [TOKEN(2)], null);
 
-    clock = NOW + 31 * 60_000;
+    clock = NOW + 6 * 60_000;
     await svc.launchStatsTick();
-    expect(list).toHaveBeenLastCalledWith(60, 40, 30 * 60, 14 * 60, []);
+    expect(list).toHaveBeenLastCalledWith(60, 40, 30 * 60, 14 * 60, [], null);
   });
 
-  it('fails the run when three tokens in a row cannot be read: that is the provider', async () => {
+  it('fails the run when three reads in a row fail: that is the provider', async () => {
     list.mockResolvedValue(targets(1, 2, 3, 4, 5));
     refusing(2, 3, 4);
-    await expect(svc.launchStatsTick()).rejects.toThrow('API error: 404');
+    await expect(svc.launchStatsTick()).rejects.toThrow('API error: 500');
     expect(update.mock.calls.map((c) => c[0])).toEqual([TOKEN(1)]);
     expect(advance).not.toHaveBeenCalled();
+  });
+
+  it('sets the third one aside too before it fails, so a longer run of them is passed over the next runs', async () => {
+    // Six launches the provider errs on, at the head of the queue, then healthy ones.
+    const failing = new Set([1, 2, 3, 4, 5, 6].map(TOKEN));
+    holders.mockImplementation(async (token: string) => {
+      if (failing.has(token)) throw new Error('API error: 500');
+      return [{ address: TOKEN(900), share: 0.25 }];
+    });
+    /** The queue as the database gives it: the head first, less what is set aside. */
+    list.mockImplementation(async (...args: unknown[]) => targets(1, 2, 3, 4, 5, 6, 7, 8).filter((t) => !(args[4] as string[]).includes(t.token)));
+
+    await expect(svc.launchStatsTick()).rejects.toThrow('API error: 500');
+    await expect(svc.launchStatsTick()).rejects.toThrow('API error: 500');
+    // Third run, within the 5 minutes: the six are aside, the healthy ones are read.
+    await expect(svc.launchStatsTick()).resolves.toBe(5 * 60_000);
+    expect(update.mock.calls.map((c) => c[0])).toEqual([TOKEN(7), TOKEN(8)]);
   });
 
   it('does not count failures apart as a run of failures', async () => {
@@ -103,6 +157,17 @@ describe('Elysium ingestion: a token that cannot be read', () => {
     refusing(1, 3, 5, 7);
     await expect(svc.launchStatsTick()).resolves.toBe(5 * 60_000);
     expect(update.mock.calls.map((c) => c[0])).toEqual([TOKEN(2), TOKEN(4), TOKEN(6)]);
+  });
+
+  it('a token set aside by one stream is still read by the other', async () => {
+    list.mockResolvedValue(targets(1));
+    refusing(1);
+    await svc.launchStatsTick();
+    jest.spyOn(repo, 'listTokensForStats').mockResolvedValue([TOKEN(1)]);
+    const stat = jest.spyOn(repo, 'upsertTokenStat').mockResolvedValue(undefined);
+    jest.spyOn(client, 'fetchIngestToken').mockResolvedValue({ holders: 4, decimals: 18, total_supply_raw: '1000000000000000000' });
+    await svc.tokenStatsTick();
+    expect(stat).toHaveBeenCalledWith(TOKEN(1), 4, '1');
   });
 
   it('holder counts of the top tokens: goes past the token that fails, and skips it while it is set aside', async () => {
@@ -159,6 +224,18 @@ describe('Elysium ingestion: a token that cannot be read', () => {
       detail.mockResolvedValue({ address: TOKEN(1), standard: 'erc20', name: null, symbol: '', transfer_count: 1 });
       await svc.launchStatsTick();
       expect(name).not.toHaveBeenCalled();
+      // The provider does not know the token's page.
+      detail.mockResolvedValue(null);
+      await svc.launchStatsTick();
+      expect(name).not.toHaveBeenCalled();
+    });
+
+    it('names the launch but leaves the registry alone when the page carries no transfer count', async () => {
+      list.mockResolvedValue([{ token: TOKEN(1), creator: null, curve: null, pool: null, needsName: true }]);
+      detail.mockResolvedValue({ address: TOKEN(1), standard: 'erc20', name: 'Signal Cat', symbol: 'SCAT' });
+      await svc.launchStatsTick();
+      expect(name).toHaveBeenCalledWith([expect.objectContaining({ symbol: 'SCAT' })]);
+      expect(upsert).not.toHaveBeenCalled();
     });
   });
 
@@ -167,7 +244,7 @@ describe('Elysium ingestion: a token that cannot be read', () => {
     const stat = jest.spyOn(repo, 'upsertTokenStat').mockResolvedValue(undefined);
     jest.spyOn(client, 'fetchIngestToken').mockResolvedValue({ holders: 3, decimals: 2_000_000_000, total_supply_raw: '5' });
     await svc.tokenStatsTick();
-    // Unknown decimals: the raw amount is kept as it is, as for a token that gives none.
-    expect(stat).toHaveBeenCalledWith(TOKEN(1), 3, '5');
+    // A decimals no token has: the supply cannot be known, and is not stored as the raw amount.
+    expect(stat).toHaveBeenCalledWith(TOKEN(1), 3, null);
   });
 });

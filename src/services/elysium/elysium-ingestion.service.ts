@@ -22,8 +22,6 @@ import {
   normalizeLiveTx,
   normalizeToken,
   normalizeTx,
-  tokenDecimals,
-  parseUpstreamTime,
   pgErrorCode,
   planWindow,
   storableText,
@@ -32,7 +30,7 @@ import {
   LiveTxRow,
   TokenRow,
   TxRow,
-  scaleRawAmount,
+  scaleTokenAmount,
 } from './elysium-ingest.util';
 import {
   decodePoolCreated,
@@ -237,10 +235,14 @@ const ROLLUP_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
  * tokens behind it were never read (a token the provider answers 4xx for held the whole stream).
  */
 const TOKEN_RETRY_AFTER_MS = 30 * MINUTE_MS;
-/** This many tokens unreadable in a row is not about the tokens: the run fails and the stream backs off. */
+/** ...and one whose read failed (the provider erred, it did not say the token is unknown) for this long. */
+const TOKEN_FAILURE_RETRY_MS = 5 * MINUTE_MS;
+/** This many reads failing in a row is not about the tokens: the run fails and the stream backs off. */
 const TOKEN_FAILURES_IN_A_ROW = 3;
-/** Tokens remembered as unreadable at most (the oldest is forgotten first). */
-const UNREADABLE_TOKENS_MAX = 500;
+/** Tokens remembered as set aside at most (the oldest is forgotten first). */
+const UNREADABLE_TOKENS_MAX = 2_000;
+/** Rows remembered as refused by the database, so a window read again does not search for them again. */
+const REFUSED_ROWS_MAX = 2_000;
 /** Holder snapshots for the top N tokens of each ranked list only. */
 const TOKEN_STATS_TOP_N = 25;
 const TOKEN_STATS_MAX_AGE_S = 14 * 60;
@@ -259,6 +261,15 @@ class CallThrottle {
     this.chain = turn.catch(() => undefined);
     return turn;
   }
+}
+
+/** What identifies a provider row or a log, so that it is counted once however often it is read. */
+function rowKey(raw: unknown): string {
+  if (!raw || typeof raw !== 'object') return JSON.stringify(raw ?? null).slice(0, 120);
+  const r = raw as Record<string, unknown>;
+  const id = [r.tx_hash, r.transfer_id, r.address].find((v) => typeof v === 'string' && v !== '');
+  const key = typeof id === 'string' ? id.toLowerCase() : JSON.stringify(raw).slice(0, 200);
+  return r.log_index !== undefined && r.log_index !== null ? `${key}:${String(r.log_index)}` : key;
 }
 
 /** A row the provider flags as a system transaction (left out on purpose, never a reject). */
@@ -315,15 +326,10 @@ export class ElysiumIngestionService {
   private readonly rollups = ElysiumRollupService.getInstance();
   /** What the running ticks read and did not store; written to the database as each tick ends. */
   private readonly rejects = new IngestRejects();
-  /**
-   * Per stream, the time up to which its rows were already read once (its cursor before the
-   * window being read). A window starts a little before that time on purpose, and the bridge
-   * re-reads hours of transfers: what is left out of those re-read rows was counted when they
-   * were first read, and is not counted again.
-   */
-  private readonly countedUpTo = new Map<ElysiumStream, number>();
-  /** Tokens whose holder figures could not be read, and when each may be tried again. */
-  private readonly unreadableUntil = new Map<string, number>();
+  /** Tokens whose holder figures could not be read, per stream (`stream|token`), and when each may be tried again. */
+  private readonly asideUntil = new Map<string, number>();
+  /** Rows the database refused (`stream|key`): left out of the next writes without being searched for again. */
+  private readonly refusedRows = new Map<string, true>();
   /** The daily comparison of elysium_tx with the provider's own figures, run as one more loop here. */
   private readonly dayCheck = new ElysiumDayCheckService({
     ensureRunning: () => this.ensureRunning(),
@@ -351,8 +357,8 @@ export class ElysiumIngestionService {
   private timers = new Map<ElysiumStream, NodeJS.Timeout>();
   private failures = new Map<ElysiumStream, number>();
   private lastBridgeWideAt = 0;
-  /** Up to where the bridge stream has read what lay between its cursor and its live window (this process). */
-  private bridgeCaughtUpTo = 0;
+  /** Where a read of what lies between the bridge cursor and its live window stopped for lack of time, to go on from. */
+  private bridgeGapFrom: number | null = null;
   /** Where the walk through the deposits still waiting stands, when there are more than a sweep reads. */
   private openDepositOffset = 0;
   private backfillWindows = 0;
@@ -586,9 +592,7 @@ export class ElysiumIngestionService {
     for (const r of raw) {
       const row = map(r);
       if (row !== null) rows.push(row);
-      else if (!expected(r) && this.firstRead(stream, r)) {
-        this.rejects.note(stream, 'row-malformed', JSON.stringify(r ?? null).slice(0, 300));
-      }
+      else if (!expected(r)) this.rejects.note(stream, 'row-malformed', JSON.stringify(r ?? null).slice(0, 300), 1, rowKey(r));
     }
     return rows;
   }
@@ -608,7 +612,10 @@ export class ElysiumIngestionService {
     write: (rows: T[]) => Promise<number>,
     describe: (row: T) => string
   ): Promise<number> {
-    return this.writeHalves(stream, rows, write, describe, { left: MAX_REFUSED_PER_PAGE });
+    // A row refused before comes back with every window that is read again (the overlap, the
+    // bridge's hours): it is left out here, not searched for by halves and counted once more.
+    const fresh = this.refusedRows.size === 0 ? rows : rows.filter((r) => !this.refusedRows.has(`${stream}|${describe(r)}`));
+    return this.writeHalves(stream, fresh, write, describe, { left: MAX_REFUSED_PER_PAGE });
   }
 
   private async writeHalves<T>(
@@ -626,7 +633,13 @@ export class ElysiumIngestionService {
       if (rows.length === 1) {
         if (budget.left <= 0) throw error;
         budget.left -= 1;
-        this.rejects.note(stream, 'row-refused', `${pgErrorCode(error)} ${describe(rows[0])}`);
+        const key = describe(rows[0]);
+        if (this.refusedRows.size >= REFUSED_ROWS_MAX) {
+          const oldest = this.refusedRows.keys().next().value;
+          if (oldest !== undefined) this.refusedRows.delete(oldest);
+        }
+        this.refusedRows.set(`${stream}|${key}`, true);
+        this.rejects.note(stream, 'row-refused', `${pgErrorCode(error)} ${key}`, 1, key);
         logDeduplicator.warn('Elysium ingest: a row the database refused was set aside', { stream, code: pgErrorCode(error) });
         return 0;
       }
@@ -634,15 +647,6 @@ export class ElysiumIngestionService {
       const first = await this.writeHalves(stream, rows.slice(0, mid), write, describe, budget);
       return first + (await this.writeHalves(stream, rows.slice(mid), write, describe, budget));
     }
-  }
-
-  /** False for a row of the part of a window that was read before (see countedUpTo). */
-  private firstRead(stream: ElysiumStream, raw: unknown): boolean {
-    const upTo = this.countedUpTo.get(stream);
-    if (upTo === undefined || !raw || typeof raw !== 'object') return true;
-    const r = raw as Record<string, unknown>;
-    const time = parseUpstreamTime(r.block_time ?? r.initiated_time);
-    return time === null || time.getTime() > upTo;
   }
 
   /**
@@ -677,7 +681,8 @@ export class ElysiumIngestionService {
       if (hasMore === false || (hasMore === null && rows.length < PAGE_SIZE)) return false;
     }
     if (!opts.truncate) throw new PageCapError();
-    this.rejects.note(stream, 'window-truncated', `${path} ${JSON.stringify(params)} cut after ${offset} rows`);
+    const window = `${path} ${JSON.stringify(params)}`;
+    this.rejects.note(stream, 'window-truncated', `${window} cut after ${offset} rows`, 1, window);
     logDeduplicator.warn('Elysium ingest: window truncated at the page cap', { path });
     return true;
   }
@@ -708,7 +713,6 @@ export class ElysiumIngestionService {
         ceiling: this.providerCeiling(head),
       });
       if (!w) return TX_LIVE_INTERVAL_MS;
-      this.countedUpTo.set('tx', cursor ? cursor.getTime() : -Infinity);
 
       let inserted = 0;
       try {
@@ -872,47 +876,48 @@ export class ElysiumIngestionService {
     }
 
     const clock = Date.now();
-    // What the provider has indexed: its head while it lags, the clock otherwise. The cursor is
-    // that time, not the time of the run: it used to be the clock, so after a provider outage
-    // longer than the 26 h window the transfers begun in between were never read (the provider
-    // indexes them once it is back, with their own, older, initiation time).
-    const { head, lagging } = await this.ingestHorizon();
-    const horizon = lagging && head ? Math.min(clock, head.getTime()) : clock;
-    const cursorMs = state.cursor ? Math.min(state.cursor.getTime(), clock) : horizon;
-    // The live windows re-read transfers of the last hours: only the ones begun since the last run are new.
-    this.countedUpTo.set('bridge', state.cursor ? cursorMs : -Infinity);
+    // The cursor is the time of the newest transfer we hold: the data's own time, read from the
+    // table. It used to be the time of the run. After an outage of the provider's bridge feed
+    // longer than the 26 h window, the transfers begun in between were then never read: the
+    // provider indexes them once it is back, with their own, older, initiation time. The head
+    // of its transaction index is no guide here: its bridge feed has stopped on its own before
+    // (17 October) while that head moved on.
+    const held = await this.repo.newestBridgeTransferAt();
+    const cursorMs = held ? Math.min(held.getTime(), clock) : null;
     const wide = clock - this.lastBridgeWideAt >= BRIDGE_WIDE_EVERY_MS;
     const liveStart = clock - (wide ? BRIDGE_WIDE_WINDOW_MS : BRIDGE_LIVE_WINDOW_MS);
+    let changed = 0;
 
-    // What lies between the cursor and the live window (the stream did not run for a while, or
-    // the provider lagged): read from the cursor, in steps, before anything else. While the
-    // provider stands still there is nothing more to read past its head: once is enough.
-    const gapEnd = Math.min(liveStart, horizon);
-    if (cursorMs < liveStart && gapEnd > this.bridgeCaughtUpTo) {
-      let from = Math.max(ELYSIUM_GENESIS.getTime(), cursorMs - BRIDGE_LIVE_WINDOW_MS);
-      while (from < gapEnd) {
+    // Nothing newer than the live window's start: the stream did not run for a while, or the
+    // feed stood still. What lies between the newest transfer and the window is read first, in
+    // steps, on the 15-minute runs (and at once after one that ran out of time): while the feed
+    // stands still it finds nothing, and when it comes back it finds everything it indexed.
+    const behind = cursorMs !== null && cursorMs < liveStart;
+    if (!behind) this.bridgeGapFrom = null;
+    else if (wide || this.bridgeGapFrom !== null) {
+      let from = this.bridgeGapFrom ?? Math.max(ELYSIUM_GENESIS.getTime(), cursorMs - BRIDGE_LIVE_WINDOW_MS);
+      while (from < liveStart) {
         this.ensureRunning();
-        // Out of time: the cursor says where this stopped, the next run goes on from there.
-        if (Date.now() >= deadline) return 0;
-        const to = Math.min(from + BRIDGE_BACKFILL_STEP_MS, gapEnd);
-        const caught = await this.ingestBridgeWindow({
+        if (Date.now() >= deadline) {
+          // Out of time: the next run goes on from here, at once.
+          this.bridgeGapFrom = from;
+          await this.publishBridgeCursor(changed);
+          return 0;
+        }
+        const to = Math.min(from + BRIDGE_BACKFILL_STEP_MS, liveStart);
+        changed += await this.ingestBridgeWindow({
           start_time: toUpstreamTime(new Date(from)),
           end_time: toUpstreamTime(new Date(to)),
         });
-        await this.repo.advance('bridge', { cursor: new Date(to), addRows: caught });
         from = to;
       }
-      this.bridgeCaughtUpTo = gapEnd;
+      this.bridgeGapFrom = null;
     }
 
-    let changed = 0;
-    // Nothing of the live window is indexed while the provider's head is before it.
-    if (horizon >= liveStart) {
-      changed += await this.ingestBridgeWindow({
-        start_time: toUpstreamTime(new Date(liveStart)),
-        end_time: toUpstreamTime(new Date(clock)),
-      });
-    }
+    changed += await this.ingestBridgeWindow({
+      start_time: toUpstreamTime(new Date(liveStart)),
+      end_time: toUpstreamTime(new Date(clock)),
+    });
     if (wide) {
       changed += await this.ingestBridgeWindow({
         direction: 'withdrawal',
@@ -924,8 +929,14 @@ export class ElysiumIngestionService {
       changed += await this.recheckOpenDeposits();
       this.lastBridgeWideAt = clock;
     }
-    await this.repo.advance('bridge', { cursor: new Date(horizon), addRows: changed });
+    await this.publishBridgeCursor(changed);
     return BRIDGE_LIVE_INTERVAL_MS;
+  }
+
+  /** Records the run, with the time of the newest transfer held as the stream's cursor (its lag is then the data's). */
+  private async publishBridgeCursor(changed: number): Promise<void> {
+    const newest = await this.repo.newestBridgeTransferAt();
+    await this.repo.advance('bridge', { ...(newest ? { cursor: new Date(Math.min(newest.getTime(), Date.now())) } : {}), addRows: changed });
   }
 
   /**
@@ -967,21 +978,24 @@ export class ElysiumIngestionService {
       BRIDGE_OPEN_DEPOSITS_PER_SWEEP,
       this.openDepositOffset
     );
-    // A full batch: the next sweep reads the ones after it; else start over from the oldest.
-    this.openDepositOffset = open.length >= BRIDGE_OPEN_DEPOSITS_PER_SWEEP ? this.openDepositOffset + open.length : 0;
     let changed = 0;
+    let tried = 0;
     let failedInARow = 0;
     for (const deposit of open) {
       this.ensureRunning();
+      tried++;
       await this.throttle.wait();
       let raw: unknown[];
       try {
         raw = await this.client.fetchIngestBridgeTransfers(deposit.tx_hash);
         failedInARow = 0;
       } catch (error) {
-        if (error instanceof IngestStoppedError || ++failedInARow >= TOKEN_FAILURES_IN_A_ROW) throw error;
+        if (error instanceof IngestStoppedError) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.rejects.note('bridge', 'transfer-unreadable', `${deposit.transfer_id} ${message.slice(0, 160)}`);
+        // The provider is failing: the rest waits for the next pass. Never a reason to fail this
+        // one, which has read its windows and must record that it did.
+        if (++failedInARow >= TOKEN_FAILURES_IN_A_ROW) break;
         continue;
       }
       // Without a status filter the answer can hold other transfers of the same transaction: all are stored.
@@ -991,6 +1005,9 @@ export class ElysiumIngestionService {
       );
       changed += await this.writeRows('bridge', rows, (part) => this.repo.upsertBridgeTransfers(part), (r) => r.transfer_id);
     }
+    // The next sweep goes on after the ones tried here (a deposit that cannot be read must not
+    // be the first one of every sweep), and starts over once the list is through.
+    this.openDepositOffset = tried >= open.length && open.length < BRIDGE_OPEN_DEPOSITS_PER_SWEEP ? 0 : this.openDepositOffset + tried;
     return changed;
   }
 
@@ -1081,7 +1098,7 @@ export class ElysiumIngestionService {
     for (const r of raw) {
       const row = decode(r);
       if (row !== null) rows.push(row);
-      else if (this.firstRead(stream, r)) this.rejects.note(stream, 'log-undecodable', JSON.stringify(r ?? null).slice(0, 300));
+      else this.rejects.note(stream, 'log-undecodable', JSON.stringify(r ?? null).slice(0, 300), 1, rowKey(r));
     }
     return rows;
   }
@@ -1107,7 +1124,6 @@ export class ElysiumIngestionService {
         ceiling: lagging ? null : this.providerCeiling(head),
       });
       if (!w) return DEX_LIVE_INTERVAL_MS;
-      this.countedUpTo.set('dex', cursor ? cursor.getTime() : -Infinity);
       let inserted: number;
       try {
         inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging));
@@ -1219,20 +1235,23 @@ export class ElysiumIngestionService {
       this.ensureRunning();
       if (Date.now() >= deadline) break;
       processed++;
-      if (this.isSetAside(address)) continue;
+      if (this.isSetAside('tokenstats', address)) continue;
       await this.throttle.wait();
-      let t: Record<string, unknown>;
+      let t: Record<string, unknown> | null;
       try {
         t = await this.client.fetchIngestToken(address);
         failedInARow = 0;
       } catch (error) {
-        this.setTokenAside('tokenstats', address, error, ++failedInARow);
+        this.noteTokenFailure('tokenstats', address, error, ++failedInARow);
+        continue;
+      }
+      if (!t) {
+        this.noteTokenUnknown('tokenstats', address);
         continue;
       }
       const holders = Number(t.holders);
       if (!Number.isInteger(holders) || holders < 0) continue;
-      const decimals = tokenDecimals(t.decimals);
-      await this.repo.upsertTokenStat(address, holders, scaleRawAmount(t.total_supply_raw, decimals));
+      await this.repo.upsertTokenStat(address, holders, scaleTokenAmount(t.total_supply_raw, t.decimals));
       done++;
     }
     await this.repo.advance('tokenstats', { cursor: new Date(), addRows: done, backfillDone: true });
@@ -1254,9 +1273,14 @@ export class ElysiumIngestionService {
         await this.throttle.wait();
         detail = await this.client.fetchIngestToken(token);
       }
+      if (!detail) return;
       const row = normalizeToken({ ...detail, address: token });
       if (!row || (row.symbol === null && row.name === null)) return;
-      await this.writeRows('launchstats', [row], (part) => this.repo.upsertTokens(part), (r) => r.address);
+      // The registry row is written only from a page that carries the token's transfer count:
+      // without it the upsert would put 0 over what the registry walk stored.
+      if (typeof detail.transfer_count === 'number') {
+        await this.writeRows('launchstats', [row], (part) => this.repo.upsertTokens(part), (r) => r.address);
+      }
       await this.repo.nameLaunches([row]);
     } catch (error) {
       if (error instanceof IngestStoppedError) throw error;
@@ -1267,37 +1291,59 @@ export class ElysiumIngestionService {
   }
 
   /**
-   * A token whose figures the provider would not give: counted, left alone for a while, and the
-   * run goes on with the next one. `inARow` such tokens in a row is the provider failing, not
-   * the tokens: the error is thrown, so the stream records it and backs off like any other.
+   * A token the provider says it does not know (its 404): counted and left alone for half an
+   * hour. It is an answer, not a failure: the run goes on, and the provider is not counted as
+   * failing however many of them follow each other.
    */
-  private setTokenAside(stream: ElysiumStream, token: string, error: unknown, inARow: number): void {
-    if (error instanceof IngestStoppedError) throw error;
-    if (inARow >= TOKEN_FAILURES_IN_A_ROW) throw error;
-    const now = Date.now();
-    this.unreadableUntil.delete(token);
-    if (this.unreadableUntil.size >= UNREADABLE_TOKENS_MAX) {
-      const oldest = this.unreadableUntil.keys().next().value;
-      if (oldest !== undefined) this.unreadableUntil.delete(oldest);
-    }
-    this.unreadableUntil.set(token, now + TOKEN_RETRY_AFTER_MS);
-    const message = error instanceof Error ? error.message : String(error);
-    this.rejects.note(stream, 'token-unreadable', `${token} ${message.slice(0, 160)}`);
+  private noteTokenUnknown(stream: ElysiumStream, token: string): void {
+    this.setAside(stream, token, TOKEN_RETRY_AFTER_MS);
+    this.rejects.note(stream, 'token-unreadable', `${token} unknown to the provider`);
   }
 
-  private isSetAside(token: string): boolean {
-    const until = this.unreadableUntil.get(token);
+  /**
+   * A token whose read failed: counted, left alone for a few minutes, and the run goes on with
+   * the next one. `inARow` reads failing in a row is the provider failing, not the tokens: this
+   * one is set aside like the others, then the error is thrown, so the stream records it and
+   * backs off like any other (it used to be thrown before the token was set aside: a run of
+   * unreadable tokens at the head of the queue was then never passed).
+   */
+  private noteTokenFailure(stream: ElysiumStream, token: string, error: unknown, inARow: number): void {
+    if (error instanceof IngestStoppedError) throw error;
+    this.setAside(stream, token, TOKEN_FAILURE_RETRY_MS);
+    const message = error instanceof Error ? error.message : String(error);
+    this.rejects.note(stream, 'token-unreadable', `${token} ${message.slice(0, 160)}`);
+    if (inARow >= TOKEN_FAILURES_IN_A_ROW) throw error;
+  }
+
+  private setAside(stream: ElysiumStream, token: string, forMs: number): void {
+    const key = `${stream}|${token}`;
+    this.asideUntil.delete(key);
+    if (this.asideUntil.size >= UNREADABLE_TOKENS_MAX) {
+      const oldest = this.asideUntil.keys().next().value;
+      if (oldest !== undefined) this.asideUntil.delete(oldest);
+    }
+    this.asideUntil.set(key, Date.now() + forMs);
+  }
+
+  private isSetAside(stream: ElysiumStream, token: string): boolean {
+    const key = `${stream}|${token}`;
+    const until = this.asideUntil.get(key);
     if (until === undefined) return false;
     if (Date.now() < until) return true;
-    this.unreadableUntil.delete(token);
+    this.asideUntil.delete(key);
     return false;
   }
 
-  /** The tokens still set aside, for the queries that pick the next ones to read. */
-  private tokensSetAside(): string[] {
+  /** The tokens a stream still has set aside, for the query that picks its next ones. */
+  private tokensSetAside(stream: ElysiumStream): string[] {
     const now = Date.now();
-    for (const [token, until] of this.unreadableUntil) if (now >= until) this.unreadableUntil.delete(token);
-    return [...this.unreadableUntil.keys()];
+    const prefix = `${stream}|`;
+    const out: string[] = [];
+    for (const [key, until] of this.asideUntil) {
+      if (now >= until) this.asideUntil.delete(key);
+      else if (key.startsWith(prefix)) out.push(key.slice(prefix.length));
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -1327,7 +1373,7 @@ export class ElysiumIngestionService {
         for (const r of raw) {
           const row = decodeLaunch(r);
           if (row) launches.push(row);
-          else if (this.firstRead('launchpad', r)) this.noteLogReject(launchRejectReason(r));
+          else this.noteLogReject(launchRejectReason(r), r);
         }
         inserted += await this.writeRows('launchpad', dedupeBy(launches, (r) => r.token), (part) => this.repo.insertLaunches(part), (r) => r.token);
       });
@@ -1346,7 +1392,7 @@ export class ElysiumIngestionService {
         for (const r of raw) {
           const row = decodeLaunchTrade(r, markets);
           if (row) trades.push(row);
-          else if (this.firstRead('launchpad', r)) this.noteLogReject(marketRejectReason(r, (k) => markets.has(k)));
+          else this.noteLogReject(marketRejectReason(r, (k) => markets.has(k)), r);
         }
         inserted += await this.writeRows(
           'launchpad',
@@ -1359,9 +1405,9 @@ export class ElysiumIngestionService {
     return inserted;
   }
 
-  /** A status-like value longer than its column, stored cut: counted, with the value, for a first read. */
+  /** A status-like value longer than its column, stored cut: counted once per row and field, with the value. */
   private noteCut(stream: ElysiumStream, raw: unknown, field: string, value: string): void {
-    if (this.firstRead(stream, raw)) this.rejects.note(stream, 'text-truncated', `${field}=${value}`);
+    this.rejects.note(stream, 'text-truncated', `${field}=${value}`, 1, `${rowKey(raw)}:${field}`);
   }
 
   /**
@@ -1381,13 +1427,16 @@ export class ElysiumIngestionService {
       const g = decodeGraduation(log);
       const key = g ? graduationKey(g) : null;
       if (g && key !== null && keys.has(key)) rows.push(g);
-      else if (this.firstRead('launchpad', log)) this.noteLogReject(marketRejectReason(log, (k) => tokens.has(k)));
+      else this.noteLogReject(marketRejectReason(log, (k) => tokens.has(k)), log);
     });
     return this.writeRows('launchpad', rows, (part) => this.repo.markGraduated(part), (r) => `graduation ${r.curve ?? r.token}`);
   }
 
-  private noteLogReject(reject: { reason: 'log-malformed' | 'log-undecodable' | 'launch-unknown-emitter' | 'market-unknown'; sample: string } | null): void {
-    if (reject) this.rejects.note('launchpad', reject.reason, reject.sample);
+  private noteLogReject(
+    reject: { reason: 'log-malformed' | 'log-undecodable' | 'launch-unknown-emitter' | 'market-unknown'; sample: string } | null,
+    raw: unknown
+  ): void {
+    if (reject) this.rejects.note('launchpad', reject.reason, reject.sample, 1, rowKey(raw));
   }
 
   /**
@@ -1489,7 +1538,6 @@ export class ElysiumIngestionService {
         ceiling: lagging ? null : this.providerCeiling(head),
       });
       if (!w) return LAUNCHPAD_LIVE_INTERVAL_MS;
-      this.countedUpTo.set('launchpad', cursor ? cursor.getTime() : -Infinity);
       let inserted: number;
       try {
         inserted = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging));
@@ -1521,12 +1569,18 @@ export class ElysiumIngestionService {
 
   private async launchStatsTick(): Promise<number> {
     const deadline = Date.now() + TICK_BUDGET_MS;
+    // While the provider lags, the launches created after its head are known to us (their logs
+    // come from the RPC) and not yet to it: asking for their holders gets a 404, or an empty
+    // list that used to be stored as "0 holders" until the launch's next turn, days later. They
+    // wait until the provider has indexed their time.
+    const { head, lagging } = await this.ingestHorizon();
     const targets = await this.repo.listLaunchesForStats(
       LAUNCH_STATS_BATCH,
       LAUNCH_STATS_PRIORITY,
       LAUNCH_STATS_ACTIVE_MAX_AGE_S,
       LAUNCH_STATS_QUIET_MAX_AGE_S,
-      this.tokensSetAside()
+      this.tokensSetAside('launchstats'),
+      lagging && head ? head : null
     );
     let done = 0;
     let processed = 0;
@@ -1535,18 +1589,22 @@ export class ElysiumIngestionService {
       this.ensureRunning();
       if (Date.now() >= deadline) break;
       processed++;
-      let raw: unknown[];
+      let raw: unknown[] | null;
       let detail: Record<string, unknown> | null = null;
       try {
         await this.throttle.wait();
         raw = await this.client.fetchIngestTokenHolders(t.token, LAUNCH_HOLDERS_LIMIT);
-        if (raw.length >= LAUNCH_HOLDERS_LIMIT) {
+        if (raw && raw.length >= LAUNCH_HOLDERS_LIMIT) {
           await this.throttle.wait();
           detail = await this.client.fetchIngestToken(t.token);
         }
         failedInARow = 0;
       } catch (error) {
-        this.setTokenAside('launchstats', t.token, error, ++failedInARow);
+        this.noteTokenFailure('launchstats', t.token, error, ++failedInARow);
+        continue;
+      }
+      if (!raw) {
+        this.noteTokenUnknown('launchstats', t.token);
         continue;
       }
       if (t.needsName) await this.nameNewLaunch(t.token, detail);

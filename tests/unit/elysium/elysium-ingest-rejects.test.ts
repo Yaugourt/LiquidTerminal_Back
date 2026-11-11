@@ -51,6 +51,25 @@ describe('IngestRejects', () => {
     expect(rest).toEqual([]);
   });
 
+  it('counts a row given with its key once, whatever is noted without a key each time', () => {
+    const rejects = new IngestRejects();
+    rejects.note('tx', 'row-malformed', 'a', 1, '0xabc');
+    rejects.note('tx', 'row-malformed', 'a again', 1, '0xabc');
+    rejects.note('tx', 'row-refused', 'same row, another reason', 1, '0xabc');
+    rejects.note('dex', 'row-malformed', 'same key, another stream', 1, '0xabc');
+    rejects.note('launchstats', 'token-unreadable', 't');
+    rejects.note('launchstats', 'token-unreadable', 't');
+    expect(rejects.take().map((r) => [r.stream, r.reason, r.count])).toEqual([
+      ['tx', 'row-malformed', 1],
+      ['tx', 'row-refused', 1],
+      ['dex', 'row-malformed', 1],
+      ['launchstats', 'token-unreadable', 2],
+    ]);
+    // Still remembered after the counts were taken.
+    rejects.note('tx', 'row-malformed', 'a third time', 1, '0xabc');
+    expect(rejects.take()).toEqual([]);
+  });
+
   it('puts back what could not be written, on top of what was counted since', () => {
     const rejects = new IngestRejects();
     rejects.note('tx', 'row-malformed', 'a', 2);
@@ -162,12 +181,11 @@ describe('Elysium ingestion: left-out rows are counted and written', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('counts a transaction without a sender once, not the system ones, and not the ones read before', async () => {
+  it('counts a transaction without a sender, not the system ones', async () => {
     fetchPage.mockResolvedValue(page([
       tx(1, NOW - 30_000),
-      tx(2, NOW - 30_000, { from_addr: '' }), // malformed, new
+      tx(2, NOW - 30_000, { from_addr: '' }), // malformed
       tx(3, NOW - 30_000, { is_system: true, from_addr: '' }), // left out on purpose
-      tx(4, NOW - 50_000, { from_addr: '' }), // malformed, but in the part re-read before the cursor
     ]));
 
     await svc.runTick('tx', () => svc.txTick());
@@ -177,6 +195,20 @@ describe('Elysium ingestion: left-out rows are counted and written', () => {
     expect(addRejects.mock.calls[0][0]).toEqual([
       expect.objectContaining({ stream: 'tx', reason: 'row-malformed', count: 1, sample: expect.stringContaining(tx(2, 0).tx_hash) }),
     ]);
+  });
+
+  it('counts a row once however often it is read again (the overlap of the next window, a tick run again)', async () => {
+    fetchPage.mockResolvedValue(page([tx(2, NOW - 30_000, { from_addr: '' })]));
+    await svc.runTick('tx', () => svc.txTick());
+    await svc.runTick('tx', () => svc.txTick());
+    await svc.runTick('tx', () => svc.txTick());
+    expect(addRejects).toHaveBeenCalledTimes(1);
+
+    // Another row left out is counted in its turn.
+    fetchPage.mockResolvedValue(page([tx(2, NOW - 30_000, { from_addr: '' }), tx(7, NOW - 20_000, { from_addr: '' })]));
+    await svc.runTick('tx', () => svc.txTick());
+    expect(addRejects).toHaveBeenCalledTimes(2);
+    expect(addRejects.mock.calls[1][0]).toEqual([expect.objectContaining({ count: 1, sample: expect.stringContaining(tx(7, 0).tx_hash) })]);
   });
 
   it('writes nothing when nothing was left out', async () => {
