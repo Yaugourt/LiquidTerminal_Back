@@ -63,10 +63,20 @@ describe('streamHealth', () => {
     expect(streamHealth(row('launchpad', { cursor: ago(3600) }), NOW, ago(6 * 3600)).state).toBe('behind');
   });
 
-  it('the bridge\'s lag is the age of its newest transfer: late with the provider, or on its own', () => {
-    expect(streamHealth(row('bridge', { cursor: ago(6 * 3600) }), NOW, ago(6 * 3600)).state).toBe('waiting-provider');
-    expect(streamHealth(row('bridge', { cursor: ago(6 * 3600) }), NOW, current).state).toBe('behind');
+  it('the bridge\'s lag is the age of its newest transfer, and is no fault: nobody may have bridged for hours', () => {
+    // A quiet bridge on a provider that is current: it runs, it is ok (it was "behind" after 5 minutes without a transfer).
+    expect(streamHealth(row('bridge', { cursor: ago(6 * 3600) }), NOW, current)).toEqual({ lagSeconds: 6 * 3600, everyS: 60, state: 'ok' });
     expect(streamHealth(row('bridge', { cursor: ago(200) }), NOW, current).state).toBe('ok');
+    // It reads nothing but the provider: when that stands still, it waits for it.
+    expect(streamHealth(row('bridge', { cursor: ago(6 * 3600) }), NOW, ago(6 * 3600)).state).toBe('waiting-provider');
+    // It is failing or stalled like any other.
+    expect(streamHealth(row('bridge', { lastError: 'API error: 500' }), NOW, current).state).toBe('failing');
+    expect(streamHealth(row('bridge', { okAt: ago(600) }), NOW, current).state).toBe('stalled');
+  });
+
+  it('a row of a stream this version does not know is shown with its error, and not judged by a cadence it does not have', () => {
+    expect(streamHealth(row('a-stream-of-another-version', { okAt: ago(86_400) }), NOW, current)).toEqual({ lagSeconds: null, everyS: null, state: 'ok' });
+    expect(streamHealth(row('a-stream-of-another-version', { lastError: 'boom' }), NOW, current).state).toBe('failing');
   });
 
   it('shows no lag for a stream whose cursor is the time of its run, and judges it by its runs', () => {

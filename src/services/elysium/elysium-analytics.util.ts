@@ -107,15 +107,18 @@ export function errorCategory(message: string | null): string | null {
 
 /**
  * What each ingestion stream is expected to do: how often it runs, and what its cursor is the
- * time of. `data`: the data it has stored (a lag is then meaningful). `run`: its last run (the
- * cursor says nothing of the data). `fallback`: the RPC reading of live transactions, which
- * only works while the provider lags and is otherwise at rest, whatever its cursor says.
+ * time of. `data`: the data it has stored, on a chain that never stops (a lag is then
+ * meaningful, and late data is a fault). `events`: its newest event (the bridge's newest
+ * transfer): its age is shown, and is no fault, since nobody may have bridged for an hour.
+ * `run`: its last run (the cursor says nothing of the data). `fallback`: the RPC reading of live
+ * transactions, which only works while the provider lags and is otherwise at rest, whatever its
+ * cursor says.
  */
-export const STREAM_EXPECTATIONS: Readonly<Record<string, { everyS: number; kind: 'data' | 'run' | 'fallback' }>> = {
+export const STREAM_EXPECTATIONS: Readonly<Record<string, { everyS: number; kind: 'data' | 'events' | 'run' | 'fallback' }>> = {
   tx: { everyS: 30, kind: 'data' },
   dex: { everyS: 60, kind: 'data' },
   launchpad: { everyS: 30, kind: 'data' },
-  bridge: { everyS: 60, kind: 'data' },
+  bridge: { everyS: 60, kind: 'events' },
   txlive: { everyS: 60, kind: 'fallback' },
   tokens: { everyS: 900, kind: 'run' },
   methods: { everyS: 1800, kind: 'run' },
@@ -163,21 +166,26 @@ export function streamHealth(
   providerHead: Date | null
 ): StreamHealth {
   const expected = STREAM_EXPECTATIONS[row.stream];
-  const everyS = expected?.everyS ?? null;
-  const kind = expected?.kind ?? 'run';
-  const lagSeconds = kind === 'data' && row.cursor ? Math.max(0, Math.round((now - row.cursor.getTime()) / 1000)) : null;
+  // A row nothing here knows of (a stream of another version): its error is shown, and it is
+  // not judged by a cadence it does not have. It used to count as stalled, for ever.
+  if (!expected) return { lagSeconds: null, everyS: null, state: row.lastError ? 'failing' : 'ok' };
+  const { everyS, kind } = expected;
+  const dated = kind === 'data' || kind === 'events';
+  const lagSeconds = dated && row.cursor ? Math.max(0, Math.round((now - row.cursor.getTime()) / 1000)) : null;
   if (row.lastError) return { lagSeconds, everyS, state: 'failing' };
-  const period = (everyS ?? 300) * 1000;
+  const period = everyS * 1000;
   if (row.okAt === null || now - row.okAt.getTime() > Math.max(STALLED_PERIODS * period, 300_000)) {
     return { lagSeconds, everyS, state: 'stalled' };
   }
+  const providerLate = providerHead !== null && now - providerHead.getTime() > PROVIDER_LAG_S * 1000;
+  // The bridge runs, and its newest transfer is as old as it is: nobody bridged since. Only the
+  // provider standing still is worth saying, since the bridge reads nothing but the provider.
+  if (kind === 'events') return { lagSeconds, everyS, state: providerLate ? 'waiting-provider' : 'ok' };
   if (lagSeconds === null || lagSeconds * 1000 <= Math.max(BEHIND_PERIODS * period, 300_000)) return { lagSeconds, everyS, state: 'ok' };
   // Late data from a stream that is still reading the history for the first time (a new database,
   // a new stream): it is where it should be, and saying "behind" would ring for hours for nothing.
   if (row.backfillDone === false) return { lagSeconds, everyS, state: 'backfilling' };
   // Late data. The provider's own index is late too: the stream has read all there is. (The log
   // streams read past the provider's head from the RPC, so they have no such excuse.)
-  const providerLate = providerHead !== null && now - providerHead.getTime() > PROVIDER_LAG_S * 1000;
-  const waits = providerLate && (row.stream === 'tx' || row.stream === 'bridge');
-  return { lagSeconds, everyS, state: waits ? 'waiting-provider' : 'behind' };
+  return { lagSeconds, everyS, state: providerLate && row.stream === 'tx' ? 'waiting-provider' : 'behind' };
 }
