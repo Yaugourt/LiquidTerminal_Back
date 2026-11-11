@@ -725,10 +725,12 @@ export class ElysiumAnalyticsService {
 
   /**
    * Gas fees paid to each called contract and each deployer over the window,
-   * with their share of all non-spam fees. "Apps" are deployed contracts and
-   * registry tokens; precompile calls (bridge retryables, system) are totalled
-   * apart as "system" but still listed; plain transfers to EOAs count in the
-   * total only. Fees include the parent
+   * with their share of every fee paid over it (the total the economics page
+   * shows for the same days). "Apps" are deployed contracts and registry
+   * tokens; precompile calls (bridge retryables, system) are totalled apart
+   * as "system" but still listed; plain transfers to EOAs have their own
+   * share, and so has the rest (contract creations, and what the
+   * transactions flagged as spam paid). Fees include the parent
    * posting part (fee_wei is the full receipt fee). Computed every minute
    * (24h), 5 min (7d) and 30 min (30d) while watched. The built days of the
    * window come from the day rollups.
@@ -754,14 +756,21 @@ export class ElysiumAnalyticsService {
         const rows = await agg.$queryRaw<
           Array<{ kind: string; key: string | null; fees: number; txs: number; gas: string | null; n: number }>
         >`
-          WITH f AS (
+          WITH raw AS MATERIALIZED (
+            -- The raw part of the window, read once: per target for the non-spam transactions sent
+            -- to an address, and one row (address NULL) for the rest, contract creations and spam.
+            SELECT CASE WHEN NOT t.is_spam THEN t.to_addr END AS address,
+                   sum(t.fee_wei) AS fee, count(*)::int AS txs, sum(t.gas_used) AS gas
+            FROM elysium_tx t
+            WHERE ${rawRanges(Prisma.sql`t.block_time`, cur)}
+            GROUP BY 1
+          ),
+          f AS (
             SELECT address, sum(fee) AS fee, sum(txs)::int AS txs, sum(gas) AS gas FROM (
               SELECT d.to_addr AS address, d.fee_wei AS fee, d.txs, d.gas_used AS gas
               FROM elysium_call_day d WHERE d.day = ANY(${rollupDays(cur)})
               UNION ALL
-              SELECT t.to_addr, t.fee_wei, 1, t.gas_used
-              FROM elysium_tx t
-              WHERE ${rawRanges(Prisma.sql`t.block_time`, cur)} AND NOT t.is_spam AND t.to_addr IS NOT NULL
+              SELECT address, fee, txs, gas FROM raw WHERE address IS NOT NULL
             ) u GROUP BY address
           ),
           k AS (
@@ -773,6 +782,15 @@ export class ElysiumAnalyticsService {
           )
           SELECT 'total' AS kind, NULL AS key, (COALESCE(sum(fee), 0) / 1e18)::float8 AS fees,
                  COALESCE(sum(txs), 0)::int AS txs, sum(gas)::text AS gas, count(*)::int AS n FROM f
+          UNION ALL
+          -- Every transaction of the window, as the economics page counts them: the day totals
+          -- of the rollup days and the whole of the raw part.
+          SELECT 'all', NULL,
+                 ((COALESCE((SELECT sum(r.fee_wei) FROM elysium_day_rollup r WHERE r.day = ANY(${rollupDays(cur)})), 0)
+                   + COALESCE((SELECT sum(fee) FROM raw), 0)) / 1e18)::float8,
+                 (COALESCE((SELECT sum(r.txs + r.spam_txs) FROM elysium_day_rollup r WHERE r.day = ANY(${rollupDays(cur)})), 0)
+                   + COALESCE((SELECT sum(txs) FROM raw), 0))::int,
+                 NULL, 1
           UNION ALL
           SELECT 'apps', NULL, (COALESCE(sum(fee), 0) / 1e18)::float8, COALESCE(sum(txs), 0)::int, sum(gas)::text, count(*)::int
           FROM k WHERE address NOT LIKE ${PRECOMPILE_LIKE}
@@ -786,6 +804,7 @@ export class ElysiumAnalyticsService {
            FROM k WHERE deployer IS NOT NULL GROUP BY deployer ORDER BY sum(fee) DESC, deployer LIMIT 15)`;
 
         const total = rows.find((r) => r.kind === 'total');
+        const all = rows.find((r) => r.kind === 'all');
         const apps = rows.find((r) => r.kind === 'apps');
         const system = rows.find((r) => r.kind === 'system');
         const contracts = rows.filter((r) => r.kind === 'contract' && r.key);
@@ -821,7 +840,14 @@ export class ElysiumAnalyticsService {
         const prevBy = new Map(prev.map((p) => [p.address, num(p.fees)]));
         const callersBy = callers;
 
-        const totalFees = num(total?.fees);
+        // What was paid for the transactions sent to an address (the tables below), and for every
+        // transaction. The total and the shares used to be the first: the fees of contract
+        // creations were in no part of it, the shares added up to 100% of less than was paid, and
+        // the total was not the one the economics page shows for the same days.
+        const calledFees = num(total?.fees);
+        const totalFees = Math.max(num(all?.fees), calledFees);
+        const transferFees = Math.max(0, calledFees - num(apps?.fees) - num(system?.fees));
+        const otherFees = Math.max(0, totalFees - calledFees);
         const pct = (v: number) => (totalFees > 0 ? v / totalFees : 0);
 
         return {
@@ -830,7 +856,9 @@ export class ElysiumAnalyticsService {
           to: now.toISOString(),
           totals: {
             feesHype: totalFees,
-            txs: total?.txs ?? 0,
+            // Every transaction of the window; `calledTxs` and `gasUsed` are the ones sent to an address.
+            txs: Math.max(all?.txs ?? 0, total?.txs ?? 0),
+            calledTxs: total?.txs ?? 0,
             gasUsed: num(total?.gas),
             appFeesHype: num(apps?.fees),
             appTxs: apps?.txs ?? 0,
@@ -838,6 +866,12 @@ export class ElysiumAnalyticsService {
             apps: apps?.n ?? 0,
             systemFeesHype: num(system?.fees),
             systemShare: pct(num(system?.fees)),
+            // Sent to an address that is neither a contract, a token nor a precompile.
+            transferFeesHype: transferFees,
+            transferShare: pct(transferFees),
+            // Contract creations, and what little the transactions flagged as spam paid.
+            otherFeesHype: otherFees,
+            otherShare: pct(otherFees),
           },
           contracts: contracts.map((r) => {
             const address = r.key as string;
