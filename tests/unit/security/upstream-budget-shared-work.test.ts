@@ -314,6 +314,16 @@ describe('budget and shared work', () => {
       expect(fetchFn).toHaveBeenCalledTimes(1);
     });
 
+    it('is served, with Redis unusable, what this process kept of the key: a copy costs nothing', async () => {
+      mockRedis.healthy = false;
+      for (let i = 0; i < 5; i++) countUpstreamCall('6.6.6.3');
+      const fetchFn = jest.fn(async () => 'kept');
+      // Someone within budget fetched it a moment ago.
+      await expect(cache.getOrSet('m', fetchFn, 60)).resolves.toBe('kept');
+      await expect(request('6.6.6.3', () => cache.getOrSet('m', fetchFn, 60))).resolves.toBe('kept');
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
     it('is refused an aggregate with Redis unusable instead of computing it uncached', async () => {
       mockRedis.healthy = false;
       for (let i = 0; i < 5; i++) countUpstreamCall('6.6.6.4');

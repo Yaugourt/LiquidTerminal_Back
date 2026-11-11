@@ -120,6 +120,22 @@ const LAST_COPY_MAX_CHARS = positiveIntEnv('CACHE_LAST_COPY_MAX_CHARS', 256 * 10
  */
 export const SHARED_LAST_COPY_KEEP_S = positiveIntEnv('CACHE_SHARED_LAST_COPY_S', 3_600);
 
+/**
+ * What this process keeps of the values it fetches while Redis cannot be used.
+ *
+ * With Redis down every read went to its source: each refresh of a page was a billed call to
+ * the provider, or a query of several seconds, for every visitor and every poll. A value fetched
+ * during the outage is now kept here for its own TTL (five minutes at most), so the sources are
+ * asked as often as they are when the cache works, per process.
+ *
+ * Bounded in size, not only in entries: 32 MB of serialized values in all (the least recently
+ * written leaves first), and a value over 1 MB is not kept.
+ */
+const MEMORY_FALLBACK_MAX_CHARS = positiveIntEnv('CACHE_MEMORY_FALLBACK_MAX_CHARS', 32 * 1024 * 1024);
+const MEMORY_FALLBACK_ENTRY_MAX_CHARS = 1024 * 1024;
+const MEMORY_FALLBACK_MAX_TTL_S = 300;
+const MEMORY_FALLBACK_SWEEP_MS = 60_000;
+
 const lastCopyKey = (key: string): string => `${key}:last`;
 const failMarkerKey = (key: string): string => `${key}:fail`;
 
@@ -182,6 +198,10 @@ export class CacheService {
    * request.
    */
   private readonly directFetches = new Map<string, Promise<Recomputed<unknown>>>();
+  /** Values fetched while Redis could not be used, by key (see MEMORY_FALLBACK_MAX_CHARS). */
+  private readonly memory = new Map<string, { serialized: string; until: number }>();
+  private memoryChars = 0;
+  private memorySweep: NodeJS.Timeout | null = null;
   /** getOrRefresh entries (their `:swr` key) being refreshed in the background by this process. */
   private readonly refreshing = new Set<string>();
   /** No new background refresh of an entry before this time: set when its refresh failed. */
@@ -239,7 +259,7 @@ export class CacheService {
     // source. Without this a wedged Redis connection would stall every request
     // through the get → lock → get → set path until the edge returns 502.
     if (!redisService.isHealthy()) {
-      return { data: await this.directFetch(key, fetchFn), stale: false };
+      return { data: await this.directFetch(key, fetchFn, ttl), stale: false };
     }
     const keepLastCopy = options.lastCopy !== false;
     try {
@@ -299,12 +319,19 @@ export class CacheService {
         key,
         errorMessage: error instanceof Error ? error.message : 'Unknown error'
       });
-      return { data: await this.directFetch(key, fetchFn), stale: false };
+      return { data: await this.directFetch(key, fetchFn, ttl), stale: false };
     }
   }
 
-  /** fetchFn without the cache, shared by concurrent callers of the key in this process. */
-  private async directFetch<T>(key: string, fetchFn: () => Promise<T>): Promise<T> {
+  /**
+   * fetchFn without Redis: shared by concurrent callers of the key in this process, and its
+   * value kept in this process for the key's TTL (see MEMORY_FALLBACK_MAX_CHARS), so that an
+   * outage of Redis does not turn every read into a call to its source.
+   */
+  private async directFetch<T>(key: string, fetchFn: () => Promise<T>, ttl: CacheTtl<T>): Promise<T> {
+    const kept = this.memoryRead<T>(key);
+    if (kept) return kept.value;
+
     const inflight = this.directFetches.get(key) as Promise<Recomputed<T>> | undefined;
     if (inflight) return copyOf(await inflight);
 
@@ -320,6 +347,7 @@ export class CacheService {
       } catch {
         serialized = undefined;
       }
+      if (serialized !== undefined) this.memoryWrite(key, serialized, resolveTtl(ttl, data));
       return { data, serialized };
     })();
     this.directFetches.set(key, fetching);
@@ -328,6 +356,48 @@ export class CacheService {
     } finally {
       if (this.directFetches.get(key) === fetching) this.directFetches.delete(key);
     }
+  }
+
+  /** The value kept in this process for `key`, as a copy of its own, while it is within its TTL. */
+  private memoryRead<T>(key: string): { value: T } | undefined {
+    const entry = this.memory.get(key);
+    if (!entry) return undefined;
+    if (Date.now() >= entry.until) {
+      this.memoryDrop(key);
+      return undefined;
+    }
+    return { value: JSON.parse(entry.serialized) as T };
+  }
+
+  private memoryWrite(key: string, serialized: string, ttlS: number): void {
+    this.memoryDrop(key);
+    if (serialized.length > MEMORY_FALLBACK_ENTRY_MAX_CHARS) return;
+    this.memory.set(key, { serialized, until: Date.now() + Math.min(ttlS, MEMORY_FALLBACK_MAX_TTL_S) * 1000 });
+    this.memoryChars += serialized.length;
+    // Over the ceiling: the least recently written leave first.
+    for (const oldest of this.memory.keys()) {
+      if (this.memoryChars <= MEMORY_FALLBACK_MAX_CHARS) break;
+      this.memoryDrop(oldest);
+    }
+    // Once Redis is back nothing reads these entries any more: they leave when their TTL is over.
+    if (!this.memorySweep) {
+      this.memorySweep = setInterval(() => {
+        const now = Date.now();
+        for (const [k, entry] of this.memory) if (now >= entry.until) this.memoryDrop(k);
+        if (this.memory.size === 0 && this.memorySweep) {
+          clearInterval(this.memorySweep);
+          this.memorySweep = null;
+        }
+      }, MEMORY_FALLBACK_SWEEP_MS);
+      this.memorySweep.unref?.();
+    }
+  }
+
+  private memoryDrop(key: string): void {
+    const entry = this.memory.get(key);
+    if (!entry) return;
+    this.memoryChars -= entry.serialized.length;
+    this.memory.delete(key);
   }
 
   /** One recomputation per key in this process; followers get a copy of what was stored. */
@@ -536,7 +606,7 @@ export class CacheService {
   async getOrRefresh<T>(key: string, fetchFn: () => Promise<T>, freshS: number, keepS: number): Promise<T> {
     // Redis unusable: computed for the caller, once for everyone asking at the same time
     // (directFetch refuses an over-budget caller that has nothing to join).
-    if (!redisService.isHealthy()) return this.directFetch(key, fetchFn);
+    if (!redisService.isHealthy()) return this.directFetch(key, fetchFn, freshS);
     const swrKey = `${key}:swr`;
     const store = async (value: T): Promise<void> => {
       await redisService.set(swrKey, JSON.stringify({ at: Date.now(), value }), keepS);
@@ -564,7 +634,7 @@ export class CacheService {
         key,
         errorMessage: error instanceof Error ? error.message : 'Unknown error',
       });
-      return this.directFetch(key, fetchFn);
+      return this.directFetch(key, fetchFn, freshS);
     }
   }
 
@@ -619,6 +689,8 @@ export class CacheService {
    * @param key Clé de cache à invalider
    */
   async invalidate(key: string): Promise<void> {
+    // What this process kept of the key while Redis could not be used goes too, Redis reachable or not.
+    this.memoryDrop(key);
     try {
       await Promise.all([redisService.delete(key), redisService.delete(lastCopyKey(key))]);
       logDeduplicator.info('Cache invalidated', { key });
@@ -637,6 +709,8 @@ export class CacheService {
    * @param pattern Pattern des clés à invalider
    */
   async invalidateByPattern(pattern: string): Promise<void> {
+    const matches = new RegExp(`^${pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
+    for (const key of [...this.memory.keys()]) if (matches.test(key)) this.memoryDrop(key);
     try {
       const [keys, copies] = await Promise.all([
         redisService.scan(pattern),

@@ -630,8 +630,145 @@ describe('CacheService.getOrRefresh', () => {
     const answers = await Promise.all(Array.from({ length: 5 }, () => cache.getOrRefresh('down', fetchFn, 60, 3600)));
     expect(answers).toEqual(Array(5).fill('direct'));
     expect(fetchFn).toHaveBeenCalledTimes(1);
-    // Nothing is kept without Redis: a later caller computes again.
-    await cache.getOrRefresh('down', fetchFn, 60, 3600);
-    expect(fetchFn).toHaveBeenCalledTimes(2);
+    // Kept in this process while it is fresh: a later caller does not compute again.
+    await expect(cache.getOrRefresh('down', fetchFn, 60, 3600)).resolves.toBe('direct');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * With Redis down every read went to its source: each poll of each visitor was a billed call or
+ * a query of seconds. What is fetched during the outage is now kept in this process for the
+ * key's TTL.
+ */
+describe('CacheService while Redis cannot be used', () => {
+  let cache: CacheService;
+  let now: number;
+
+  beforeEach(() => {
+    mockRedis.store.clear();
+    mockRedis.expiries.clear();
+    mockRedis.locks.clear();
+    mockRedis.foreignLock = false;
+    mockRedis.lockFails = false;
+    mockRedis.healthy = false;
+    mockRedis.get.mockClear();
+    mockRedis.set.mockClear();
+    now = Date.parse('2026-11-12T10:00:00Z');
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    cache = new CacheService();
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    mockRedis.healthy = true;
+  });
+
+  it('keeps a value for its TTL: the source is asked as often as when the cache works', async () => {
+    let calls = 0;
+    const fetchFn = jest.fn(async () => ({ n: ++calls }));
+    for (let second = 0; second < 15; second++) {
+      await cache.getOrSet('list', fetchFn, 5);
+      now += 1000;
+    }
+    // 15 seconds of polls on a 5-second key: 3 fetches, not 15.
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    expect(mockRedis.get).not.toHaveBeenCalled();
+    expect(mockRedis.set).not.toHaveBeenCalled();
+  });
+
+  it('hands out copies: what a caller does to its value stays its own', async () => {
+    const first = await cache.getOrSet('obj', async () => ({ rows: [1, 2] }), 60);
+    first.rows.push(99);
+    await expect(cache.getOrSet('obj', async () => ({ rows: [] as number[] }), 60)).resolves.toEqual({ rows: [1, 2] });
+  });
+
+  it('keeps a long-lived key five minutes at most, and a key with a computed TTL for that TTL', async () => {
+    const hourly = jest.fn(async () => 'h');
+    await cache.getOrSet('hourly', hourly, 3600);
+    now += 299_000;
+    await cache.getOrSet('hourly', hourly, 3600);
+    expect(hourly).toHaveBeenCalledTimes(1);
+    now += 2_000;
+    await cache.getOrSet('hourly', hourly, 3600);
+    expect(hourly).toHaveBeenCalledTimes(2);
+
+    const computed = jest.fn(async () => ({ live: true }));
+    await cache.getOrSet('computed', computed, (value) => (value.live ? 2 : 600));
+    now += 1_500;
+    await cache.getOrSet('computed', computed, () => 2);
+    expect(computed).toHaveBeenCalledTimes(1);
+    now += 1_000;
+    await cache.getOrSet('computed', computed, () => 2);
+    expect(computed).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not keep a value over 1 MB, nor a value that cannot be written as JSON', async () => {
+    const big = jest.fn(async () => 'x'.repeat(1024 * 1024 + 1));
+    await cache.getOrSet('big', big, 60);
+    await cache.getOrSet('big', big, 60);
+    expect(big).toHaveBeenCalledTimes(2);
+
+    const loop: Record<string, unknown> = {};
+    loop.self = loop;
+    const circular = jest.fn(async () => loop);
+    await cache.getOrSet('circular', circular, 60);
+    await cache.getOrSet('circular', circular, 60);
+    expect(circular).toHaveBeenCalledTimes(2);
+  });
+
+  it('holds 32 MB of values in all: the least recently written leave first', async () => {
+    const value = 'v'.repeat(1_000_000);
+    const fetchFn = jest.fn(async () => value);
+    for (let i = 0; i < 40; i++) await cache.getOrSet(`k${i}`, fetchFn, 60);
+    expect(fetchFn).toHaveBeenCalledTimes(40);
+    // The newest are still there, the oldest are gone.
+    await cache.getOrSet('k39', fetchFn, 60);
+    await cache.getOrSet('k20', fetchFn, 60);
+    expect(fetchFn).toHaveBeenCalledTimes(40);
+    await cache.getOrSet('k0', fetchFn, 60);
+    expect(fetchFn).toHaveBeenCalledTimes(41);
+    const held = (cache as unknown as { memoryChars: number }).memoryChars;
+    expect(held).toBeLessThanOrEqual(32 * 1024 * 1024);
+  });
+
+  it('keeps what an aggregate computed too (getOrRefresh), for its fresh time', async () => {
+    const compute = jest.fn(async () => 'agg');
+    await cache.getOrRefresh('agg', compute, 60, 3600);
+    now += 59_000;
+    await cache.getOrRefresh('agg', compute, 60, 3600);
+    expect(compute).toHaveBeenCalledTimes(1);
+    now += 2_000;
+    await cache.getOrRefresh('agg', compute, 60, 3600);
+    expect(compute).toHaveBeenCalledTimes(2);
+  });
+
+  it('forgets a key that is invalidated, by name or by pattern', async () => {
+    const fetchFn = jest.fn(async () => 1);
+    await cache.getOrSet('wallet:0xabc:fills', fetchFn, 60);
+    await cache.getOrSet('wallet:0xabc:funding', fetchFn, 60);
+    await cache.getOrSet('other', fetchFn, 60);
+    await cache.invalidate('other');
+    await cache.invalidateByPattern('wallet:0xabc:*');
+    await cache.getOrSet('wallet:0xabc:fills', fetchFn, 60);
+    await cache.getOrSet('wallet:0xabc:funding', fetchFn, 60);
+    await cache.getOrSet('other', fetchFn, 60);
+    expect(fetchFn).toHaveBeenCalledTimes(6);
+  });
+
+  it('reads Redis again as soon as it is back', async () => {
+    await cache.getOrSet('k', async () => 'during the outage', 60);
+    mockRedis.healthy = true;
+    mockRedis.store.set('k', JSON.stringify('from Redis'));
+    await expect(cache.getOrSet('k', async () => 'fetched', 60)).resolves.toBe('from Redis');
+  });
+
+  it('keeps a value too when Redis answers but the cache itself fails', async () => {
+    mockRedis.healthy = true;
+    const broken = new Error('READONLY You can\'t write against a read only replica');
+    mockRedis.get.mockRejectedValueOnce(broken).mockRejectedValueOnce(broken);
+    const fetchFn = jest.fn(async () => 'source');
+    await expect(cache.getOrSet('broken', fetchFn, 30)).resolves.toBe('source');
+    await expect(cache.getOrSet('broken', fetchFn, 30)).resolves.toBe('source');
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 });
