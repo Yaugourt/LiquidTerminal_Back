@@ -70,6 +70,15 @@ interface PathSpend {
   credits: number;
 }
 
+/**
+ * Distinct paths one process names in a day; the calls to any further one are counted together
+ * under OTHER_PATHS. creditPath folds addresses, hashes and numeric ids, not every identifier a
+ * path can carry (a ticker, a composite trade id): without a ceiling, each new one would add a
+ * field to the day's hashes in Redis, which the status reads whole every 15 seconds.
+ */
+const MAX_PATHS_A_DAY = 200;
+const OTHER_PATHS = '(other paths)';
+
 export interface CreditSummary {
   /** The last UTC days, today first; null for a day Redis holds no total of. */
   days: Array<{ day: string; credits: number | null }>;
@@ -86,6 +95,9 @@ export class HypedexerCreditMeter {
   private timer: NodeJS.Timeout | null = null;
   private warnedDay: string | null = null;
   private lastBalance: number | null = null;
+  /** The paths named so far on `namedDay`. */
+  private readonly named = new Set<string>();
+  private namedDay = '';
 
   /** Record one successful upstream response. Ignores responses without a cost header. */
   record(url: string, costHeader: string | null, balanceHeader?: string | null): void {
@@ -93,7 +105,7 @@ export class HypedexerCreditMeter {
     const cost = Number(costHeader);
     if (!Number.isFinite(cost) || cost < 0) return;
 
-    const path = creditPath(url);
+    const path = this.bounded(creditPath(url));
     const spend = this.perPath.get(path) ?? { calls: 0, credits: 0 };
     spend.calls += 1;
     spend.credits += cost;
@@ -104,6 +116,19 @@ export class HypedexerCreditMeter {
 
     this.ensureTimer();
     void this.addToDay(cost);
+  }
+
+  /** `path`, or OTHER_PATHS once this process has named MAX_PATHS_A_DAY of them today. */
+  private bounded(path: string): string {
+    const day = utcDay();
+    if (day !== this.namedDay) {
+      this.namedDay = day;
+      this.named.clear();
+    }
+    if (this.named.has(path)) return path;
+    if (this.named.size >= MAX_PATHS_A_DAY) return OTHER_PATHS;
+    this.named.add(path);
+    return path;
   }
 
   private async addToDay(cost: number): Promise<void> {
@@ -224,6 +249,8 @@ export class HypedexerCreditMeter {
     this.perPath = new Map();
     this.warnedDay = null;
     this.lastBalance = null;
+    this.named.clear();
+    this.namedDay = '';
   }
 }
 

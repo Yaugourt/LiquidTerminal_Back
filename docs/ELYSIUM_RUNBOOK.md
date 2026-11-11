@@ -8,24 +8,32 @@ analytics views) needs a hand. Every limit and cadence quoted here is listed in
 
 ## 1. Where to look first
 
-One route says how the whole ingestion is doing:
+One route says how the data is doing, and is public:
 
 ```bash
-curl -s "$BACK/elysium/analytics/status" | jq '.data | {streams: [.streams[] | {stream, state, lagSeconds, lastOkAt, lastError}], provider, rollups, completeness: {differing: .completeness.differing}, rejects, upkeep, credits, database}'
+curl -s "$BACK/elysium/analytics/status" | jq '.data | {partial, streams: [.streams[] | {stream, state, lagSeconds, lastOkAt, lastError}], provider, rollups, completeness: {differing: .completeness.differing}, rejects, upkeep}'
+```
+
+The same, with what the provider bills and how full the database is, is for an admin (a Privy
+token of an account whose role is ADMIN, as the admin pages send it):
+
+```bash
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$BACK/elysium/analytics/status/ops" | jq '.data | {credits, database}'
 ```
 
 | Field | What it says |
 | --- | --- |
 | `streams[].state` | `ok`, `failing` (its last run failed, `lastError` says how), `stalled` (no completed run for 3 of its periods and 5 minutes: its loop does not run), `behind` (its data is late while the provider is not), `waiting-provider` (its data stops where the provider's index stops), `backfilling` (it runs and has not read the chain's history to the end yet: a new database or a new stream) |
 | `streams[].lastOkAt` | when the stream last completed a run, with or without rows to write |
-| `streams[].lagSeconds` | age of the stream's data; `null` for the streams whose cursor is the time of their run (`tokens`, `methods`, `tokenstats`, `launchstats`) |
+| `streams[].lagSeconds` | age of the stream's data; for `bridge`, the age of its newest transfer (no fault: nobody may have bridged for hours); `null` for the streams whose cursor is the time of their run (`tokens`, `methods`, `tokenstats`, `launchstats`) and for the RPC fallback `txlive` |
+| `partial` | the parts of the status that could not be read at this computation (`rollups`, `database`, `rejects`, `completeness`, `credits`): shown empty, and to be read as unknown |
 | `provider` | the provider's last indexed block time and how far behind the clock it is |
 | `rollups` | built days, closed days waiting for their rollup, the builder's last error, the disk they take |
 | `completeness` | for the last 7 closed days: our transaction count and the provider's, and `differing` |
 | `rejects` | what was read and not stored, per stream and reason, today / yesterday / 7 days |
 | `upkeep` | the one-time jobs (`launchstate`, `kilngrads`, `bridgedeep`, …) and whether they are done |
-| `credits` | HypeDexer credits per UTC day (8 days), today's most expensive paths, the balance |
-| `database` | size of the historical database, and its share of the volume when `HISTORICAL_DB_VOLUME_BYTES` is set |
+| `credits` (admin route) | HypeDexer credits per UTC day (8 days), today's most expensive paths, the balance |
+| `database` (admin route) | size of the historical database, and its share of the volume when `HISTORICAL_DB_VOLUME_BYTES` is set (the database alone: the write-ahead log and anything else on the volume are not counted, so the real share is a little higher) |
 | `views` | each scheduled view: last computation, its duration, its last error |
 
 `GET $BACK/api/health` answers the process's uptime: after a deploy, a small uptime is the proof
@@ -36,19 +44,34 @@ the new image runs (the deploy status GitHub shows can be wrong, see section 10)
 Once a minute the backend reads that status and sends a message to `ELYSIUM_ALERT_WEBHOOK_URL`
 (a Discord or Slack webhook, or Telegram's `sendMessage` with `ELYSIUM_ALERT_TELEGRAM_CHAT_ID`)
 when something has been wrong for long enough, again every 6 hours while it lasts, and once when
-it is over. Without a URL the same lines go to the log (`Elysium alert (no webhook set)`). What was already said
-is kept in Redis (`elysium:alerts`), so a restart repeats nothing.
+it has been over for 5 minutes. Without a URL the same lines go to the log
+(`Elysium alert (no webhook set)`). What was already said is kept in Redis (`elysium:alerts`),
+so a restart repeats nothing.
+
+The loop runs in the process that serves the API, not in an ingestion-only worker
+(`PROCESS_ROLE=elysium-worker`): the webhook's address goes on the API service. With Telegram's
+address, `ELYSIUM_ALERT_TELEGRAM_CHAT_ID` is required: without it Telegram refuses every message
+(an error says so in the log at start).
 
 | Message | Sent after | Section |
 | --- | --- | --- |
-| `stream <name> is failing / stalled / behind` | 3 min | 3 |
+| `stream <name> is failing` | 3 min, or 3 of the stream's periods when that is longer (one failed run of a stream that runs every 15 min is not news) | 3 |
+| `stream <name> is stalled / behind` | 3 min | 3 |
 | `the provider's index has not moved for …` | 10 min of lag | 4 |
-| `<day> differs from the provider` | at once | 5 |
+| `<day> still differs from the provider after being read again whole` | at once | 5 |
+| `<day> differs from the provider and is still not equal` | 3 h (the daily check is reading it again meanwhile) | 5 |
 | `the day rollups fail` / `N closed days wait for their rollups` | 10 min / 30 min | 6 |
-| `N <reason> on the <stream> stream today` | at once (once a day per reason) | 7 |
-| `… HypeDexer credits spent today, over 1.3 times …` | at once (once a day) | 8 |
+| `N <reason> on the <stream> stream today` | at once, per stream and reason, for that day | 7 |
+| `… HypeDexer credits spent today, over 1.3 times …` | at once, for that day | 8 |
 | `the historical database fills N% of its volume` | at 80% | 9 |
-| `the job <name> fails` / `the view <name> fails` | 10 min | 3 |
+| `the job <name> fails` / `the view <name> fails` | 10 min (scheduled views only) | 3 |
+| `the status of the ingestion has not been computed for …` | 5 min | below |
+| `the status of the ingestion could not be read for N min` | 5 looks in a row | below |
+
+The last two mean the loop itself is blind: the status view fails or is not computed (look at
+`views` for `elysium:analytics:status`, at the pages pool of the historical database, at Redis).
+While that lasts nothing else is said, and nothing is said to be over. A part of the status that
+could not be read (`partial`) is treated the same way for the conditions it feeds.
 
 ## 3. A stream is failing, stalled or behind
 
@@ -73,12 +96,17 @@ is kept in Redis (`elysium:alerts`), so a restart repeats nothing.
    idle open transaction after 5 minutes, so nothing of ours stays stuck longer than that.
 5. `stalled`: the stream's loop does not run. Is there a process that runs the ingestion
    (`ELYSIUM_INGEST_ENABLED` not `false`; or the service with `PROCESS_ROLE=elysium-worker`)? Is
-   it up (`/api/health`, Railway logs)? A run that takes too long is given up on its own
-   (5 minutes; 20 for `tokens`, the rollups and the launch state) and the next one starts; a lock
-   left by a process that died (`poll:elysium-ingest:<stream>` in Redis) expires by itself within
-   2 minutes. If the process is up and the stream still does not run, restart the service.
-6. `behind` on `dex` or `launchpad` (they read logs from the RPC): the RPC is slow or refuses
-   (`lastError`), or a backlog is being read after an outage: the lag then shrinks run after run.
+   it up (`/api/health`, Railway logs)? A run that stands still is given up on its own (5 minutes
+   without reaching its next page, write or window; 20 for `tokens`, the rollups and the launch
+   state) and the next one starts: the stream then shows `failing` with `tick_time_limit`. A run
+   that keeps moving on is left alone for up to 6 times that, after which the stream takes a
+   window half as long. A lock left by a process that died (`poll:elysium-ingest:<stream>` in
+   Redis) expires by itself within 2 minutes. If the process is up and the stream still does not
+   run, restart the service.
+6. `behind` (`tx`, `dex`, `launchpad`: the chain never stops, so late data is a fault): for `dex`
+   and `launchpad`, which read logs from the RPC, the RPC is slow or refuses (`lastError`), or a
+   backlog is being read after an outage: the lag then shrinks run after run. The `bridge` is
+   never `behind`: its lag is the age of its newest transfer.
 
 A job of `upkeep` or a view in error: the message quotes the error category. A view keeps
 serving its last value while it fails; it is computed again at its cadence.
@@ -200,6 +228,10 @@ How long the raw transactions are kept is a decision still to take (see the audi
 ## 10. Deploying, and going back
 
 - Order: backend first, then the frontend. The backend's pre-deploy step applies the migrations.
+- With an ingestion-only worker service next to the API service: deploy the worker first, or
+  both together. The alerts of the API service tell a stream that runs by the time of its last
+  completed run, which only the code of 2026-11-11 and later writes: an older worker beside a
+  newer API would have every stream said to be stalled.
 - After a push, check `GET $BACK/api/health`: a small uptime means the new image runs. During a
   Railway incident a deploy can wait an hour or more: do not trigger it again.
 - A pre-deploy that fails with `P1001` (database unreachable) is on Railway's side: Redeploy.
@@ -229,8 +261,9 @@ TEST_HISTORICAL_DATABASE_URL=$HISTORICAL_DATABASE_URL npm run test:db
 ```
 
 They empty the Elysium tables as they go, and refuse to run on a database whose name does not
-contain `test` or `scratch`. A change to a statement of the ingestion, of the daily check, of
-the rollups or of a view gets its test there.
+hold `test` or `scratch` as a word (`elysium_test`, not `latest`), or that is not on the machine
+they run on (`TEST_DB_ALLOW_REMOTE=1` allows it). A change to a statement of the ingestion, of
+the daily check, of the rollups or of a view gets its test there.
 
 ## 12. Three things not to do
 

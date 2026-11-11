@@ -114,6 +114,20 @@ describe('HypedexerCreditMeter', () => {
     expect(mockLog.info).not.toHaveBeenCalled();
   });
 
+  it('names at most 200 paths a day: the calls to any further one are counted together', async () => {
+    // A path that carries an identifier creditPath does not fold (a ticker, a composite id).
+    for (let i = 0; i < 260; i++) meter.record(`https://api.hypedexer.com/hip3/assets/TICKER${String.fromCharCode(65 + (i % 26))}x${i}`, '2', null);
+    meter.record('https://api.hypedexer.com/hip3/assets/TICKERAx0', '2', null);
+    await flushPromises();
+    meter.flush();
+    const [, line] = mockLog.info.mock.calls.find(([message]) => message === 'HypeDexer credits (last minute)') as [string, { calls: number; credits: number; topPaths: string[] }];
+    expect(line.calls).toBe(261);
+    expect(line.credits).toBe(522);
+    // 60 calls beyond the 200 names, under one name; the path already named keeps its own.
+    expect(line.topPaths[0]).toBe('(other paths) 120cr/60');
+    expect(line.topPaths).toContain('/hip3/assets/TICKERAx0 4cr/2');
+  });
+
   it('adds up the day in Redis with an expiry, and warns once past the budget', async () => {
     process.env.HYPEDEXER_DAILY_CREDIT_BUDGET = '1000';
     meter.record('https://api.hypedexer.com/a', '600', null);
