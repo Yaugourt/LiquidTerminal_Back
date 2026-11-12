@@ -53,8 +53,14 @@ const PRECOMPILE = '0x' + '0'.repeat(38) + '64';
 const EOAS = Array.from({ length: 20 }, (_, i) => A(0xe000 + i));
 const METHODS = ['0xa9059cbb', '0x095ea7b3', '0x38ed1739', null];
 
-/** The clock of the code under test: only Date is faked, the timers of the driver run for real. */
-const BASE = Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS;
+/**
+ * The clock of the code under test: only Date is faked, the timers of the driver run for real.
+ * Thirty seconds past a minute, never on one: the builder asks to be run again 5 s later when
+ * an hour is about to close (3 min 0 s to 3 min 5 s past the hour), and under a clock that
+ * stands still that answer never changes. A run of these tests that started at a minute :03
+ * never saw the builder come to rest (the first run in CI did, at 09:03 UTC).
+ */
+const BASE = Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS + 30_000;
 function setClock(ms: number): void {
   jest.setSystemTime(ms);
 }
@@ -140,6 +146,7 @@ async function build(): Promise<void> {
   );
   let idle = 0;
   for (let i = 0; i < 300 && idle < 2; i++) idle = (await builder.tick()) > 5_000 ? idle + 1 : 0;
+  // At rest: two passes in a row with nothing to do but wait for the next hour.
   expect(idle).toBe(2);
 }
 
