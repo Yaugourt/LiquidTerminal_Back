@@ -36,6 +36,8 @@ const MISSING_TIME_BLOCKS_MAX = 200;
  * gap (measured 2026-10-22); the chain makes ~8 blocks/s.
  */
 export const BLOCK_BATCH = 25;
+/** A share of supply is worked out to 18 digits before it becomes a number. */
+const SHARE_SCALE = BigInt(10) ** BigInt(18);
 
 /** A deterministic refusal: retrying the same range cannot succeed, it has to be narrowed. */
 export class TooManyLogsError extends Error {
@@ -212,6 +214,34 @@ export class ElysiumRpcLogs {
       blocks.push({ number: parseInt(b.number, 16), timestamp: parseInt(b.timestamp, 16), transactions: b.transactions ?? [] });
     }
     return blocks;
+  }
+
+  /**
+   * The share of a token's supply one address holds, read from the chain on its latest block
+   * (balanceOf / totalSupply): the figure the provider's holder list calls `share`, equal to it
+   * to the last digit on a holder ranked 127th of 127 (measured 2026-11-12). Null when the token
+   * has no supply. Throws when the token does not answer both calls with a number (not every
+   * contract a launchpad emits is a standard token), or when the RPC does not answer: the caller
+   * then reads the provider's list.
+   */
+  public async holderShare(token: string, holder: string): Promise<number | null> {
+    const call = (id: number, data: string): { jsonrpc: string; id: number; method: string; params: unknown[] } => ({
+      jsonrpc: '2.0',
+      id,
+      method: 'eth_call',
+      params: [{ to: token, data }, 'latest'],
+    });
+    const replies = await this.callBatch<string>([
+      call(0, `0x70a08231${holder.slice(2).toLowerCase().padStart(64, '0')}`),
+      call(1, '0x18160ddd'),
+    ]);
+    const word = (v: string | undefined): bigint | null => (typeof v === 'string' && /^0x[0-9a-f]{64}$/i.test(v) ? BigInt(v) : null);
+    const balance = word(replies.get(0));
+    const supply = word(replies.get(1));
+    if (balance === null || supply === null) throw new Error('Elysium RPC: token balance not readable');
+    if (supply === BigInt(0)) return null;
+    // Scaled before the division: both are 256-bit integers, the share a fraction of 1.
+    return Number((balance * SHARE_SCALE) / supply) / Number(SHARE_SCALE);
   }
 
   /** Last block whose timestamp is at or before `ts` (seconds); only past times are memoised. */

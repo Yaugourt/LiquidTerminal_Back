@@ -94,8 +94,15 @@ class PageIncompleteError extends Error {
  * and says so, as before.
  */
 const MAX_REFUSED_PER_PAGE = 25;
-/** At most ~2 upstream calls per second across every stream. */
-const MIN_CALL_GAP_MS = 500;
+/**
+ * The calls of every stream take turns this far apart: 2.2 a second at most. It was 500 ms
+ * until 2026-11-12. The streams together use about 105 of the 120 turns a minute, and the
+ * holder stats run back to back on what is left: the token page now read for each traded
+ * launch with 20 holders or more (380 of them, every half hour: 18,000 calls a day, see
+ * LAUNCH_HOLDERS_LIMIT) would have been taken from the walk through the quiet launches. The 50
+ * ms give those turns back (19,200 a day), spread evenly, instead of sending two calls at once.
+ */
+const MIN_CALL_GAP_MS = 450;
 /** How often the provider's last indexed block time is read, at least. */
 const HEAD_REFRESH_MS = 30_000;
 /**
@@ -257,8 +264,20 @@ const LAUNCH_STATS_ACTIVE_MAX_AGE_S = 30 * 60;
 const LAUNCH_STATS_QUIET_MAX_AGE_S = 14 * 60;
 const LAUNCH_STATS_BATCH = 60;
 const LAUNCH_STATS_PRIORITY = 40;
-/** Holder page size: launch tokens have far fewer holders, a full page falls back to the detail count. */
-const LAUNCH_HOLDERS_LIMIT = 1000;
+/**
+ * How many of a launch's largest holders are read. What is kept of them is three figures: how
+ * many there are, what the ten largest hold, what the creator holds. The list used to be read
+ * up to 1,000 rows, billed by the row, to keep ten: the launches traded over a day (661 on
+ * 2026-11-12, 17 of them with more than 1,000 holders, read every half hour) cost 11,500
+ * credits a round, 550,000 a day. The ten largest outside the token's own market are always
+ * within the first 10 + the addresses left out (its curve, its pool, the creator locker, the V4
+ * managers); a list that comes back full takes its count from the token's page (3 credits), and
+ * a creator who is not in it has their share read from the chain (see creatorShare). The same
+ * three figures for 3,800 credits a round.
+ */
+const LAUNCH_HOLDERS_LIMIT = Math.max(20, 10 + 3 + V4_POOL_MANAGERS.length);
+/** The list as it was read before, for a creator's share when the chain cannot be asked. */
+const LAUNCH_HOLDERS_FULL = 1000;
 /** Daily comparison with the provider: wait after a run that failed or found its lock taken. */
 const DAY_CHECK_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
 /** Day rollups: wait after a pass that failed or found the builder's lock taken. */
@@ -304,6 +323,29 @@ function rowKey(raw: unknown): string {
   const id = [r.tx_hash, r.transfer_id, r.address].find((v) => typeof v === 'string' && v !== '');
   const key = typeof id === 'string' ? id.toLowerCase() : JSON.stringify(raw).slice(0, 200);
   return r.log_index !== undefined && r.log_index !== null ? `${key}:${String(r.log_index)}` : key;
+}
+
+interface LaunchHolder {
+  address: string;
+  /** 0..1 of the supply. */
+  share: number;
+}
+
+interface LaunchHoldersRead {
+  holders: LaunchHolder[];
+  /** The token's page, read only when the list came back full. */
+  detail: Record<string, unknown> | null;
+  /** The creator's share of the supply (0..1); null when the launch has no known creator. */
+  dev: number | null;
+}
+
+/** The provider's holder rows that carry an address and a share of the supply, largest first as given. */
+function parseHolders(raw: readonly unknown[]): LaunchHolder[] {
+  return raw
+    .map((h) => (h && typeof h === 'object' ? (h as Record<string, unknown>) : null))
+    .filter((h): h is Record<string, unknown> => h !== null)
+    .map((h) => ({ address: String(h.address ?? '').toLowerCase(), share: Number(h.share) }))
+    .filter((h) => /^0x[0-9a-f]{40}$/.test(h.address) && Number.isFinite(h.share) && h.share > 0);
 }
 
 /** A row the provider flags as a system transaction (left out on purpose, never a reject). */
@@ -1719,6 +1761,50 @@ export class ElysiumIngestionService {
   // launchstats stream (holders, top-10 share, creator share per launch)
   // ---------------------------------------------------------------------------
 
+  /**
+   * A launch's largest holders (see LAUNCH_HOLDERS_LIMIT), the token's page when the list came
+   * back full (it then carries the count), and the creator's share of the supply (null without a
+   * known creator). Null when the provider does not know the token.
+   */
+  private async readLaunchHolders(token: string, creator: string | null): Promise<LaunchHoldersRead | null> {
+    await this.throttle.wait();
+    const raw = await this.client.fetchIngestTokenHolders(token, LAUNCH_HOLDERS_LIMIT);
+    if (!raw) return null;
+    const full = raw.length >= LAUNCH_HOLDERS_LIMIT;
+    let detail: Record<string, unknown> | null = null;
+    if (full) {
+      await this.throttle.wait();
+      detail = await this.client.fetchIngestToken(token);
+    }
+    const holders = parseHolders(raw);
+    if (!creator) return { holders, detail, dev: null };
+    const listed = holders.find((h) => h.address === creator);
+    // A list that is whole and does not name the creator: they hold nothing.
+    const dev = listed ? listed.share : full ? await this.creatorShare(token, creator) : 0;
+    return { holders, detail, dev };
+  }
+
+  /**
+   * What a creator who is not among the largest holders read still holds: asked of the chain
+   * (the token's balanceOf over its totalSupply, the provider's own `share`), which costs
+   * nothing. When the chain cannot be asked (the RPC fails, or the token does not answer like
+   * one), the provider's list is read as far as it used to be, so the figure is never guessed.
+   */
+  private async creatorShare(token: string, creator: string): Promise<number> {
+    try {
+      return (await this.rpcLogs.holderShare(token, creator)) ?? 0;
+    } catch (error) {
+      if (ElysiumIngestionService.endsTick(error)) throw error;
+      logDeduplicator.warn('Elysium ingest: creator share read from the provider list, the chain did not give it', {
+        errorType: error instanceof Error ? error.name : typeof error,
+      });
+      this.ensureRunning();
+      await this.throttle.wait();
+      const raw = await this.client.fetchIngestTokenHolders(token, LAUNCH_HOLDERS_FULL);
+      return parseHolders(raw ?? []).find((h) => h.address === creator)?.share ?? 0;
+    }
+  }
+
   private async launchStatsTick(): Promise<number> {
     const deadline = Date.now() + TICK_BUDGET_MS;
     // While the provider lags, the launches created after its head are known to us (their logs
@@ -1741,30 +1827,20 @@ export class ElysiumIngestionService {
       this.ensureRunning();
       if (Date.now() >= deadline) break;
       processed++;
-      let raw: unknown[] | null;
-      let detail: Record<string, unknown> | null = null;
+      let read: LaunchHoldersRead | null;
       try {
-        await this.throttle.wait();
-        raw = await this.client.fetchIngestTokenHolders(t.token, LAUNCH_HOLDERS_LIMIT);
-        if (raw && raw.length >= LAUNCH_HOLDERS_LIMIT) {
-          await this.throttle.wait();
-          detail = await this.client.fetchIngestToken(t.token);
-        }
+        read = await this.readLaunchHolders(t.token, t.creator);
         failedInARow = 0;
       } catch (error) {
         this.noteTokenFailure('launchstats', t.token, error, ++failedInARow);
         continue;
       }
-      if (!raw) {
+      if (!read) {
         this.noteTokenUnknown('launchstats', t.token);
         continue;
       }
+      const { holders, detail } = read;
       if (t.needsName) await this.nameNewLaunch(t.token, detail);
-      const holders = raw
-        .map((h) => (h && typeof h === 'object' ? (h as Record<string, unknown>) : null))
-        .filter((h): h is Record<string, unknown> => h !== null)
-        .map((h) => ({ address: String(h.address ?? '').toLowerCase(), share: Number(h.share) }))
-        .filter((h) => /^0x[0-9a-f]{40}$/.test(h.address) && Number.isFinite(h.share) && h.share > 0);
 
       let count = holders.length;
       if (detail) {
@@ -1778,8 +1854,7 @@ export class ElysiumIngestionService {
         .filter((h) => !parked.has(h.address))
         .slice(0, 10)
         .reduce((s, h) => s + h.share, 0);
-      const dev = t.creator ? (holders.find((h) => h.address === t.creator)?.share ?? 0) : null;
-      await this.repo.updateLaunchStats(t.token, count, top10 * 100, dev === null ? null : dev * 100);
+      await this.repo.updateLaunchStats(t.token, count, top10 * 100, read.dev === null ? null : read.dev * 100);
       done++;
     }
     await this.repo.advance('launchstats', { cursor: new Date(), addRows: done, backfillDone: true });

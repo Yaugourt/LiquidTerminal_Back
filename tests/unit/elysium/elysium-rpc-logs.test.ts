@@ -174,3 +174,51 @@ describe('elysium RPC logs over a busy range', () => {
     expect(calls).toBeLessThan(40);
   });
 });
+
+describe('elysium RPC: the share of a token\'s supply an address holds', () => {
+  const TOKEN = '0x3fca34edad5c4a8424bf59141e1d554bfeb57b40';
+  const HOLDER = '0x6155BC0ec19ca9c1d3a6244487e11e8b625b63df';
+  const word = (n: bigint): string => `0x${n.toString(16).padStart(64, '0')}`;
+  let bodies: Array<Array<{ id: number; method: string; params: [{ to: string; data: string }, string] }>>;
+  const serve = (results: Record<number, unknown>, status = 200): void => {
+    bodies = [];
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String((init as RequestInit).body)) as (typeof bodies)[number];
+      bodies.push(body);
+      const replies = body.map((c) => (c.id in results ? { jsonrpc: '2.0', id: c.id, result: results[c.id] } : { jsonrpc: '2.0', id: c.id, error: { code: 3, message: 'execution reverted' } }));
+      return new Response(JSON.stringify(replies), { status });
+    });
+  };
+  afterEach(() => jest.restoreAllMocks());
+
+  it('asks balanceOf and totalSupply in one call, on the latest block, and divides: the provider\'s own figure', async () => {
+    // The real figures of 2026-11-12: the provider gave 0.0007776557661476292 for this holder.
+    serve({ 0: word(BigInt('777655766147629192014582')), 1: word(BigInt('1000000000000000000000000000')) });
+    const share = await ElysiumRpcLogs.getInstance().holderShare(TOKEN, HOLDER);
+
+    expect(share).toBeCloseTo(0.0007776557661476292, 15);
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].map((c) => c.method)).toEqual(['eth_call', 'eth_call']);
+    expect(bodies[0][0].params).toEqual([{ to: TOKEN, data: `0x70a08231${'0'.repeat(24)}${HOLDER.slice(2).toLowerCase()}` }, 'latest']);
+    expect(bodies[0][1].params).toEqual([{ to: TOKEN, data: '0x18160ddd' }, 'latest']);
+  });
+
+  it('a holder of everything holds 1, of nothing 0; a token without supply has no share to give', async () => {
+    const supply = BigInt(2) ** BigInt(200);
+    serve({ 0: word(supply), 1: word(supply) });
+    await expect(ElysiumRpcLogs.getInstance().holderShare(TOKEN, HOLDER)).resolves.toBe(1);
+    serve({ 0: word(BigInt(0)), 1: word(supply) });
+    await expect(ElysiumRpcLogs.getInstance().holderShare(TOKEN, HOLDER)).resolves.toBe(0);
+    serve({ 0: word(BigInt(0)), 1: word(BigInt(0)) });
+    await expect(ElysiumRpcLogs.getInstance().holderShare(TOKEN, HOLDER)).resolves.toBeNull();
+  });
+
+  it('throws when the token does not answer both calls with a number, or the RPC refuses: the caller reads the provider instead', async () => {
+    serve({ 1: word(BigInt(10)) });
+    await expect(ElysiumRpcLogs.getInstance().holderShare(TOKEN, HOLDER)).rejects.toThrow('token balance not readable');
+    serve({ 0: '0x', 1: word(BigInt(10)) });
+    await expect(ElysiumRpcLogs.getInstance().holderShare(TOKEN, HOLDER)).rejects.toThrow('token balance not readable');
+    serve({}, 429);
+    await expect(ElysiumRpcLogs.getInstance().holderShare(TOKEN, HOLDER)).rejects.toThrow('HTTP 429');
+  });
+});
