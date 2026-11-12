@@ -165,6 +165,81 @@ describe('Elysium ingestion: a launch\'s holders, read as the 20 largest', () =>
     expect(written().count).toBe(20);
   });
 
+  describe('the token page goes with the list, not after it in a turn of its own', () => {
+    let turns: number;
+    beforeEach(() => {
+      turns = 0;
+      svc.throttle = { wait: async () => void turns++ };
+      // The provider's head is known: the only turns taken are the launch's own.
+      (svc as unknown as { head: { at: number; value: Date } }).head = { at: NOW, value: new Date(NOW - 5_000) };
+    });
+
+    it('a launch whose last read counted 20 holders or more: both are asked at once, in one turn', async () => {
+      all = list(127, [{ address: CREATOR, share: 0.05 }]);
+      jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([launch({ lastHolders: 126 })] as never);
+      const order: string[] = [];
+      let answerList: () => void = () => undefined;
+      holders.mockImplementation(async (_token, limit) => {
+        order.push('list asked');
+        await new Promise<void>((resolve) => (answerList = resolve));
+        order.push('list answered');
+        return all.slice(0, limit);
+      });
+      detail.mockImplementation(async () => {
+        order.push('page asked');
+        return { address: TOKEN, holders: 127 };
+      });
+
+      const run = svc.launchStatsTick();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(order).toEqual(['page asked', 'list asked']);
+      answerList();
+      await run;
+
+      expect(detail).toHaveBeenCalledTimes(1);
+      expect(turns).toBe(1);
+      expect(written().count).toBe(127);
+    });
+
+    it('...and when its list is no longer full, the page counts for nothing, even one that failed', async () => {
+      all = list(12);
+      jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([launch({ lastHolders: 40 })] as never);
+      detail.mockRejectedValue(new Error('API error: 500 Internal Server Error'));
+      await svc.launchStatsTick();
+
+      expect(written().count).toBe(12);
+      expect(svc.rejects.take()).toEqual([]);
+    });
+
+    it('a launch that had fewer, or was never read: the page is asked only once the list comes back full, still in the same turn', async () => {
+      for (const lastHolders of [null, 19]) {
+        update.mockClear();
+        detail.mockClear();
+        turns = 0;
+        all = list(60);
+        jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([launch({ creator: null, lastHolders })] as never);
+        await svc.launchStatsTick();
+        expect(detail).toHaveBeenCalledTimes(1);
+        expect(turns).toBe(1);
+        expect(written().count).toBe(60);
+      }
+      // ...and not at all for a list that is whole.
+      detail.mockClear();
+      all = list(5);
+      await svc.launchStatsTick();
+      expect(detail).not.toHaveBeenCalled();
+    });
+
+    it('a list that fails while the page is on its way sets the token aside like any other, without a stray rejection', async () => {
+      jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([launch({ lastHolders: 500 })] as never);
+      holders.mockRejectedValue(new Error('API error: 500 Internal Server Error'));
+      detail.mockRejectedValue(new Error('API error: 500 Internal Server Error'));
+      await svc.launchStatsTick();
+      expect(update).not.toHaveBeenCalled();
+      expect(svc.rejects.take()).toEqual([expect.objectContaining({ reason: 'token-unreadable', count: 1 })]);
+    });
+  });
+
   it('a launch without a known creator asks nothing of the chain', async () => {
     all = list(40);
     jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([launch({ creator: null })] as never);

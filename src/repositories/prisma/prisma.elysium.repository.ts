@@ -69,6 +69,8 @@ export interface LaunchStatsTarget {
   pool: string | null;
   /** A launch read for the first time that has no symbol yet (its event carries none). */
   needsName?: boolean;
+  /** How many holders its last read counted; null when it was never read. */
+  lastHolders?: number | null;
 }
 
 export interface ElysiumIngestStateRow {
@@ -841,7 +843,7 @@ export class ElysiumIngestRepository {
       ),
       best AS (SELECT DISTINCT ON (token) token, pri, ord FROM picks ORDER BY token, pri)
       SELECT l.token, coalesce(l.creator, t.from_addr) AS creator, l.curve, l.pool,
-             (l.symbol IS NULL AND l.stats_at IS NULL) AS "needsName"
+             (l.symbol IS NULL AND l.stats_at IS NULL) AS "needsName", l.holders AS "lastHolders"
       FROM best
       JOIN elysium_launch l ON l.token = best.token
       LEFT JOIN elysium_tx t ON t.tx_hash = l.tx_hash AND l.creator IS NULL

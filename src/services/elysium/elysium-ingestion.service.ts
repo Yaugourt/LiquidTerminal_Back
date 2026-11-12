@@ -95,14 +95,11 @@ class PageIncompleteError extends Error {
  */
 const MAX_REFUSED_PER_PAGE = 25;
 /**
- * The calls of every stream take turns this far apart: 2.2 a second at most. It was 500 ms
- * until 2026-11-12. The streams together use about 105 of the 120 turns a minute, and the
- * holder stats run back to back on what is left: the token page now read for each traded
- * launch with 20 holders or more (380 of them, every half hour: 18,000 calls a day, see
- * LAUNCH_HOLDERS_LIMIT) would have been taken from the walk through the quiet launches. The 50
- * ms give those turns back (19,200 a day), spread evenly, instead of sending two calls at once.
+ * At most ~2 upstream calls per second across every stream: their calls take turns this far
+ * apart. One exception, a launch's token page, sent in the turn of its holder list (see
+ * readLaunchHolders).
  */
-const MIN_CALL_GAP_MS = 450;
+const MIN_CALL_GAP_MS = 500;
 /** How often the provider's last indexed block time is read, at least. */
 const HEAD_REFRESH_MS = 30_000;
 /**
@@ -1887,15 +1884,22 @@ export class ElysiumIngestionService {
    * back full (it then carries the count), and the creator's share of the supply (null without a
    * known creator). Null when the provider does not know the token.
    */
-  private async readLaunchHolders(token: string, creator: string | null): Promise<LaunchHoldersRead | null> {
+  private async readLaunchHolders(token: string, creator: string | null, lastHolders: number | null = null): Promise<LaunchHoldersRead | null> {
     await this.throttle.wait();
+    // The token's page goes in the list's own turn, and at the same time when the launch had a
+    // full list at its last read: the holder stats read one launch after the other, back to
+    // back, and a second call waited for in its own turn (for each of the 380 traded launches
+    // with 20 holders or more, every half hour) would have taken a quarter of the stream's time
+    // from the walk through the quiet launches. Two calls at once, at most, 13 times a minute.
+    const ahead = lastHolders !== null && lastHolders >= LAUNCH_HOLDERS_LIMIT ? this.client.fetchIngestToken(token) : null;
+    // Never left without a handler: it is only awaited when the list turns out to be full.
+    ahead?.catch(() => undefined);
     const raw = await this.client.fetchIngestTokenHolders(token, LAUNCH_HOLDERS_LIMIT);
     if (!raw) return null;
     const full = raw.length >= LAUNCH_HOLDERS_LIMIT;
     let detail: Record<string, unknown> | null = null;
     if (full) {
-      await this.throttle.wait();
-      detail = await this.client.fetchIngestToken(token);
+      detail = await (ahead ?? this.client.fetchIngestToken(token));
       // A full list does not say how many holders there are: without the page's count the token
       // is read again later, never stored as having as many holders as the list is long.
       const count = Number(detail?.holders);
@@ -1954,7 +1958,7 @@ export class ElysiumIngestionService {
       processed++;
       let read: LaunchHoldersRead | null;
       try {
-        read = await this.readLaunchHolders(t.token, t.creator);
+        read = await this.readLaunchHolders(t.token, t.creator, t.lastHolders ?? null);
         failedInARow = 0;
       } catch (error) {
         this.noteTokenFailure('launchstats', t.token, error, ++failedInARow);
