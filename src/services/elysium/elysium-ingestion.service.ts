@@ -1653,7 +1653,8 @@ export class ElysiumIngestionService {
   /**
    * `feedDex`: the V2 and V3 swap logs of the window are also stored as DEX swaps (a live window;
    * see SWAPS_FED_SLACK_MS). `swapsCut` is then true when one of the two topics was cut at the
-   * page cap, so that the DEX stream is not told the window's swaps are all there.
+   * page cap, or when a page of them could not be stored, so that the DEX stream is not told
+   * the window's swaps are all there.
    */
   private async ingestLaunchpadWindow(
     start: Date,
@@ -1663,6 +1664,7 @@ export class ElysiumIngestionService {
   ): Promise<{ inserted: number; swapsCut: boolean }> {
     let inserted = 0;
     let swapsCut = false;
+    let feedFailed = false;
     // Launches first, so trades in the same window find their market.
     for (const topic0 of LAUNCH_TOPIC_ORDER) {
       await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
@@ -1686,7 +1688,21 @@ export class ElysiumIngestionService {
       const shared = feedDex && SHARED_SWAP_TOPICS.has(topic0);
       const cut = await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
         // First as DEX swaps: every swap is one, whether or not a launch trades on its pool.
-        if (shared) this.fedSwapRows += await this.storeDexSwaps(raw);
+        if (shared && !feedFailed) {
+          try {
+            // Added after the write: the DEX stream may take the count while this one waits.
+            const stored = await this.storeDexSwaps(raw);
+            this.fedSwapRows += stored;
+          } catch (error) {
+            if (ElysiumIngestionService.endsTick(error)) throw error;
+            // The swaps table refusing a page must not hold the launches' trades and graduations:
+            // the window is not one the DEX stream relies on, and that stream reads these swaps itself.
+            feedFailed = true;
+            logDeduplicator.warn('Elysium ingest: swaps not stored for the DEX stream by the launchpad stream, left to it', {
+              errorType: error instanceof Error ? error.name : typeof error,
+            });
+          }
+        }
         const markets = await this.launchMarketsFor(raw);
         const trades: LaunchTradeRow[] = [];
         for (const r of raw) {
@@ -1703,7 +1719,7 @@ export class ElysiumIngestionService {
       });
       if (shared && cut) swapsCut = true;
     }
-    return { inserted, swapsCut };
+    return { inserted, swapsCut: swapsCut || feedFailed };
   }
 
   /** A status-like value longer than its column, stored cut: counted once per row and field, with the value. */
@@ -1880,6 +1896,10 @@ export class ElysiumIngestionService {
     if (full) {
       await this.throttle.wait();
       detail = await this.client.fetchIngestToken(token);
+      // A full list does not say how many holders there are: without the page's count the token
+      // is read again later, never stored as having as many holders as the list is long.
+      const count = Number(detail?.holders);
+      if (!Number.isInteger(count) || count < 0) throw new Error('Elysium ingest: token page without a holder count');
     }
     const holders = parseHolders(raw);
     if (!creator) return { holders, detail, dev: null };
@@ -1947,10 +1967,11 @@ export class ElysiumIngestionService {
       const { holders, detail } = read;
       if (t.needsName) await this.nameNewLaunch(t.token, detail);
 
+      // The page's count when the list was full; never fewer than the holders the list itself shows.
       let count = holders.length;
       if (detail) {
         const n = Number(detail.holders);
-        if (Number.isInteger(n) && n >= 0) count = n;
+        if (Number.isInteger(n) && n >= 0) count = Math.max(n, holders.length);
       }
       // Supply parked in the token's own market (curve, pool, V4 manager) or
       // locked for the creator is not a holder position.

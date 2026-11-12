@@ -146,6 +146,25 @@ describe('Elysium ingestion: a launch\'s holders, read as the 20 largest', () =>
     expect(svc.rejects.take()).toEqual([expect.objectContaining({ stream: 'launchstats', reason: 'token-unreadable', count: 1 })]);
   });
 
+  it('a full list whose token page gives no count is not stored as 20 holders: the token is read again later', async () => {
+    all = list(127);
+    for (const page of [null, { address: TOKEN }, { address: TOKEN, holders: 'many' }]) {
+      update.mockClear();
+      (svc as unknown as { asideUntil: Map<string, number> }).asideUntil.clear();
+      detail.mockResolvedValue(page);
+      await svc.launchStatsTick();
+      expect(update).not.toHaveBeenCalled();
+    }
+    expect(svc.rejects.take()).toEqual([expect.objectContaining({ stream: 'launchstats', reason: 'token-unreadable', count: 3 })]);
+  });
+
+  it('a page that counts fewer holders than the list shows (read a moment apart) never lowers the count under the list', async () => {
+    all = list(127);
+    detail.mockResolvedValue({ address: TOKEN, holders: 19 });
+    await svc.launchStatsTick();
+    expect(written().count).toBe(20);
+  });
+
   it('a launch without a known creator asks nothing of the chain', async () => {
     all = list(40);
     jest.spyOn(repo, 'listLaunchesForStats').mockResolvedValue([launch({ creator: null })] as never);

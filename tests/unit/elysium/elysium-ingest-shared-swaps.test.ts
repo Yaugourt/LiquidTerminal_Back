@@ -208,6 +208,75 @@ describe('Elysium ingestion: the V2 and V3 swaps are read once for both streams'
     expect(read).toEqual(SWAP_TOPICS.map((topic0) => ({ topic0, start: iso(T0 - 25_000), end: iso(T0 + 105_000) })));
   });
 
+  it('a swaps table that refuses a page does not hold the launchpad stream: its window goes through, and the DEX stream reads those swaps itself', async () => {
+    await tick('dex', T0);
+    await tick('launchpad', T0 + 10_000);
+    expect(await tick('dex', T0 + 60_000)).toEqual([]);
+    swaps = [swapAt(T0 + 20_000, 3)];
+    insertSwaps.mockRejectedValueOnce(new Error('canceling statement due to statement timeout'));
+    advance.mockClear();
+
+    await expect(tick('launchpad', T0 + 70_000)).resolves.toHaveLength(2);
+
+    // The launchpad stream moved on (its own rows are stored), and no longer vouches for the swaps.
+    expect(advance).toHaveBeenCalledWith('launchpad', expect.objectContaining({ cursor: new Date(T0 + 55_000) }));
+    expect(svc.swapsFed).toBeNull();
+    const read = await tick('dex', T0 + 120_000);
+    expect(read).toEqual(SWAP_TOPICS.map((topic0) => ({ topic0, start: iso(T0 - 25_000), end: iso(T0 + 105_000) })));
+    expect(stored()).toContain(swaps[0].tx_hash);
+  });
+
+  it('a launchpad window that fails part-way is not one the DEX stream relies on, and is read again from the same cursor', async () => {
+    await tick('dex', T0);
+    await tick('launchpad', T0 + 10_000);
+    const before = { ...(svc.swapsFed as { from: number; to: number }) };
+    jest.spyOn(repo, 'insertLaunchTrades').mockRejectedValueOnce(new Error('connection lost'));
+    swaps = [swapAt(T0 + 20_000, 4)];
+    // A trade topic after the swaps fails: the swaps of the window were stored, the window was not completed.
+    fetchPage.mockImplementation(async (_path, query) => {
+      const q = query as unknown as { topic0: string; start_time: string; end_time: string };
+      calls.push({ topic0: q.topic0, start: q.start_time, end: q.end_time });
+      if (q.topic0 === LAUNCHPAD_TOPICS.v4Swap) throw new Error('API error: 503');
+      const rows = q.topic0 === DEX_TOPICS.v2Swap ? swaps.filter((s) => String(s.block_time) >= q.start_time && String(s.block_time) <= q.end_time) : [];
+      return { rows, hasMore: false };
+    });
+
+    await expect(tick('launchpad', T0 + 40_000)).rejects.toThrow('503');
+
+    expect(svc.swapsFed).toEqual(before);
+    expect(states.launchpad.cursor).toEqual(new Date(T0 - 5_000));
+    expect(stored()).toEqual([swaps[0].tx_hash]);
+  });
+
+  it('counts each swap the launchpad stream stored once in the DEX stream\'s rows, even when that stream takes the count during a write', async () => {
+    await tick('dex', T0);
+    swaps = [swapAt(T0 + 10_000, 1), swapAt(T0 + 12_000, 2)];
+    await tick('launchpad', T0 + 30_000); // 2 stored, not yet counted
+    swaps = [...swaps, swapAt(T0 + 40_000, 3)];
+    const added: number[] = [];
+    advance.mockImplementation(async (stream, patch) => {
+      const s = states[stream];
+      if (s && patch.cursor) s.cursor = patch.cursor;
+      if (stream === 'dex') added.push((patch as { addRows?: number }).addRows ?? 0);
+    });
+    // While the launchpad stream writes its next page of swaps, the DEX stream runs and takes the count.
+    let during: Promise<unknown> | null = null;
+    insertSwaps.mockImplementation(async (rows: unknown[]) => {
+      if (!during) {
+        during = svc.dexTick();
+        await during;
+      }
+      return rows.length;
+    });
+    clock = T0 + 60_000;
+    await svc.launchpadTick();
+    insertSwaps.mockImplementation(async (rows: unknown[]) => rows.length);
+    await tick('dex', T0 + 120_000);
+
+    // 2, then the 3 of the page being written when the count was taken: never the first 2 again.
+    expect(added.reduce((a, b) => a + b, 0)).toBe(5);
+  });
+
   it('a launchpad stream replaying its history stores no DEX swap, and the DEX stream reads its own', async () => {
     states.launchpad = { cursor: new Date(T0 - 3 * 86_400_000), backfillDone: false };
     swaps = [swapAt(T0 - 3 * 86_400_000 + 60_000, 1)];
