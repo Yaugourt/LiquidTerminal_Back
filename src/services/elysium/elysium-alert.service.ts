@@ -34,6 +34,23 @@ const REJECTS_WORTH_A_MESSAGE: ReadonlySet<string> = new Set([
 ]);
 /** Today's credits over this many times the highest of the previous days is not a normal day. */
 const CREDITS_FACTOR = 1.3;
+/**
+ * The same by the hour, so that a call that starts repeating is said within the hour and not
+ * when the day's total passes the days before (a spend three times the usual from 18:00 took
+ * until 22:30 that way): the hour that is running, over this many times the highest completed
+ * hour of the seven days before. The highest, not the usual one: the registry walk, the bridge's
+ * wide passes and a busy hour of visitors are all in it already.
+ */
+const CREDITS_HOUR_FACTOR = 1.5;
+/** Completed hours that have to be known before an hour is compared with them (two days). */
+const CREDITS_HOURS_KNOWN = 48;
+/**
+ * The balance the provider gives, in days of the usual spend, under which a message goes. The
+ * allocation is not written anywhere we can read: the balance is what is left of it (999.45
+ * billion credits on 2026-11-12, centuries at the rate of that day). If it ever becomes a
+ * monthly figure, this says so a month before it runs out.
+ */
+const CREDITS_BALANCE_DAYS = 30;
 /** The share of the database volume in use past which a message goes. */
 const DATABASE_SHARE = 0.8;
 /** A day that differs and is being read again is said only if it is still not equal after this long. */
@@ -63,7 +80,7 @@ function partial(status: Status): ReadonlySet<string> {
  * What is wrong right now, from what the status says: a stream that fails, does not run or is
  * behind; the provider standing still; rollups that wait or fail; a closed day that differs
  * from the provider; rows left out that should not be; a one-time job or a view in error; an
- * abnormal day of credits; a database volume filling up.
+ * abnormal day or hour of credits, a balance that runs low; a database volume filling up.
  *
  * `computedAt` is when the status was computed. Older than STATUS_STALE_MS, nothing is concluded
  * from it but that it is old; and a part of it that could not be read (`status.partial`) is left
@@ -170,6 +187,37 @@ export function alertConditions(status: Status, now: number, computedAt: number 
         forS: 0,
         endsQuietly: true,
         text: `${Math.round(spent).toLocaleString('en-US')} HypeDexer credits spent today, over ${CREDITS_FACTOR} times the highest of the last ${before.length} days (${Math.round(Math.max(...before)).toLocaleString('en-US')})`,
+      });
+    }
+
+    const hours = status.credits?.hours as
+      | { current?: { hour?: unknown; credits?: unknown }; highest?: { hour?: unknown; credits?: unknown } | null; known?: unknown }
+      | undefined;
+    const running = Number(hours?.current?.credits);
+    const highest = Number(hours?.highest?.credits);
+    if (
+      hours?.highest &&
+      Number(hours.known) >= CREDITS_HOURS_KNOWN &&
+      highest > 0 &&
+      running > CREDITS_HOUR_FACTOR * highest &&
+      // The hour the status counts in: a look just past the hour must not say the last one again.
+      text(hours.current?.hour) === new Date(computedAt).toISOString().slice(0, 13)
+    ) {
+      out.push({
+        key: `credits:hour:${text(hours.current?.hour)}`,
+        forS: 0,
+        endsQuietly: true,
+        text: `${Math.round(running).toLocaleString('en-US')} HypeDexer credits spent since ${text(hours.current?.hour).slice(11)}:00 UTC, over ${CREDITS_HOUR_FACTOR} times the highest hour of the last seven days (${Math.round(highest).toLocaleString('en-US')}, ${text(hours.highest.hour)}). The paths that cost the most today are in the status (credits.topPathsToday)`,
+      });
+    }
+
+    const balance = status.credits?.balance;
+    const usual = before.length >= 3 ? before.reduce((sum, c) => sum + c, 0) / before.length : 0;
+    if (typeof balance === 'number' && balance >= 0 && usual > 0 && balance < CREDITS_BALANCE_DAYS * usual) {
+      out.push({
+        key: 'credits:balance',
+        forS: 0,
+        text: `the HypeDexer balance (${Math.round(balance).toLocaleString('en-US')} credits) covers ${Math.floor(balance / usual)} days at the rate of the last ${before.length} (${Math.round(usual).toLocaleString('en-US')} a day)`,
       });
     }
 

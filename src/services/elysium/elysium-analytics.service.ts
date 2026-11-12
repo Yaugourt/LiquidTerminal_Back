@@ -433,6 +433,7 @@ export class ElysiumAnalyticsService {
                 days: credits.days,
                 topPathsToday: credits.topPathsToday,
                 balance: credits.balance,
+                hours: credits.hours,
               },
         database: {
           bytes: databaseBytes,

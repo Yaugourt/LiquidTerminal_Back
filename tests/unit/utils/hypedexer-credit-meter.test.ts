@@ -1,6 +1,7 @@
 /**
  * The credit meter reads HypeDexer's X-Credit-Cost: per-path spend logged
- * once a minute, the day's total in Redis, one warning past the budget.
+ * once a minute, the day's and the hour's totals in Redis, one warning past the
+ * budget when one is set.
  */
 const mockCounters = new Map<string, number>();
 const mockExpires = new Map<string, number>();
@@ -144,19 +145,14 @@ describe('HypedexerCreditMeter', () => {
     await expect(meter.todayTotal()).resolves.toBe(1800);
   });
 
-  it('defaults to a 1,000,000 budget, above the ~320k background day, and only warns', async () => {
+  it('warns of nothing without a figure set: what is too much is judged against the days before, elsewhere', async () => {
+    // The default of 1,000,000 a day was passed on most days.
     mockCounters.set(dayKey, 999_000);
-    meter.record('https://api.hypedexer.com/a', '900', null);
+    expect(meter.record('https://api.hypedexer.com/a', '900', null)).toBeUndefined();
+    meter.record('https://api.hypedexer.com/a', '5000000', null);
     await flushPromises();
+    expect(mockCounters.get(dayKey)).toBe(5_999_900);
     expect(mockLog.warn).not.toHaveBeenCalled();
-
-    // record() returns nothing to wait on: past the budget the call has long gone through.
-    expect(meter.record('https://api.hypedexer.com/a', '200', null)).toBeUndefined();
-    await flushPromises();
-    expect(mockLog.warn).toHaveBeenCalledWith(
-      'HypeDexer daily credit budget exceeded',
-      expect.objectContaining({ credits: 1_000_100, budget: 1_000_000 })
-    );
   });
 
   it('keeps metering the minute when Redis fails', async () => {
@@ -217,5 +213,40 @@ describe('HypedexerCreditMeter: what was spent, read back', () => {
   it('answers null when Redis cannot say', async () => {
     mockClient.mget.mockRejectedValueOnce(new Error('Connection is closed'));
     expect(await meter.summary()).toBeNull();
+  });
+
+  it('adds each minute to its hour, kept as long as the days', async () => {
+    meter.record('https://api.hypedexer.com/elysium/testnet/transactions', '102', null);
+    meter.record('https://api.hypedexer.com/elysium/testnet/stats', '3', null);
+    meter.flush();
+    await jest.advanceTimersByTimeAsync(10);
+    jest.setSystemTime(Date.parse('2026-11-11T13:00:30Z'));
+    meter.record('https://api.hypedexer.com/elysium/testnet/stats', '3', null);
+    meter.flush();
+    await jest.advanceTimersByTimeAsync(10);
+
+    expect(Object.fromEntries(mockHashes.get('hypedexer:credits:hours:2026-11-11') ?? [])).toEqual({ '12': 105, '13': 3 });
+    expect(mockExpires.get('hypedexer:credits:hours:2026-11-11')).toBe(8 * 24 * 60 * 60);
+  });
+
+  it('gives the running hour, the completed ones newest first, and the highest of the seven days before', async () => {
+    const hours = (day: string, values: Record<string, number>): void => {
+      mockHashes.set(`hypedexer:credits:hours:${day}`, new Map(Object.entries(values)));
+    };
+    hours('2026-11-11', { '12': 9_000, '11': 40_000, '10': 55_000 });
+    hours('2026-11-10', { '23': 61_000, '03': 48_000 });
+    // 11:00 on the 4th is more than seven days before the running hour: listed, compared with nothing.
+    hours('2026-11-04', { '11': 900_000, '12': 70_000 });
+
+    const summary = await meter.summary();
+    expect(summary?.hours.current).toEqual({ hour: '2026-11-11T12', credits: 9_000 });
+    expect(summary?.hours.last.map((h) => h.hour)).toEqual(['2026-11-11T11', '2026-11-11T10', '2026-11-10T23', '2026-11-10T03', '2026-11-04T12', '2026-11-04T11']);
+    expect(summary?.hours.highest).toEqual({ hour: '2026-11-04T12', credits: 70_000 });
+    expect(summary?.hours.known).toBe(5);
+  });
+
+  it('an hour nothing was recorded for is not an hour known, and the running one counts 0', async () => {
+    const summary = await meter.summary();
+    expect(summary?.hours).toEqual({ current: { hour: '2026-11-11T12', credits: 0 }, last: [], highest: null, known: 0 });
   });
 });

@@ -8,12 +8,19 @@ import { logDeduplicator } from './logDeduplicator';
  * - Per process: calls and credits per upstream path, logged once a minute,
  *   so a route that starts burning shows up in the logs by name.
  * - Across instances: the day's total in Redis (`hypedexer:credits:YYYY-MM-DD`,
- *   UTC), with one warning per process and day once it passes the budget
- *   (`HYPEDEXER_DAILY_CREDIT_BUDGET`, default 1 000 000); since 2026-11-11
- *   also the day's credits and calls per path (`hypedexer:credits:paths:…`,
- *   `hypedexer:credits:calls:…`, added once a minute) and the last balance the
- *   provider gave. `summary()` reads them back: until then the totals existed
- *   and nothing showed them.
+ *   UTC); since 2026-11-11 also the day's credits and calls per path
+ *   (`hypedexer:credits:paths:…`, `hypedexer:credits:calls:…`, added once a
+ *   minute) and the last balance the provider gave; since 2026-11-12 the
+ *   credits of each hour (`hypedexer:credits:hours:YYYY-MM-DD`, added once a
+ *   minute). `summary()` reads them back.
+ *
+ * What is too much is judged against the days and the hours before, by whoever
+ * reads `summary()` (the Elysium alerts): the key's balance stood at 999.45
+ * billion credits on 2026-11-12, so no fixed figure says anything about it.
+ * The fixed warning that was here (1,000,000 a day by default) was passed on
+ * most days and told nobody anything. It is still there for whoever sets a
+ * figure (`HYPEDEXER_DAILY_CREDIT_BUDGET`): one warning per process and day
+ * once the day passes it; without the variable, none.
  *
  * A warning only: nothing here ever delays or refuses a call.
  */
@@ -21,12 +28,10 @@ import { logDeduplicator } from './logDeduplicator';
 const FLUSH_INTERVAL_MS = 60_000;
 const TOP_PATHS_LOGGED = 10;
 const DAY_KEY_TTL_SECONDS = 8 * 24 * 60 * 60;
-/**
- * Above the background alone (~320k a day with zero visitors) plus a busy day
- * of live tiles, so the warning means something. The Elysium ingestion
- * (~2.3M a day when enabled) exceeds it on purpose: it is under investigation.
- */
-const DEFAULT_DAILY_BUDGET = 1_000_000;
+/** How many completed hours `summary()` lists, newest first. */
+const HOURS_LISTED = 24;
+/** The hours the highest one is looked for in: the seven days before the current hour. */
+const HOURS_COMPARED = 7 * 24;
 
 /**
  * Loaded on first use: importing the Redis service opens its connections, and
@@ -38,13 +43,19 @@ async function redis(): Promise<typeof RedisService> {
   return redisService;
 }
 
-function dailyBudget(): number {
+/** The day's figure past which a warning is logged, when one was set; null otherwise. */
+function dailyBudget(): number | null {
   const raw = Number(process.env.HYPEDEXER_DAILY_CREDIT_BUDGET);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DAILY_BUDGET;
+  return Number.isFinite(raw) && raw > 0 ? raw : null;
 }
 
 function utcDay(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 10);
+}
+
+/** The UTC hour of a time, as `YYYY-MM-DDTHH`. */
+function utcHour(now = Date.now()): string {
+  return new Date(now).toISOString().slice(0, 13);
 }
 
 /**
@@ -79,15 +90,28 @@ interface PathSpend {
 const MAX_PATHS_A_DAY = 200;
 const OTHER_PATHS = '(other paths)';
 
+export interface CreditHour {
+  /** `YYYY-MM-DDTHH`, UTC. */
+  hour: string;
+  credits: number;
+}
+
 export interface CreditSummary {
   /** The last UTC days, today first; null for a day Redis holds no total of. */
   days: Array<{ day: string; credits: number | null }>;
   topPathsToday: Array<{ path: string; credits: number; calls: number }>;
   balance: number | null;
+  /**
+   * By the hour: the one that is running, the last completed ones (newest first), and the
+   * highest of the completed hours of the seven days before, with how many of those are known
+   * (an hour nothing was recorded for is not one).
+   */
+  hours: { current: CreditHour; last: CreditHour[]; highest: CreditHour | null; known: number };
 }
 
 const PATHS_KEY = 'hypedexer:credits:paths:';
 const CALLS_KEY = 'hypedexer:credits:calls:';
+const HOURS_KEY = 'hypedexer:credits:hours:';
 const BALANCE_KEY = 'hypedexer:credits:balance';
 
 export class HypedexerCreditMeter {
@@ -139,7 +163,7 @@ export class HypedexerCreditMeter {
       const total = await client.incrby(key, Math.round(cost));
       if (total === Math.round(cost)) await client.expire(key, DAY_KEY_TTL_SECONDS);
       const budget = dailyBudget();
-      if (total > budget && this.warnedDay !== day) {
+      if (budget !== null && total > budget && this.warnedDay !== day) {
         this.warnedDay = day;
         logDeduplicator.warn('HypeDexer daily credit budget exceeded', {
           day,
@@ -183,15 +207,23 @@ export class HypedexerCreditMeter {
     });
   }
 
-  /** Adds the last minute's spend per path to the day's (one round trip), and keeps the balance. */
+  /**
+   * Adds the last minute's spend per path to the day's, and its total to the hour's (one round
+   * trip), and keeps the balance.
+   */
   private async addPathsToDay(entries: Array<[string, PathSpend]>): Promise<void> {
-    const day = utcDay();
+    const now = Date.now();
+    const day = utcDay(now);
     try {
       const pipeline = (await redis()).getClient().pipeline();
+      let credits = 0;
       for (const [path, spend] of entries) {
         pipeline.hincrby(`${PATHS_KEY}${day}`, path, Math.round(spend.credits));
         pipeline.hincrby(`${CALLS_KEY}${day}`, path, spend.calls);
+        credits += spend.credits;
       }
+      pipeline.hincrby(`${HOURS_KEY}${day}`, utcHour(now).slice(11), Math.round(credits));
+      pipeline.expire(`${HOURS_KEY}${day}`, DAY_KEY_TTL_SECONDS);
       pipeline.expire(`${PATHS_KEY}${day}`, DAY_KEY_TTL_SECONDS);
       pipeline.expire(`${CALLS_KEY}${day}`, DAY_KEY_TTL_SECONDS);
       if (this.lastBalance !== null) pipeline.set(BALANCE_KEY, String(this.lastBalance), 'EX', DAY_KEY_TTL_SECONDS);
@@ -213,13 +245,32 @@ export class HypedexerCreditMeter {
       const client = (await redis()).getClient();
       const now = Date.now();
       const keys = Array.from({ length: days }, (_, i) => utcDay(now - i * 86_400_000));
-      const [totals, paths, calls, balance] = await Promise.all([
+      const [totals, paths, calls, balance, ...hourly] = await Promise.all([
         client.mget(keys.map((d) => `hypedexer:credits:${d}`)),
         client.hgetall(`${PATHS_KEY}${keys[0]}`),
         client.hgetall(`${CALLS_KEY}${keys[0]}`),
         client.get(BALANCE_KEY),
+        ...keys.map((d) => client.hgetall(`${HOURS_KEY}${d}`)),
       ]);
+      // Every hour something was recorded for, newest first.
+      const hours: CreditHour[] = [];
+      keys.forEach((day, i) => {
+        for (const [hh, credits] of Object.entries((hourly[i] as Record<string, string> | null) ?? {})) {
+          if (/^\d{2}$/.test(hh) && Number.isFinite(Number(credits))) hours.push({ hour: `${day}T${hh}`, credits: Number(credits) });
+        }
+      });
+      hours.sort((a, b) => (a.hour < b.hour ? 1 : -1));
+      const currentHour = utcHour(now);
+      const firstCompared = utcHour(now - HOURS_COMPARED * 3_600_000);
+      const completed = hours.filter((h) => h.hour < currentHour);
+      const compared = completed.filter((h) => h.hour >= firstCompared);
       return {
+        hours: {
+          current: hours.find((h) => h.hour === currentHour) ?? { hour: currentHour, credits: 0 },
+          last: completed.slice(0, HOURS_LISTED),
+          highest: compared.reduce<CreditHour | null>((top, h) => (top === null || h.credits > top.credits ? h : top), null),
+          known: compared.length,
+        },
         days: keys.map((day, i) => ({ day, credits: totals[i] === null ? null : Number(totals[i]) })),
         topPathsToday: Object.entries(paths ?? {})
           .map(([path, credits]) => ({ path, credits: Number(credits), calls: Number(calls?.[path] ?? 0) }))

@@ -258,8 +258,21 @@ backfill or a re-read:
 
 If the spend has to stop now: `ELYSIUM_DAY_CHECK_ENABLED=false` (re-reads), then
 `ELYSIUM_INGEST_ENABLED=false` (all the streams; the pages keep serving what is stored, recent
-transactions excepted). `HYPEDEXER_DAILY_CREDIT_BUDGET` (1,000,000 by default) is the day's
-total past which the log warns, once per process and day.
+transactions excepted).
+
+Three messages are about credits, all judged against what was spent before (the key's balance
+stood at 999.45 billion credits on 2026-11-12: no fixed figure says anything about it):
+
+- **a day** over 1.3 times the highest of the days before (at least three known);
+- **an hour**: the hour that is running over 1.5 times the highest completed hour of the seven
+  days before (`credits.hours`, at least 48 hours known). This is the one that says a call
+  started repeating, within the hour;
+- **the balance** under 30 days of the usual spend (`credits.balance` over the mean of the days
+  before): the allocation changed, or something has been spending for a long time.
+
+`HYPEDEXER_DAILY_CREDIT_BUDGET` is a fixed figure for whoever wants one: past it the log warns,
+once per process and day. Not set (the default since 2026-11-12), nothing is logged: the default
+of 1,000,000 was passed on most days.
 
 ## 9. The database volume fills up
 

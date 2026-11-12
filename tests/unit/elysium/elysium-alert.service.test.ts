@@ -202,6 +202,66 @@ describe('what is worth a message', () => {
     expect(keys(s)).toEqual([]);
   });
 
+  it('an hour of credits over 1.5 times the highest hour of the seven days before, once two days of hours are known', () => {
+    const s = healthy();
+    const days = (s.credits as { days: unknown[] }).days;
+    const hours = (running: number, known = 150): Record<string, unknown> => ({
+      current: { hour: '2026-11-11T18', credits: running },
+      last: [],
+      highest: { hour: '2026-11-09T04', credits: 60_000 },
+      known,
+    });
+    // The look is 0 s into the hour here; what counts is the hour the status was computed in.
+    s.credits = { days, hours: hours(90_001) };
+    const [said] = alertConditions(s as never, NOW);
+    expect(said).toMatchObject({ key: 'credits:hour:2026-11-11T18', forS: 0, endsQuietly: true });
+    expect(said.text).toContain('90,001 HypeDexer credits spent since 18:00 UTC');
+    expect(said.text).toContain('60,000, 2026-11-09T04');
+
+    s.credits = { days, hours: hours(90_000) };
+    expect(keys(s)).toEqual([]);
+    // Too few hours known to say what a high hour is (the first two days after the counter appeared).
+    s.credits = { days, hours: hours(500_000, 47) };
+    expect(keys(s)).toEqual([]);
+    s.credits = { days, hours: { ...hours(500_000), highest: null } };
+    expect(keys(s)).toEqual([]);
+    // A status from before the hours were counted.
+    s.credits = { days };
+    expect(keys(s)).toEqual([]);
+  });
+
+  it('does not say an hour again under the next one: a look just past the hour, on a status computed before it', () => {
+    const s = healthy();
+    s.credits = {
+      days: (s.credits as { days: unknown[] }).days,
+      hours: { current: { hour: '2026-11-11T17', credits: 500_000 }, last: [], highest: { hour: '2026-11-09T04', credits: 60_000 }, known: 150 },
+    };
+    expect(alertConditions(s as never, NOW + 20_000, NOW - 10_000).map((c) => c.key)).toEqual(['credits:hour:2026-11-11T17']);
+    // The status says 17:00 as the running hour and was computed at 18:00:05: its hour figure is stale.
+    expect(alertConditions(s as never, NOW + 20_000, NOW + 5_000).map((c) => c.key)).toEqual([]);
+  });
+
+  it('a balance that covers less than 30 days of the usual spend; never the one of today', () => {
+    const s = healthy();
+    const days = (s.credits as { days: unknown[] }).days;
+    // 950,000 a day over the three days before: 30 days are 28.5 million.
+    s.credits = { days, balance: 28_400_000 };
+    const [said] = alertConditions(s as never, NOW);
+    expect(said).toMatchObject({ key: 'credits:balance', forS: 0 });
+    expect(said.endsQuietly).toBeUndefined();
+    expect(said.text).toContain('covers 29 days');
+    s.credits = { days, balance: 28_500_000 };
+    expect(keys(s)).toEqual([]);
+    // What the key holds today.
+    s.credits = { days, balance: 999_449_680_616 };
+    expect(keys(s)).toEqual([]);
+    // No balance given, or too few days known to say what a day costs.
+    s.credits = { days, balance: null };
+    expect(keys(s)).toEqual([]);
+    s.credits = { days: [{ day: '2026-11-11', credits: 10 }, { day: '2026-11-10', credits: 1_000_000 }], balance: 5 };
+    expect(keys(s)).toEqual([]);
+  });
+
   it('a database that fills 80% of its volume, when the volume\'s size is given', () => {
     const s = healthy();
     s.database = { bytes: 81e9, volumeBytes: 100e9, usedShare: 0.81 };
