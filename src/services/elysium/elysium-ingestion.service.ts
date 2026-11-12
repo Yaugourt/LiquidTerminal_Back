@@ -465,7 +465,7 @@ export class ElysiumIngestionService {
         (raw) => onPage(dedupeBy(raw.map(normalizeTx).filter((r): r is TxRow => r !== null), (r) => r.tx_hash))
       );
     },
-    insertTxs: (rows) => this.writeRows('check', rows, async (part) => (await this.repo.insertTxs(part)).inserted, (r) => r.tx_hash),
+    insertTxs: (rows) => this.writeRows('check', rows, (part) => this.storeTxs('check', part), (r) => r.tx_hash),
     txListed: (hash) => this.client.fetchIngestTxListed(hash),
     rejects: this.rejects,
   });
@@ -933,6 +933,19 @@ export class ElysiumIngestionService {
   // tx stream
   // ---------------------------------------------------------------------------
 
+  /**
+   * Stores a page of transactions. The ones from before the oldest day elysium_tx still holds
+   * (old days are dropped on a set keep) are not stored: they are counted, like everything the
+   * ingestion reads and leaves out.
+   */
+  private async storeTxs(stream: ElysiumStream, rows: TxRow[]): Promise<number> {
+    const stored = await this.repo.insertTxs(rows);
+    if (stored.tooOld > 0) {
+      this.rejects.note(stream, 'older-than-kept', `${stored.tooOld} transactions from before the days elysium_tx keeps`, stored.tooOld);
+    }
+    return stored.inserted;
+  }
+
   private async txTick(): Promise<number> {
     const deadline = Date.now() + TICK_BUDGET_MS;
     const state = await this.repo.getState('tx');
@@ -970,7 +983,7 @@ export class ElysiumIngestionService {
           async (raw) => {
             // System transactions are asked out of the answer; one that comes anyway is not a reject.
             const rows = dedupeBy(this.mapCounted<TxRow>('tx', raw, normalizeTx, isSystemTx), (r) => r.tx_hash);
-            inserted += await this.writeRows('tx', rows, async (part) => (await this.repo.insertTxs(part)).inserted, (r) => r.tx_hash);
+            inserted += await this.writeRows('tx', rows, (part) => this.storeTxs('tx', part), (r) => r.tx_hash);
           },
           // At the smallest step, keep what was read and move on.
           { truncate: this.txStepMs <= MIN_STEP_MS }

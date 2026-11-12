@@ -36,8 +36,10 @@ const NOT_STORED = Prisma.sql`NOT EXISTS (
   SELECT 1 FROM elysium_tx st
   WHERE st.tx_hash = lv.tx_hash
     -- The same transaction, so the same block: a day around it is all that has to be looked at
-    -- (and not every day elysium_tx holds, once it is split by day).
-    AND st.block_time >= lv.block_time - interval '1 day' AND st.block_time <= lv.block_time + interval '1 day')`;
+    -- (and not every day elysium_tx holds, once it is split by day). OFFSET 0 keeps this a
+    -- lookup per row, whatever plan the statement around it gets.
+    AND st.block_time >= lv.block_time - interval '1 day' AND st.block_time <= lv.block_time + interval '1 day'
+  OFFSET 0)`;
 
 /** USD value of one unit of a launch quote: the HYPE price for HYPE quotes, $1 for test USDC, else null. */
 function quoteUsd(quote: string, hypeUsd: number | null): number | null {

@@ -99,6 +99,8 @@ export function errorCategory(message: string | null): string | null {
   const http = /API error:?\s*(\d{3})/i.exec(message);
   if (http) return `upstream_http_${http[1]}`;
   if (/tick given up/i.test(message)) return 'tick_time_limit';
+  // The upkeep's own refusals: a keep that cannot be applied, a server that cannot split the table.
+  if (/not split by day/i.test(message)) return /older than Postgres/i.test(message) ? 'server_too_old' : 'keep_without_split';
   if (/time(d)? ?out/i.test(message)) return 'timeout';
   if (/prisma|database|can't reach|ECONNREFUSED|ECONNRESET/i.test(message)) return 'db_error';
   if (/page/i.test(message)) return 'page_cap';

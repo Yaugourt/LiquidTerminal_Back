@@ -31,6 +31,7 @@ const REJECTS_WORTH_A_MESSAGE: ReadonlySet<string> = new Set([
   'row-refused',
   'window-truncated',
   'reorg',
+  'older-than-kept',
 ]);
 /** Today's credits over this many times the highest of the previous days is not a normal day. */
 const CREDITS_FACTOR = 1.3;

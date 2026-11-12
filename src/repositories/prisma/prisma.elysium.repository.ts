@@ -1,5 +1,5 @@
 import { prismaHistorical } from '../../core/prisma.historical.service';
-import { BRIDGE_TX_TYPES, storableText } from '../../services/elysium/elysium-ingest.util';
+import { BRIDGE_TX_TYPES, pgErrorCode, storableText } from '../../services/elysium/elysium-ingest.util';
 import type { BridgeRow, LiveTxRow, TokenRow, TxRow } from '../../services/elysium/elysium-ingest.util';
 import type { DexPoolRow, DexSwapRow } from '../../services/elysium/elysium-dex.util';
 import type {
@@ -9,7 +9,9 @@ import type {
 } from '../../services/elysium/elysium-launchpad.util';
 import type { RejectCount } from '../../services/elysium/elysium-ingest-rejects';
 import { LATE_ROW_AGE_MS } from '../../services/elysium/elysium-retention.util';
+import { LAUNCH_CREATOR_SQL } from '../../services/elysium/elysium-facts.sql';
 import { HISTORY_FACT, LOCK_FACTS_SQL } from './prisma.elysium-facts.repository';
+import { ElysiumPartitionRepository } from './prisma.elysium-partition.repository';
 
 /** Market keys looked up per statement (a page of 1,000 logs names at most 3,000). */
 const LAUNCH_MARKET_KEYS_PER_QUERY = 5_000;
@@ -50,6 +52,17 @@ function insertTxsSql(facts: boolean): string {
         SELECT tx_hash, block_number, block_time, from_addr, to_addr,
           contract_address, method_id, tx_type, gas_used, fee_wei, success, is_spam
         FROM src
+        -- A transaction already held under another time (the chain put it in another block
+        -- since) is left to the daily comparison, which moves it: split by day, the table only
+        -- refuses a hash twice inside one day, and the row would be stored a second time in the
+        -- day of its new block. Looked up one row at a time (OFFSET 0 keeps it a lookup, never a
+        -- join), a day on each side: at most three days of the table are opened.
+        WHERE NOT EXISTS (
+          SELECT 1 FROM elysium_tx held
+          WHERE held.tx_hash = src.tx_hash
+            AND held.block_time >= src.block_time - interval '1 day'
+            AND held.block_time <= src.block_time + interval '1 day'
+          OFFSET 0)
         ON CONFLICT DO NOTHING
         RETURNING tx_hash, block_number, block_time, from_addr, to_addr, method_id, contract_address, is_spam,
           (NOT is_spam AND COALESCE(tx_type, '') NOT IN (${BRIDGE_TYPES_SQL})) AS is_user
@@ -183,7 +196,9 @@ export type ElysiumStream =
   /** Not a stream of its own: the copy of a transaction's sender onto swaps, trades and launches (`cursor` = history copied up to). */
   | 'txsender'
   /** Not a stream of its own: the history facts (`cursor` = the end of the last UTC day every fact holds). */
-  | 'facts';
+  | 'facts'
+  /** Not a stream of its own: the split of elysium_tx by day (`backfill_done` = split, `rows` = its tables, `cursor` = the first instant held once old days are dropped). */
+  | 'txparts';
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
 export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set([
@@ -197,6 +212,7 @@ export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set([
   'upkeep',
   'txsender',
   'facts',
+  'txparts',
 ]);
 
 export interface LaunchMarketDbRow {
@@ -262,15 +278,35 @@ export class ElysiumIngestRepository {
    * inserted under the facts' lock, and the rows it adds to folded days are
    * added to the facts by the same statement: see insertOldTxs.
    */
-  public async insertTxs(rows: TxRow[]): Promise<{ inserted: number; contracts: number }> {
-    if (rows.length === 0) return { inserted: 0, contracts: 0 };
+  public async insertTxs(all: TxRow[]): Promise<{ inserted: number; contracts: number; tooOld: number }> {
+    if (all.length === 0) return { inserted: 0, contracts: 0, tooOld: 0 };
+    // Once old days of elysium_tx are dropped, a row from before the oldest day kept has no
+    // table to go to, and what was derived from that day is final: it is left out, and counted.
+    const floor = await ElysiumPartitionRepository.getInstance().floorMs();
+    const rows = floor === null ? all : all.filter((r) => !(Date.parse(r.block_time) < floor));
+    const tooOld = all.length - rows.length;
+    if (rows.length === 0) return { inserted: 0, contracts: 0, tooOld };
     const lateBefore = Date.now() - LATE_ROW_AGE_MS;
-    if (rows.some((r) => !(Date.parse(r.block_time) >= lateBefore))) return this.insertOldTxs(rows);
-    const result = await prismaHistorical.$queryRawUnsafe<Array<{ inserted: number; contracts: number }>>(
-      insertTxsSql(false),
-      JSON.stringify(rows)
-    );
-    return { inserted: result[0]?.inserted ?? 0, contracts: result[0]?.contracts ?? 0 };
+    const old = rows.some((r) => !(Date.parse(r.block_time) >= lateBefore));
+    const run = async (): Promise<{ inserted: number; contracts: number }> => {
+      if (old) return this.insertOldTxs(rows);
+      const result = await prismaHistorical.$queryRawUnsafe<Array<{ inserted: number; contracts: number }>>(
+        insertTxsSql(false),
+        JSON.stringify(rows)
+      );
+      return { inserted: result[0]?.inserted ?? 0, contracts: result[0]?.contracts ?? 0 };
+    };
+    try {
+      return { ...(await run()), tooOld };
+    } catch (error) {
+      // 23514 on this insert: a row's day has no table (the upkeep makes them days ahead; it
+      // was stopped for longer than that). The tables are made here and the page is stored.
+      if (pgErrorCode(error) !== '23514') throw error;
+      const days = rows.map((r) => r.block_time.slice(0, 10));
+      const made = await ElysiumPartitionRepository.getInstance().ensureDaysFor(days, new Date(Date.now()));
+      if (made === 0) throw error;
+      return { ...(await run()), tooOld };
+    }
   }
 
   /**
@@ -957,14 +993,10 @@ export class ElysiumIngestRepository {
          ORDER BY l.stats_at LIMIT $1::int)
       ),
       best AS (SELECT DISTINCT ON (token) token, pri, ord FROM picks ORDER BY token, pri)
-      SELECT l.token, coalesce(l.creator, l.tx_from, t.from_addr) AS creator, l.curve, l.pool,
+      SELECT l.token, ${LAUNCH_CREATOR_SQL} AS creator, l.curve, l.pool,
              (l.symbol IS NULL AND l.stats_at IS NULL) AS "needsName", l.holders AS "lastHolders"
       FROM best
       JOIN elysium_launch l ON l.token = best.token
-      -- Only for a launch whose creator is not copied onto it yet (elysium_launch.tx_from): the
-      -- launch and its transaction carry the same time, which keeps the lookup inside one day.
-      LEFT JOIN elysium_tx t ON l.creator IS NULL AND l.tx_from IS NULL
-        AND t.tx_hash = l.tx_hash AND t.block_time = l.created_at
       ORDER BY best.pri, best.ord
       LIMIT $1::int
       `,

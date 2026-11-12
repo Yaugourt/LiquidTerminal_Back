@@ -41,7 +41,9 @@ export type RejectReason =
   /** A closed day whose transaction count differs from the provider's. */
   | 'day-gap'
   /** A block that is no longer on the chain: the rows after the last common block were removed and read again. */
-  | 'reorg';
+  | 'reorg'
+  /** A transaction from before the oldest day elysium_tx still holds (old days are dropped on a set keep): not stored. */
+  | 'older-than-kept';
 
 export interface RejectCount {
   stream: string;

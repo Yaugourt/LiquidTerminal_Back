@@ -4,7 +4,7 @@ import { redisService } from '../../core/redis.service';
 import { LAUNCHPAD_MAX_ROWS, LAUNCHPAD_PAGE_MAX, type LaunchpadSort } from '../../schemas/elysium-analytics.schema';
 import { FairGate, GateBusyError } from '../../utils/fairGate';
 import { logDeduplicator } from '../../utils/logDeduplicator';
-import { LAUNCH_SENDER_JOIN, TRADE_SENDER_JOIN } from './elysium-facts.sql';
+import { LAUNCH_CREATOR, TRADE_TRADER } from './elysium-facts.sql';
 import { CURVE_SALE_SUPPLY, HYPE_QUOTES, LAUNCH_TOTAL_SUPPLY, Launchpad, quoteDecimals, USD_QUOTES } from './elysium-launchpad.util';
 
 const PERP_MARKETS_CACHE_KEY = 'perp:markets';
@@ -313,12 +313,11 @@ function containsPattern(q: string): string {
 
 /** The columns of a launch row; `creator` falls back to the launch tx sender, names to the token registry. */
 const LAUNCH_COLUMNS = Prisma.sql`
-  l.token, l.launchpad, l.kind, coalesce(l.creator, l.tx_from, tx.from_addr) AS creator,
+  l.token, l.launchpad, l.kind, ${LAUNCH_CREATOR} AS creator,
   coalesce(l.symbol, tk.symbol) AS symbol, coalesce(l.name, tk.name) AS name, l.quote,
   (extract(epoch FROM l.created_at))::float8 AS born, l.graduated_at IS NOT NULL AS graduated,
   l.holders, l.top10_pct, l.dev_pct, l.curve_sold::text AS sold`;
 const LAUNCH_JOINS = Prisma.sql`
-  ${LAUNCH_SENDER_JOIN}
   LEFT JOIN elysium_token tk ON tk.address = l.token AND (l.symbol IS NULL OR l.name IS NULL)`;
 
 /**
@@ -442,9 +441,8 @@ export class ElysiumLaunchpadMarketService {
         WITH day AS (
           -- V4 swaps only see the router: the trader is the tx sender.
           SELECT tr.token, sum(tr.quote_amount)::text AS vol24, count(*)::int AS txns24,
-                 count(DISTINCT coalesce(tr.trader, tr.tx_from, t.from_addr))::int AS traders24
+                 count(DISTINCT ${TRADE_TRADER})::int AS traders24
           FROM elysium_launch_trade tr
-          ${TRADE_SENDER_JOIN}
           WHERE tr.block_time >= ${sinceIso}::timestamptz
           GROUP BY tr.token
         )

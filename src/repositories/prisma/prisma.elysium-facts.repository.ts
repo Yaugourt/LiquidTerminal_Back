@@ -73,22 +73,33 @@ export class ElysiumFactsRepository {
     return prismaHistorical.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${SENDER_TIMEOUT_MS}`);
+        // Each lookup is a subquery run for one row that lacks its sender (OFFSET 0 keeps the rows
+        // to fill a list of their own): however many there are, a row opens the one day of
+        // elysium_tx its transaction is in, and never the whole span.
         const swaps = await tx.$executeRawUnsafe(
-          `UPDATE elysium_dex_swap s SET tx_from = t.from_addr
-           FROM elysium_tx t
-           WHERE s.tx_from IS NULL AND s.block_time > $1::timestamptz AND s.block_time <= $2::timestamptz
-             AND t.block_time > $1::timestamptz AND t.block_time <= $2::timestamptz
-             AND t.tx_hash = s.tx_hash AND t.block_time = s.block_time`,
+          `UPDATE elysium_dex_swap s SET tx_from = todo.sender
+           FROM (
+             SELECT r.tx_hash, r.log_index,
+                    (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = r.tx_hash AND t.block_time = r.block_time LIMIT 1) AS sender
+             FROM elysium_dex_swap r
+             WHERE r.tx_from IS NULL AND r.block_time > $1::timestamptz AND r.block_time <= $2::timestamptz
+             OFFSET 0
+           ) todo
+           WHERE todo.sender IS NOT NULL AND s.tx_hash = todo.tx_hash AND s.log_index = todo.log_index AND s.tx_from IS NULL`,
           from,
           to
         );
         const trades = await tx.$executeRawUnsafe(
-          `UPDATE elysium_launch_trade s SET tx_from = t.from_addr
-           FROM elysium_tx t
-           WHERE s.trader IS NULL AND s.tx_from IS NULL
-             AND s.block_time > $1::timestamptz AND s.block_time <= $2::timestamptz
-             AND t.block_time > $1::timestamptz AND t.block_time <= $2::timestamptz
-             AND t.tx_hash = s.tx_hash AND t.block_time = s.block_time`,
+          `UPDATE elysium_launch_trade s SET tx_from = todo.sender
+           FROM (
+             SELECT r.tx_hash, r.log_index,
+                    (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = r.tx_hash AND t.block_time = r.block_time LIMIT 1) AS sender
+             FROM elysium_launch_trade r
+             WHERE r.trader IS NULL AND r.tx_from IS NULL
+               AND r.block_time > $1::timestamptz AND r.block_time <= $2::timestamptz
+             OFFSET 0
+           ) todo
+           WHERE todo.sender IS NOT NULL AND s.tx_hash = todo.tx_hash AND s.log_index = todo.log_index AND s.tx_from IS NULL`,
           from,
           to
         );
@@ -104,12 +115,16 @@ export class ElysiumFactsRepository {
           to
         );
         const launches = await tx.$executeRawUnsafe(
-          `UPDATE elysium_launch l SET tx_from = t.from_addr
-           FROM elysium_tx t
-           WHERE l.creator IS NULL AND l.tx_from IS NULL
-             AND l.created_at > $1::timestamptz AND l.created_at <= $2::timestamptz
-             AND t.block_time > $1::timestamptz AND t.block_time <= $2::timestamptz
-             AND t.tx_hash = l.tx_hash AND t.block_time = l.created_at`,
+          `UPDATE elysium_launch l SET tx_from = todo.sender
+           FROM (
+             SELECT r.token,
+                    (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = r.tx_hash AND t.block_time = r.created_at LIMIT 1) AS sender
+             FROM elysium_launch r
+             WHERE r.creator IS NULL AND r.tx_from IS NULL
+               AND r.created_at > $1::timestamptz AND r.created_at <= $2::timestamptz
+             OFFSET 0
+           ) todo
+           WHERE todo.sender IS NOT NULL AND l.token = todo.token AND l.tx_from IS NULL`,
           from,
           to
         );

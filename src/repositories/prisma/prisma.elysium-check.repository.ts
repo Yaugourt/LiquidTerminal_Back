@@ -60,6 +60,13 @@ function assertDay(day: string): void {
  * from the rows it adds. A row that changes or leaves afterwards moves them here, by exactly
  * what it changed (adjustSenders).
  */
+/**
+ * How far from the time the provider gives a transaction now we look for the row we stored of
+ * it: a transaction the chain put in another block is seconds away, a day covers the block that
+ * crosses midnight.
+ */
+const MOVED_SEARCH_MS = 86_400_000;
+
 export class ElysiumCheckRepository {
   private static instance: ElysiumCheckRepository;
 
@@ -257,9 +264,19 @@ export class ElysiumCheckRepository {
    */
   public async applyTxFlags(rows: TxRow[]): Promise<number> {
     if (rows.length === 0) return 0;
+    // A row is looked for a day on each side of the time the provider gives it now (it may sit in
+    // another block since we stored it): with elysium_tx split by day, the hash alone would open
+    // every day the table holds. The span of the page bounds the statement as a whole.
+    const times = rows.map((r) => Date.parse(r.block_time)).filter((t) => Number.isFinite(t));
+    if (times.length === 0) return 0;
+    const lo = new Date(Math.min(...times) - MOVED_SEARCH_MS).toISOString();
+    const hi = new Date(Math.max(...times) + MOVED_SEARCH_MS).toISOString();
     return prismaHistorical.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${FIX_TIMEOUT_MS}`);
+        // One lookup per row of the page, never a pass over the days it spans.
+        await tx.$executeRawUnsafe(`SET LOCAL enable_hashjoin = off`);
+        await tx.$executeRawUnsafe(`SET LOCAL enable_mergejoin = off`);
         const changed = await tx.$queryRawUnsafe<
           Array<{ from_addr: string; old_day: string; new_day: string; old_at: string; new_at: string; was_user: boolean; is_user: boolean }>
         >(
@@ -270,10 +287,18 @@ export class ElysiumCheckRepository {
            ),
            old AS (
              SELECT t.tx_hash, t.block_time, (${IS_USER_SQL}) AS was_user
-             FROM elysium_tx t JOIN src s ON s.tx_hash = t.tx_hash
-             WHERE t.is_spam IS DISTINCT FROM s.is_spam OR t.success IS DISTINCT FROM s.success
+             FROM src s
+             JOIN elysium_tx t ON t.tx_hash = s.tx_hash
+               AND t.block_time >= s.block_time - interval '1 day' AND t.block_time <= s.block_time + interval '1 day'
+             WHERE t.block_time >= $2::timestamptz AND t.block_time <= $3::timestamptz
+               AND (t.is_spam IS DISTINCT FROM s.is_spam OR t.success IS DISTINCT FROM s.success
                 OR t.block_number IS DISTINCT FROM s.block_number OR t.block_time IS DISTINCT FROM s.block_time
-                OR (t.gas_used = 0 AND s.gas_used > 0)
+                OR (t.gas_used = 0 AND s.gas_used > 0))
+               -- A row that would move onto a row we already hold at the new time (the same
+               -- transaction stored twice, a day apart) is left where it is: the day it moves to
+               -- refuses the hash a second time.
+               AND NOT (t.block_time IS DISTINCT FROM s.block_time AND EXISTS (
+                 SELECT 1 FROM elysium_tx twin WHERE twin.tx_hash = s.tx_hash AND twin.block_time = s.block_time))
            ),
            upd AS (
              UPDATE elysium_tx t SET
@@ -284,8 +309,9 @@ export class ElysiumCheckRepository {
                -- Never the other way round: a known gas figure is not replaced by a missing one.
                gas_used = CASE WHEN t.gas_used = 0 AND s.gas_used > 0 THEN s.gas_used ELSE t.gas_used END,
                fee_wei = CASE WHEN t.gas_used = 0 AND s.gas_used > 0 THEN s.fee_wei ELSE t.fee_wei END
-             FROM src s
-             WHERE t.tx_hash = s.tx_hash AND t.tx_hash IN (SELECT tx_hash FROM old)
+             FROM src s JOIN old o ON o.tx_hash = s.tx_hash
+             WHERE t.tx_hash = o.tx_hash AND t.block_time = o.block_time
+               AND t.block_time >= $2::timestamptz AND t.block_time <= $3::timestamptz
              RETURNING t.tx_hash, t.from_addr, t.block_time, (${IS_USER_SQL}) AS is_user
            )
            SELECT u.from_addr,
@@ -305,7 +331,9 @@ export class ElysiumCheckRepository {
               success: r.success,
               is_spam: r.is_spam,
             }))
-          )
+          ),
+          lo,
+          hi
         );
         if (changed.length === 0) return 0;
         const events: SenderEvent[] = [];
@@ -333,8 +361,12 @@ export class ElysiumCheckRepository {
    * This is what a chain reorganisation leaves behind: a transaction read 15 s after its block,
    * then dropped by the chain, stayed here for good.
    */
-  public async removeTxs(hashes: string[]): Promise<number> {
+  public async removeTxs(hashes: string[], within?: { start: Date; end: Date }): Promise<number> {
     if (hashes.length === 0) return 0;
+    // `within`: the span the caller found these hashes in ([start, end)). With elysium_tx split
+    // by day, it is what keeps the removal inside the days concerned; without it every day is opened.
+    const from = within ? within.start.toISOString() : null;
+    const to = within ? within.end.toISOString() : null;
     return prismaHistorical.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${FIX_TIMEOUT_MS}`);
@@ -349,25 +381,40 @@ export class ElysiumCheckRepository {
         );
         const gone = await tx.$queryRawUnsafe<Array<{ from_addr: string; day: string; at: string; was_user: boolean }>>(
           `DELETE FROM elysium_tx t WHERE t.tx_hash = ANY($1::text[])
+             AND ($2::timestamptz IS NULL OR t.block_time >= $2::timestamptz)
+             AND ($3::timestamptz IS NULL OR t.block_time < $3::timestamptz)
            RETURNING t.from_addr, ((t.block_time AT TIME ZONE 'UTC')::date)::text AS day,
                      to_char(t.block_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
                      (${IS_USER_SQL}) AS was_user`,
-          hashes
+          hashes,
+          from,
+          to
         );
         await tx.$executeRawUnsafe(`DELETE FROM elysium_tx_live WHERE tx_hash = ANY($1::text[])`, hashes);
         // A contract one of them created: gone with it, unless another transaction we hold created it.
-        const contracts = await tx.$queryRawUnsafe<Array<{ address: string }>>(
-          `DELETE FROM elysium_contract WHERE deploy_tx = ANY($1::text[]) RETURNING address`,
+        const contracts = await tx.$queryRawUnsafe<Array<{ address: string; deployer: string; deployed_ms: number }>>(
+          `DELETE FROM elysium_contract WHERE deploy_tx = ANY($1::text[])
+           RETURNING address, deployer, (extract(epoch FROM deployed_at) * 1000)::float8 AS deployed_ms`,
           hashes
         );
         if (contracts.length > 0) {
+          // The other transaction that created the same contract, if we hold one: it comes from
+          // the same deployer (an address is derived from the deployer and its nonce) and from
+          // around the same time (the chain put the creation in another block). Looked for by
+          // the deployer's own transactions of those days, not by the contract across the table.
+          const stamps = contracts.map((c) => Number(c.deployed_ms));
           await tx.$executeRawUnsafe(
             `INSERT INTO elysium_contract (address, deployer, deploy_tx, deployed_at, block_number)
              SELECT DISTINCT ON (t.contract_address) t.contract_address, t.from_addr, t.tx_hash, t.block_time, t.block_number
-             FROM elysium_tx t WHERE t.contract_address = ANY($1::text[])
+             FROM elysium_tx t
+             WHERE t.from_addr = ANY($2::text[]) AND t.contract_address = ANY($1::text[])
+               AND t.block_time >= $3::timestamptz AND t.block_time <= $4::timestamptz
              ORDER BY t.contract_address, t.block_time
              ON CONFLICT (address) DO NOTHING`,
-            contracts.map((c) => c.address)
+            contracts.map((c) => c.address),
+            [...new Set(contracts.map((c) => c.deployer))],
+            new Date(Math.min(...stamps) - MOVED_SEARCH_MS).toISOString(),
+            new Date(Math.max(...stamps) + MOVED_SEARCH_MS).toISOString()
           );
         }
         await tx.$executeRawUnsafe(`DELETE FROM elysium_dex_swap WHERE tx_hash = ANY($1::text[])`, hashes);

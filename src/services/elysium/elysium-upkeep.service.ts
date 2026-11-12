@@ -1,9 +1,20 @@
 import { ELYSIUM_PROJECTS } from '../../constants/elysium-projects';
 import { ElysiumFactsRepository } from '../../repositories/prisma/prisma.elysium-facts.repository';
+import { ElysiumPartitionRepository, LEGACY_PARTITION } from '../../repositories/prisma/prisma.elysium-partition.repository';
 import { ElysiumIngestRepository, type ElysiumStream } from '../../repositories/prisma/prisma.elysium.repository';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { ELYSIUM_GENESIS } from './elysium-ingest.util';
-import { dayStartMs, FACTS_FINAL_DAYS, finalDay, nextDay } from './elysium-retention.util';
+import {
+  dayKey,
+  dayStartMs,
+  FACTS_FINAL_DAYS,
+  finalDay,
+  nextDay,
+  partitionDaysWanted,
+  partitionsToDrop,
+  txKeepDays,
+} from './elysium-retention.util';
+import { ROLLUP_KEEP_DAYS } from './elysium-rollup.util';
 import { tickStep } from './elysium-tick';
 
 const MINUTE_MS = 60_000;
@@ -32,6 +43,15 @@ const SENDER_SWEEP_MS = (FACTS_FINAL_DAYS - 1) * DAY_MS;
 const SENDER_HISTORY_STEP_MS = 2 * DAY_MS;
 const SENDER_HISTORY_OVERLAP_MS = 2 * MINUTE_MS;
 
+/** The split of elysium_tx starts at the UTC day this many days ahead: the check of every row has until then. */
+const SPLIT_LEAD_DAYS = 2;
+/** A bound closer than this is given up for a later one (a check not verified in time, a split that found the table busy for hours). */
+const SPLIT_MIN_LEAD_MS = 6 * HOUR_MS;
+/** The day tables that can be dropped: this many a pass, the rest on the next ones. */
+const DROPS_PER_PASS = 2;
+/** Postgres 14 brought the detach that does not block the table's readers: the split is not started on an older server. */
+const SPLIT_MIN_SERVER_VERSION = 140000;
+
 /** The directory's contracts (lower case), once each. */
 export function directoryContracts(): string[] {
   return [...new Set(ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => c.address.toLowerCase())))].sort();
@@ -49,6 +69,12 @@ export function directoryContracts(): string[] {
  *    one day per transaction, and brings the directory's contracts up to the
  *    same day.
  *
+ * 3. `txparts`: once ELYSIUM_TX_SPLIT_ENABLED=true, splits elysium_tx in one
+ *    table per UTC day (once: see ElysiumPartitionRepository); then keeps the
+ *    tables of the days ahead made, and, when a keep is set
+ *    (ELYSIUM_TX_KEEP_DAYS), drops the days older than it that nothing reads
+ *    any more.
+ *
  * The first passes after this ships go through the whole history, a few days
  * per pass. Until they are through, the pages read what is missing from
  * elysium_tx, as they did before: a pass that is late or fails costs speed,
@@ -59,7 +85,9 @@ export class ElysiumUpkeepService {
 
   private readonly states = ElysiumIngestRepository.getInstance();
   private readonly facts = ElysiumFactsRepository.getInstance();
+  private readonly parts = ElysiumPartitionRepository.getInstance();
   private lastSenderSweepAt = 0;
+  private analyzedDay = '';
 
   public static getInstance(): ElysiumUpkeepService {
     if (!ElysiumUpkeepService.instance) ElysiumUpkeepService.instance = new ElysiumUpkeepService();
@@ -70,6 +98,17 @@ export class ElysiumUpkeepService {
     return (process.env.ELYSIUM_UPKEEP_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
   }
 
+  /**
+   * Whether this process may split elysium_tx by day: only when ELYSIUM_TX_SPLIT_ENABLED=true.
+   * Off by default on purpose: the releases before this one cannot write to a split table
+   * (their insert names a conflict column the split table has no index on), so the split is
+   * switched on once going back to them is no longer wanted. A table already split stays split
+   * and looked after whatever the variable says.
+   */
+  public static isSplitEnabled(): boolean {
+    return (process.env.ELYSIUM_TX_SPLIT_ENABLED ?? 'false').trim().toLowerCase() === 'true';
+  }
+
   /** One pass. Resolves to the delay before the next one. */
   public async tick(): Promise<number> {
     const now = new Date(Date.now());
@@ -77,6 +116,7 @@ export class ElysiumUpkeepService {
     let more = false;
     more = (await this.job('txsender', () => this.copySenders(now, tx?.cursor ?? null))) || more;
     more = (await this.job('facts', () => this.foldFacts(now, tx))) || more;
+    more = (await this.job('txparts', () => this.keepPartitions(now))) || more;
     return more ? BACKLOG_INTERVAL_MS : IDLE_INTERVAL_MS;
   }
 
@@ -208,5 +248,112 @@ export class ElysiumUpkeepService {
       backfillDone: historyDone && projectsDone,
     });
     return !(historyDone && projectsDone);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. elysium_tx split by day, and what is kept of it
+  // ---------------------------------------------------------------------------
+
+  private async keepPartitions(now: Date): Promise<boolean> {
+    let layout = await this.parts.layout();
+
+    if (!layout.partitioned) {
+      if (!ElysiumUpkeepService.isSplitEnabled()) {
+        // A keep that cannot be applied is said, not silently ignored: days are only dropped from a split table.
+        if (txKeepDays() !== null) {
+          throw new Error('ELYSIUM_TX_KEEP_DAYS is set but elysium_tx is not split by day: set ELYSIUM_TX_SPLIT_ENABLED=true');
+        }
+        return false;
+      }
+      if ((await this.parts.serverVersion()) < SPLIT_MIN_SERVER_VERSION) {
+        throw new Error('elysium_tx is not split by day: the database server is older than Postgres 14');
+      }
+      const today = Math.floor(now.getTime() / DAY_MS) * DAY_MS;
+      const pending = layout.pending;
+      if (!pending || pending.cutMs - now.getTime() < SPLIT_MIN_LEAD_MS) {
+        const cutMs = today + SPLIT_LEAD_DAYS * DAY_MS;
+        const step = await this.parts.prepare(cutMs);
+        if (step === 'done') logDeduplicator.info('Elysium upkeep: split of elysium_tx prepared', { from: dayKey(cutMs) });
+        return true;
+      }
+      if (!pending.validated) {
+        const fromMs = Date.now();
+        await this.parts.validate();
+        logDeduplicator.info('Elysium upkeep: every row of elysium_tx checked against the split bound', { ms: Date.now() - fromMs });
+        return true;
+      }
+      const days = partitionDaysWanted(now, dayKey(pending.cutMs));
+      const step = await this.parts.split(pending.cutMs, days);
+      if (step === 'busy') return true;
+      this.parts.forgetFloor();
+      logDeduplicator.info('Elysium upkeep: elysium_tx is split by day', { from: dayKey(pending.cutMs), days: days.length });
+      layout = await this.parts.layout();
+    }
+
+    // A detach that was interrupted half-way is finished first.
+    for (const name of layout.detaching) {
+      await this.parts.drop(name, 'detaching');
+      logDeduplicator.info('Elysium upkeep: part of elysium_tx dropped', { part: name });
+      tickStep();
+    }
+
+    // The tables of today and of the days ahead.
+    const legacy = layout.parts.find((p) => p.fromMs === null);
+    const firstOwnDay = layout.parts.reduce<number | null>((m, p) => (p.fromMs !== null && (m === null || p.fromMs < m) ? p.fromMs : m), null);
+    const splitFrom = legacy ? legacy.toMs : firstOwnDay;
+    if (splitFrom !== null) {
+      for (const day of partitionDaysWanted(now, dayKey(splitFrom))) {
+        const start = dayStartMs(day);
+        if (layout.parts.some((p) => (p.fromMs === null || p.fromMs <= start) && start < p.toMs)) continue;
+        if (await this.parts.ensureDay(day)) logDeduplicator.info('Elysium upkeep: day table made', { day });
+        tickStep();
+      }
+    }
+
+    // Statistics for the planner, once a UTC day: autovacuum does not look at the parent of the parts.
+    const todayKey = dayKey(now.getTime());
+    if (this.analyzedDay !== todayKey) {
+      await this.parts.analyze();
+      this.analyzedDay = todayKey;
+      tickStep();
+    }
+
+    // The days older than the keep, when one is set and nothing reads them any more.
+    let dropped = 0;
+    let left = 0;
+    // Without the day rollups the widest views read elysium_tx itself: the keep's floor is then higher.
+    const rollups = (process.env.ELYSIUM_ROLLUPS_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+    const keep = txKeepDays(process.env, rollups);
+    if (keep !== null) {
+      const standing = await this.facts.standing(directoryContracts());
+      const through =
+        standing.history !== null && standing.projectsThrough !== null
+          ? [standing.history, standing.projectsThrough].sort()[0]
+          : null;
+      const built = await this.parts.builtRollupDays(ROLLUP_KEEP_DAYS + 2);
+      const candidates = partitionsToDrop(layout.parts, now, keep, through, built);
+      left = candidates.length;
+      for (const part of candidates.slice(0, DROPS_PER_PASS)) {
+        await this.parts.drop(part.name, 'attached');
+        this.parts.forgetFloor();
+        dropped += 1;
+        left -= 1;
+        logDeduplicator.info('Elysium upkeep: part of elysium_tx dropped', {
+          part: part.name === LEGACY_PARTITION ? 'everything before the split' : part.name,
+          upTo: new Date(part.toMs).toISOString(),
+          keepDays: keep,
+        });
+        tickStep();
+      }
+    }
+
+    const after = dropped > 0 ? await this.parts.layout() : layout;
+    const floor = after.parts[0]?.fromMs ?? null;
+    await this.states.advance('txparts', {
+      ...(floor !== null ? { cursor: new Date(floor) } : {}),
+      setRows: after.parts.length,
+      backfillDone: true,
+    });
+    return left > 0;
   }
 }

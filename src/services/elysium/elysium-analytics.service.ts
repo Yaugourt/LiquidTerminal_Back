@@ -38,7 +38,8 @@ import { hypedexerCreditMeter } from '../../utils/hypedexer-credit-meter';
 import { positiveIntEnv } from '../../utils/env';
 import { FairGate } from '../../utils/fairGate';
 import { ELYSIUM_GENESIS } from './elysium-ingest.util';
-import { AFTER_HISTORY_FACTS, SWAP_SENDER_JOIN } from './elysium-facts.sql';
+import { AFTER_HISTORY_FACTS, SWAP_SENDER } from './elysium-facts.sql';
+import { txKeepDays } from './elysium-retention.util';
 import {
   closedRollupDays,
   closedRollupHours,
@@ -311,14 +312,19 @@ export class ElysiumAnalyticsService {
                  (extract(epoch FROM refreshed_at) * 1000)::float8 AS refreshed_ms,
                  (extract(epoch FROM based_at) * 1000)::float8 AS based_ms
           FROM elysium_window_state WHERE span > 0 ORDER BY span`.catch(() => null),
-          prismaHistoricalPages.$queryRaw<Array<{ rollups: number; tx: number; database: number }>>`
+          prismaHistoricalPages.$queryRaw<Array<{ rollups: number; tx: number; database: number; facts: number; parts: number; split: boolean }>>`
           SELECT (pg_total_relation_size('elysium_call_day') + pg_total_relation_size('elysium_caller_day')
                   + pg_total_relation_size('elysium_caller_set') + pg_total_relation_size('elysium_method_sender_day')
                   + pg_total_relation_size('elysium_day_rollup')
                   + pg_total_relation_size('elysium_call_hour') + pg_total_relation_size('elysium_hour_rollup')
                   + pg_total_relation_size('elysium_target_window_1') + pg_total_relation_size('elysium_target_window_7')
                   + pg_total_relation_size('elysium_target_window_30') + pg_total_relation_size('elysium_deployer_window'))::float8 AS rollups,
-                 pg_total_relation_size('elysium_tx')::float8 AS tx,
+                 -- Every part of elysium_tx once it is split by day (the parent itself holds nothing).
+                 (SELECT COALESCE(sum(pg_total_relation_size(relid)), 0) FROM pg_partition_tree('elysium_tx'))::float8 AS tx,
+                 (pg_total_relation_size('elysium_target_seen') + pg_total_relation_size('elysium_address_method')
+                  + pg_total_relation_size('elysium_project_wallet'))::float8 AS facts,
+                 (SELECT count(*) FROM pg_inherits WHERE inhparent = to_regclass('elysium_tx'))::int AS parts,
+                 COALESCE((SELECT c.relkind = 'p' FROM pg_class c WHERE c.oid = to_regclass('elysium_tx')), false) AS split,
                  pg_database_size(current_database())::float8 AS database`.catch(() => null),
           // What the ingestion read and did not store over the last 7 UTC days, per stream and reason.
           prismaHistoricalPages.$queryRaw<
@@ -446,6 +452,21 @@ export class ElysiumAnalyticsService {
           // The size of the volume, when it is given (HISTORICAL_DB_VOLUME_BYTES): the share of it in use.
           volumeBytes: volumeBytes > 0 ? volumeBytes : null,
           usedShare: volumeBytes > 0 && databaseBytes !== null ? databaseBytes / volumeBytes : null,
+          // What is kept of elysium_tx: whether it is split by day, how many tables, since when
+          // it holds transactions (null: since the first block), the keep set (null: everything),
+          // and the last day the history facts go up to, with their size.
+          tx: {
+            bytes: sizes[0] ? Number(sizes[0].tx) : null,
+            split: sizes[0] ? Boolean(sizes[0].split) : null,
+            parts: sizes[0] ? Number(sizes[0].parts) : null,
+            heldFrom: iso(all.find((r) => r.stream === 'txparts')?.cursor?.getTime() ?? null),
+            keepDays: txKeepDays(),
+            factsThrough: ((): string | null => {
+              const end = all.find((r) => r.stream === 'facts')?.cursor ?? null;
+              return end ? new Date(end.getTime() - DAY_MS).toISOString().slice(0, 10) : null;
+            })(),
+            factsBytes: sizes[0] ? Number(sizes[0].facts) : null,
+          },
         },
         rollups: {
           // Unknown, not zero and not "all of them", when the list of built days could not be read.
@@ -1498,9 +1519,8 @@ export class ElysiumAnalyticsService {
           }>
         >`
           SELECT s.pool, s.version, p.fee, p.token0, p.token1, k0.symbol AS sym0, k1.symbol AS sym1,
-                 count(*)::int AS swaps, count(DISTINCT COALESCE(s.tx_from, t.from_addr, s.sender))::int AS traders
+                 count(*)::int AS swaps, count(DISTINCT ${SWAP_SENDER})::int AS traders
           FROM elysium_dex_swap s
-          ${SWAP_SENDER_JOIN}
           LEFT JOIN elysium_dex_pool p ON p.pool = s.pool
           LEFT JOIN elysium_token k0 ON k0.address = p.token0
           LEFT JOIN elysium_token k1 ON k1.address = p.token1
@@ -1536,8 +1556,7 @@ export class ElysiumAnalyticsService {
                  (SELECT count(*) FROM elysium_dex_swap)::int AS swaps,
                  (SELECT count(*) FROM elysium_dex_pool WHERE created_at >= ${ts(since24h)}::timestamptz)::int AS pools24h,
                  (SELECT count(*) FROM elysium_dex_swap WHERE block_time >= ${ts(since24h)}::timestamptz)::int AS swaps24h,
-                 (SELECT count(DISTINCT COALESCE(s.tx_from, t.from_addr, s.sender)) FROM elysium_dex_swap s
-                   ${SWAP_SENDER_JOIN}
+                 (SELECT count(DISTINCT ${SWAP_SENDER}) FROM elysium_dex_swap s
                    WHERE s.block_time >= ${ts(since24h)}::timestamptz)::int AS traders24h`,
       ]);
 

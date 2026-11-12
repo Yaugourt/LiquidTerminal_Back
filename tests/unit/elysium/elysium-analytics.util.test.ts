@@ -98,6 +98,9 @@ describe('errorCategory', () => {
     expect(errorCategory('Command timed out')).toBe('timeout');
     expect(errorCategory('Elysium ingest: tx tick given up after 300 s without moving on')).toBe('tick_time_limit');
     expect(errorCategory('Elysium ingest: tx tick given up after 1800 s in all')).toBe('tick_time_limit');
+    // What the upkeep pass refuses to do, said by name.
+    expect(errorCategory('ELYSIUM_TX_KEEP_DAYS is set but elysium_tx is not split by day: set ELYSIUM_TX_SPLIT_ENABLED=true')).toBe('keep_without_split');
+    expect(errorCategory('elysium_tx is not split by day: the database server is older than Postgres 14')).toBe('server_too_old');
     expect(errorCategory('Elysium ingest: window exceeded the page cap')).toBe('page_cap');
     expect(errorCategory('something else at 10.0.0.3')).toBe('error');
     expect(errorCategory(null)).toBeNull();

@@ -439,7 +439,7 @@ export class ElysiumDayCheckService {
     // Never more than the day holds in excess of what the provider counts.
     const gone = confirmed.slice(0, excess);
     if (gone.length === 0) return { removed: 0, waiting };
-    const removed = await this.repo.removeTxs(gone);
+    const removed = await this.repo.removeTxs(gone, { start, end });
     for (const hash of gone) this.suspects.delete(hash);
     this.io.rejects.note('check', 'reorg', `${day}: ${gone[0]} no longer on the chain`, removed);
     logDeduplicator.warn('Elysium check: transactions the provider no longer lists were removed', { day, removed });

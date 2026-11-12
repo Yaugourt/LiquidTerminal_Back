@@ -326,7 +326,11 @@ describe('the daily check', () => {
       await later();
       expect(slotsRead.filter((s) => s === 30).length).toBe(2);
       expect(repo.removeTxs).toHaveBeenCalledTimes(1);
-      expect(repo.removeTxs).toHaveBeenCalledWith([gone]);
+      // With the ten minutes of the slot the row was found in: the removal stays inside its days.
+      const span = (repo.removeTxs as jest.Mock).mock.calls[0][1] as { start: Date; end: Date };
+      expect(repo.removeTxs).toHaveBeenCalledWith([gone], span);
+      expect(span.end.getTime() - span.start.getTime()).toBe(600_000);
+      expect(span.start.toISOString().slice(0, 10)).toBe(DAY);
       expect(table.get(DAY)).toMatchObject({ status: 'ok', rowsRemoved: 1 });
       expect(rejects.take()).toEqual(expect.arrayContaining([expect.objectContaining({ stream: 'check', reason: 'reorg', count: 1 })]));
     });
@@ -428,7 +432,7 @@ describe('the daily check', () => {
 
       expect(slotsRead[0]).toBe(30);
       expect(slotsRead.filter((s) => s === 30).length).toBeGreaterThanOrEqual(2);
-      expect(repo.removeTxs).toHaveBeenCalledWith([gone]);
+      expect(repo.removeTxs).toHaveBeenCalledWith([gone], expect.objectContaining({ start: expect.any(Date), end: expect.any(Date) }));
       expect(table.get(DAY)).toMatchObject({ status: 'ok', rowsAdded: 2, rowsRemoved: 1 });
     });
   });

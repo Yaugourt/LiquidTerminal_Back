@@ -294,7 +294,73 @@ of 1,000,000 was passed on most days.
    streams then fail and read on from their cursors once there is room; what they could not
    store meanwhile is read again from the provider, as long as it keeps its history.
 
-How long the raw transactions are kept is a decision still to take (see the audit report).
+5. Bound it for good: split `elysium_tx` by day and set a keep, below.
+
+### What is kept of `elysium_tx`
+
+`elysium_tx` (every transaction, 0.4 to 1.7 GB a day) is the table that grows. Since 2026-11-12
+nothing a page shows needs its old rows any more: what is shown "since the first block" lives in
+small tables the upkeep pass keeps (`elysium_target_seen`, `elysium_address_method`,
+`elysium_project_wallet`: the *history facts*, folded one day at a time, 10 days after the day
+ended), and the views read at most the last 63 days, from the rollups. Where it stands:
+`database.tx` in `/status/ops` (`split`, `parts`, `heldFrom`, `keepDays`, `factsThrough`), and
+the `upkeep` rows `txsender`, `facts`, `txparts`.
+
+Two variables, on the service that runs the ingestion, each needs a restart:
+
+| Variable | Effect |
+| --- | --- |
+| `ELYSIUM_TX_SPLIT_ENABLED=true` | the table is split in one table per UTC day (once, see below) |
+| `ELYSIUM_TX_KEEP_DAYS=<n>` | once split, the days older than `n` are dropped, a table at a time; never fewer than 35 days (65 if the rollups are off or kept less than 63 days); unset: nothing is ever dropped |
+
+**The split.** It copies nothing. The upkeep pass (1) adds a check "every row is before the day
+after tomorrow" (instant), (2) has Postgres verify it against every row (one read of the whole
+table: minutes; reads and writes go on), (3) in one transaction of a few milliseconds renames
+the table to `elysium_tx_legacy`, creates the split `elysium_tx` with it as its first part, and
+adds the tables of the first days. Step 3 needs the table for itself: it waits 3 s at most, gives
+up if a rollup build is running or a long read holds the table, and is tried again a minute
+later (`Elysium upkeep: elysium_tx is split by day` in the log when done). A day's table is made
+3 days ahead; an insert that finds none makes it.
+
+**Before switching the split on**: the releases before 2026-11-12 cannot write to a split table
+(their insert names a conflict column the split table has no index on). Once split, going back
+to one of them needs the split undone first (below). Switch it on when this release has run for
+a few days.
+
+**What a keep frees, and when.** Everything stored before the split is one part
+(`elysium_tx_legacy`): it goes as a whole, the day its newest row leaves the keep. With a keep of
+`n` days set at the split, the disk therefore keeps growing for `n` more days, then drops by the
+size of that part, and stays level after. A day is dropped only when: it is wholly older than
+the keep, the history facts go past it (`factsThrough`), and, if it is within the last 63 days,
+its day rollup is built. `Elysium upkeep: part of elysium_tx dropped` in the log; two tables a
+pass at most.
+
+Dropping is final: a transaction older than the oldest day kept is no longer stored when the
+provider lists it again (counted as `older-than-kept` in `rejects`, with a message), and a figure
+"since the first block" of a contract added to the ecosystem directory later only counts from
+the days still held.
+
+**Undoing the split** (to go back to an older release), while `elysium_tx_legacy` is still
+there. Stop the ingestion first (`ELYSIUM_INGEST_ENABLED=false`), then, in one transaction:
+
+```sql
+BEGIN;
+LOCK TABLE elysium_tx IN ACCESS EXCLUSIVE MODE;
+ALTER TABLE elysium_tx DETACH PARTITION elysium_tx_legacy;
+ALTER TABLE elysium_tx_legacy DROP CONSTRAINT IF EXISTS elysium_tx_split_bound;
+INSERT INTO elysium_tx_legacy SELECT * FROM elysium_tx;   -- the rows of the day tables
+DROP TABLE elysium_tx;                                     -- and the day tables with it
+ALTER TABLE elysium_tx_legacy RENAME TO elysium_tx;
+COMMIT;
+```
+
+and leave `ELYSIUM_TX_SPLIT_ENABLED` unset. (`tests/db/elysium-partitions.dbtest.ts` runs this
+statement by statement.)
+
+**A migration that changes `elysium_tx`** after the split: adding a column applies to every
+part at once; an index created on `elysium_tx` is built on every part inside the migration's
+transaction, which holds the table for as long. Build it part by part instead, by hand, with
+`CREATE INDEX CONCURRENTLY` on each part and then on the parent.
 
 ## 10. Deploying, and going back
 
@@ -308,7 +374,8 @@ How long the raw transactions are kept is a decision still to take (see the audi
 - A pre-deploy that fails with `P1001` (database unreachable) is on Railway's side: Redeploy.
 - Going back: redeploy the previous deployment from Railway's dashboard. The Elysium migrations
   only add tables, columns and indexes, so the previous image runs on the newer schema; no
-  migration has to be undone.
+  migration has to be undone. One exception: an image from before 2026-11-12 cannot write to an
+  `elysium_tx` that was split by day (section 9): undo the split first.
 - Going back on one behaviour without a deploy (a variable, then a restart):
 
 | Variable | `false` means |
@@ -318,6 +385,28 @@ How long the raw transactions are kept is a decision still to take (see the audi
 | `ELYSIUM_DAY_CHECK_ENABLED` | closed days are no longer compared nor read again |
 | `ELYSIUM_DAY_CHECK_REMOVE` | the daily check still adds and corrects, and removes nothing |
 | `ELYSIUM_ALERTS_ENABLED` | no message is sent |
+| `ELYSIUM_UPKEEP_ENABLED` | the upkeep pass stops: no sender copied, no day folded into the history facts, no day table made ahead (an insert makes its own), nothing dropped; the pages read `elysium_tx` from the last folded day on |
+
+### The ingestion in a service of its own
+
+The same image runs as an API or as an ingestion-only worker. With both in one process, pages of
+1,000 transactions and a day's rollups share a thread and a heap with the API and the sockets,
+and a restart of one restarts the other. To separate them, on Railway:
+
+1. New service from the same repository and branch as the backend. No public domain. No
+   pre-deploy command (the API service applies the migrations). Health check path `/api/health`.
+2. Its variables: the backend's own (database and Redis addresses, the provider's key, the RPC
+   addresses), plus `PROCESS_ROLE=elysium-worker`. The variables of this page that concern the
+   ingestion go on this service from now on (`ELYSIUM_TX_SPLIT_ENABLED`, `ELYSIUM_TX_KEEP_DAYS`,
+   `ELYSIUM_DAY_CHECK_*`, `ELYSIUM_UPKEEP_ENABLED`); the alert webhook stays on the API service.
+3. Once it runs (log line `Process role: elysium-worker, starting the Elysium ingestion only`,
+   and the streams' `lastOkAt` still moving in the status), set `ELYSIUM_INGEST_ENABLED=false` on
+   the API service. While both ingest, each stream runs in one of them at a time (a Redis lock
+   per stream, held by its owner).
+4. To go back: remove `ELYSIUM_INGEST_ENABLED` from the API service, then stop the worker.
+
+One API instance is still assumed: the launchpad list keeps its snapshot, and the RPC proxy its
+minute budget, in the memory of the process that serves them.
 
 ## 11. The tests that run the SQL
 

@@ -20,18 +20,26 @@ export const AFTER_HISTORY_FACTS = Prisma.sql`COALESCE(
   '-infinity'::timestamptz)`;
 
 /**
- * The transaction of a swap (alias s) that has no sender copied yet, as alias
- * t. A swap and its transaction are in the same block and carry the same
- * time: named with the hash, it keeps the lookup inside one day of elysium_tx.
- * Read the sender as COALESCE(s.tx_from, t.from_addr, ...).
+ * Who sent the transaction of a swap (alias s): the sender copied onto it, else the one of
+ * its transaction in elysium_tx, else the address the pool names (usually a router).
+ *
+ * The lookup is a subquery inside COALESCE on purpose, not a join: it only runs for a row
+ * that has no sender copied, one row at a time, and it names the hash together with the block
+ * time (a swap and its transaction are in the same block), so that it opens the one day of
+ * elysium_tx the transaction is in, whatever plan the rest of the statement gets.
  */
-export const SWAP_SENDER_JOIN = Prisma.sql`LEFT JOIN elysium_tx t
-  ON s.tx_from IS NULL AND t.tx_hash = s.tx_hash AND t.block_time = s.block_time`;
+export const SWAP_SENDER = Prisma.sql`COALESCE(s.tx_from,
+  (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = s.tx_hash AND t.block_time = s.block_time LIMIT 1),
+  s.sender)`;
 
-/** The same for a launchpad trade (alias tr) that names no trader, as alias t: COALESCE(tr.trader, tr.tx_from, t.from_addr). */
-export const TRADE_SENDER_JOIN = Prisma.sql`LEFT JOIN elysium_tx t
-  ON tr.trader IS NULL AND tr.tx_from IS NULL AND t.tx_hash = tr.tx_hash AND t.block_time = tr.block_time`;
+/** Who made a launchpad trade (alias tr): the trader its event names, else the sender of its transaction, the same way. */
+export const TRADE_TRADER = Prisma.sql`COALESCE(tr.trader, tr.tx_from,
+  (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = tr.tx_hash AND t.block_time = tr.block_time LIMIT 1))`;
 
-/** The same for a launch (alias l) that names no creator, as alias tx: COALESCE(l.creator, l.tx_from, tx.from_addr). */
-export const LAUNCH_SENDER_JOIN = Prisma.sql`LEFT JOIN elysium_tx tx
-  ON l.creator IS NULL AND l.tx_from IS NULL AND tx.tx_hash = l.tx_hash AND tx.block_time = l.created_at`;
+/** Who created a launch (alias l): the creator its event names, else the sender of its transaction, the same way. */
+export const LAUNCH_CREATOR = Prisma.sql`COALESCE(l.creator, l.tx_from,
+  (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = l.tx_hash AND t.block_time = l.created_at LIMIT 1))`;
+
+/** LAUNCH_CREATOR for the statements that are plain text. */
+export const LAUNCH_CREATOR_SQL = `COALESCE(l.creator, l.tx_from,
+  (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = l.tx_hash AND t.block_time = l.created_at LIMIT 1))`;
