@@ -27,6 +27,19 @@ const WRITE_STATEMENT_TIMEOUT_MS = positiveIntEnv('HISTORICAL_WRITE_STATEMENT_TI
 const WRITE_LOCK_TIMEOUT_MS = positiveIntEnv('HISTORICAL_WRITE_LOCK_TIMEOUT_MS', 60_000);
 const WRITE_IDLE_IN_TRANSACTION_TIMEOUT_MS = positiveIntEnv('HISTORICAL_WRITE_IDLE_IN_TRANSACTION_TIMEOUT_MS', 300_000);
 
+/**
+ * No just-in-time compilation on the analytics pools. Postgres turns it on from the estimated
+ * cost of a plan, and the estimates of these statements are far above what they read: each
+ * paid 40 to 100 ms of compilation to run for as long (measured 2026-11-12).
+ *
+ * Their sort and hash memory (work_mem) is left at the server's default on purpose: raised for
+ * a whole pool, it made the planner give up a parallel plan for a single sort that then went
+ * to disk anyway, and the senders of the users view took twice as long (measured the same
+ * day). The statements that need more ask for it themselves, one by one (see hashGrouped and
+ * withWorkMem in elysium-rollup.reader).
+ */
+const ANALYTICS_SESSION = '-c jit=off';
+
 /** The longest a statement of the pages pool may run: its reads answer a visitor who is waiting. */
 const PAGES_STATEMENT_TIMEOUT_MS = positiveIntEnv('HISTORICAL_PAGES_STATEMENT_TIMEOUT_MS', 30_000);
 
@@ -111,7 +124,7 @@ class PrismaHistoricalService {
         keepAlive: true,
         // A session setting given at connection time: every connection of this pool has it from
         // its first statement on.
-        options: `-c statement_timeout=${READ_STATEMENT_TIMEOUT_MS}`,
+        options: `-c statement_timeout=${READ_STATEMENT_TIMEOUT_MS} ${ANALYTICS_SESSION}`,
       });
       PrismaHistoricalService.readInstance = PrismaHistoricalService.client('historical-read', pool);
     }
@@ -157,7 +170,7 @@ class PrismaHistoricalService {
         idleTimeoutMillis: 10000,
         connectionTimeoutMillis: READ_STATEMENT_TIMEOUT_MS + 60_000,
         keepAlive: true,
-        options: `-c statement_timeout=${READ_STATEMENT_TIMEOUT_MS}`,
+        options: `-c statement_timeout=${READ_STATEMENT_TIMEOUT_MS} ${ANALYTICS_SESSION}`,
       });
       PrismaHistoricalService.aggregateInstance = PrismaHistoricalService.client('historical-aggregate', pool);
     }
