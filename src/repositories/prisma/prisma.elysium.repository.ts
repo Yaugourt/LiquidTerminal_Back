@@ -8,6 +8,8 @@ import type {
   LaunchTradeRow,
 } from '../../services/elysium/elysium-launchpad.util';
 import type { RejectCount } from '../../services/elysium/elysium-ingest-rejects';
+import { LATE_ROW_AGE_MS } from '../../services/elysium/elysium-retention.util';
+import { HISTORY_FACT, LOCK_FACTS_SQL } from './prisma.elysium-facts.repository';
 
 /** Market keys looked up per statement (a page of 1,000 logs names at most 3,000). */
 const LAUNCH_MARKET_KEYS_PER_QUERY = 5_000;
@@ -24,6 +26,133 @@ const INSERT_TRADES_LIMITS = { timeout: 60_000, maxWait: 15_000 };
 
 /** Constant SQL list of the bridge tx types (no user input involved). */
 const BRIDGE_TYPES_SQL = BRIDGE_TX_TYPES.map((t) => `'${t}'`).join(', ');
+
+/** An insert of old rows waits this long for a fold of the history facts to end. */
+const OLD_INSERT_LOCK_TIMEOUT_MS = 20 * 60_000;
+
+/**
+ * The statement that inserts a page of transactions ($1: the rows as JSON). With `facts`, it
+ * also adds the rows it inserts into the days up to $2 (the day the history facts go up to,
+ * null when nothing was folded) to those facts, and to the wallets of the directory contracts
+ * folded past them.
+ */
+function insertTxsSql(facts: boolean): string {
+  return `
+      WITH src AS (
+        SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(
+          tx_hash text, block_number bigint, block_time timestamptz, from_addr text, to_addr text,
+          contract_address text, method_id text, tx_type text, gas_used bigint, fee_wei numeric,
+          success boolean, is_spam boolean)
+      ),
+      ins AS (
+        INSERT INTO elysium_tx (tx_hash, block_number, block_time, from_addr, to_addr,
+          contract_address, method_id, tx_type, gas_used, fee_wei, success, is_spam)
+        SELECT tx_hash, block_number, block_time, from_addr, to_addr,
+          contract_address, method_id, tx_type, gas_used, fee_wei, success, is_spam
+        FROM src
+        ON CONFLICT DO NOTHING
+        RETURNING tx_hash, block_number, block_time, from_addr, to_addr, method_id, contract_address, is_spam,
+          (NOT is_spam AND COALESCE(tx_type, '') NOT IN (${BRIDGE_TYPES_SQL})) AS is_user
+      ),
+      c AS (
+        INSERT INTO elysium_contract (address, deployer, deploy_tx, deployed_at, block_number)
+        SELECT DISTINCT ON (contract_address) contract_address, from_addr, tx_hash, block_time, block_number
+        FROM ins WHERE contract_address IS NOT NULL
+        ORDER BY contract_address, block_time
+        ON CONFLICT (address) DO NOTHING
+        RETURNING 1
+      ),
+      a AS (
+        INSERT INTO elysium_address (address, first_seen, first_day)
+        SELECT from_addr, min(block_time), (min(block_time) AT TIME ZONE 'UTC')::date
+        FROM ins WHERE is_user GROUP BY from_addr
+        ON CONFLICT (address) DO UPDATE
+          SET first_seen = EXCLUDED.first_seen, first_day = EXCLUDED.first_day
+          WHERE EXCLUDED.first_seen < elysium_address.first_seen
+        RETURNING 1
+      ),
+      d AS (
+        INSERT INTO elysium_address_day (address, day, tx_count)
+        SELECT from_addr, (block_time AT TIME ZONE 'UTC')::date, count(*)::int
+        FROM ins WHERE is_user GROUP BY 1, 2
+        ON CONFLICT (address, day) DO UPDATE
+          SET tx_count = elysium_address_day.tx_count + EXCLUDED.tx_count
+        RETURNING 1
+      ),
+      r AS (
+        -- A transaction of a day that is over: that day's rollups are rebuilt (see
+        -- ElysiumRollupRepository.buildDay for why this lives in the insert's own statement).
+        INSERT INTO elysium_day_rollup (day, dirty)
+        SELECT DISTINCT (block_time AT TIME ZONE 'UTC')::date, true
+        FROM ins
+        WHERE (block_time AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date
+        ON CONFLICT (day) DO UPDATE SET dirty = true WHERE NOT elysium_day_rollup.dirty
+        RETURNING 1
+      ),
+      h AS (
+        -- And of an hour that is over: that hour's rollup is rebuilt, for the same reason and
+        -- in the same way (ElysiumRollupRepository.buildHour). The row is written whether or
+        -- not the hour was ever built: a build that starts meanwhile then finds it.
+        INSERT INTO elysium_hour_rollup (hour, dirty)
+        SELECT DISTINCT date_trunc('hour', block_time, 'UTC'), true
+        FROM ins
+        WHERE block_time < date_trunc('hour', now(), 'UTC')
+        ORDER BY 1
+        ON CONFLICT (hour) DO UPDATE SET dirty = true WHERE NOT elysium_hour_rollup.dirty
+        RETURNING 1
+      )${
+        facts
+          ? `,
+      ft AS (
+        INSERT INTO elysium_target_seen (to_addr, first_at, last_at)
+        SELECT to_addr, min(block_time), max(block_time)
+        FROM ins
+        WHERE to_addr IS NOT NULL AND (block_time AT TIME ZONE 'UTC')::date <= $2::date
+        GROUP BY to_addr
+        ON CONFLICT (to_addr) DO UPDATE
+          SET first_at = LEAST(elysium_target_seen.first_at, EXCLUDED.first_at),
+              last_at = GREATEST(elysium_target_seen.last_at, EXCLUDED.last_at)
+        RETURNING 1
+      ),
+      fm AS (
+        INSERT INTO elysium_address_method (address, method_key, txs)
+        SELECT from_addr, CASE WHEN to_addr IS NULL THEN 'create' ELSE COALESCE(method_id, '') END, count(*)
+        FROM ins
+        WHERE NOT is_spam AND (block_time AT TIME ZONE 'UTC')::date <= $2::date
+        GROUP BY 1, 2
+        ON CONFLICT (address, method_key) DO UPDATE SET txs = elysium_address_method.txs + EXCLUDED.txs
+        RETURNING 1
+      ),
+      fp AS (
+        INSERT INTO elysium_project_wallet (to_addr, from_addr, txs, first_at)
+        SELECT i.to_addr, i.from_addr, count(*), min(i.block_time)
+        FROM ins i
+        JOIN elysium_project_contract pc
+          ON pc.to_addr = i.to_addr AND (i.block_time AT TIME ZONE 'UTC')::date <= pc.through_day
+        WHERE NOT i.is_spam
+        GROUP BY i.to_addr, i.from_addr
+        ON CONFLICT (to_addr, from_addr) DO UPDATE
+          SET txs = elysium_project_wallet.txs + EXCLUDED.txs,
+              first_at = LEAST(elysium_project_wallet.first_at, EXCLUDED.first_at)
+        RETURNING 1
+      )`
+          : ''
+      }
+      SELECT (SELECT count(*) FROM ins)::int AS inserted,
+             (SELECT count(*) FROM c)::int AS contracts,
+             (SELECT count(*) FROM a)::int AS addresses,
+             (SELECT count(*) FROM d)::int AS address_days,
+             (SELECT count(*) FROM r)::int AS rollup_days,
+             (SELECT count(*) FROM h)::int AS rollup_hours${
+               facts
+                 ? `,
+             (SELECT count(*) FROM ft)::int AS fact_targets,
+             (SELECT count(*) FROM fm)::int AS fact_methods,
+             (SELECT count(*) FROM fp)::int AS fact_wallets`
+                 : ''
+             }
+      `;
+}
 
 export type ElysiumStream =
   | 'tx'
@@ -48,10 +177,27 @@ export type ElysiumStream =
   /** Not a stream of its own: the daily comparison with the provider (only its last error is kept here; its days are in elysium_day_check). */
   | 'check'
   /** Not a stream of its own: the provider's own head as last read (`cursor` = its last indexed block time). */
-  | 'provider';
+  | 'provider'
+  /** Not a stream of its own: the lock and time limit of the upkeep pass (ElysiumUpkeepService); its jobs keep the rows below. */
+  | 'upkeep'
+  /** Not a stream of its own: the copy of a transaction's sender onto swaps, trades and launches (`cursor` = history copied up to). */
+  | 'txsender'
+  /** Not a stream of its own: the history facts (`cursor` = the end of the last UTC day every fact holds). */
+  | 'facts';
 
 /** Rows of elysium_ingest_state that are markers, not streams: left out of the public status. */
-export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set(['launchstate', 'kilngrads', 'bridgedeep', 'tokenstail', 'rollup', 'check', 'provider']);
+export const ELYSIUM_STATE_MARKERS: ReadonlySet<string> = new Set([
+  'launchstate',
+  'kilngrads',
+  'bridgedeep',
+  'tokenstail',
+  'rollup',
+  'check',
+  'provider',
+  'upkeep',
+  'txsender',
+  'facts',
+]);
 
 export interface LaunchMarketDbRow {
   token: string;
@@ -106,84 +252,53 @@ export class ElysiumIngestRepository {
    * never counted twice; a crash rolls back the whole statement. A row of a
    * past UTC day also marks that day's rollups as to be rebuilt, and a row of a
    * past UTC hour that hour's.
+   *
+   * The conflict is on whatever unique index holds the hash where the row
+   * lands: the table's primary key, or, once elysium_tx is split by day, the
+   * key of the day's own table.
+   *
+   * A page with a row old enough to belong to a day already folded into the
+   * history facts (a re-read of old windows; never the live stream) is
+   * inserted under the facts' lock, and the rows it adds to folded days are
+   * added to the facts by the same statement: see insertOldTxs.
    */
   public async insertTxs(rows: TxRow[]): Promise<{ inserted: number; contracts: number }> {
     if (rows.length === 0) return { inserted: 0, contracts: 0 };
+    const lateBefore = Date.now() - LATE_ROW_AGE_MS;
+    if (rows.some((r) => !(Date.parse(r.block_time) >= lateBefore))) return this.insertOldTxs(rows);
     const result = await prismaHistorical.$queryRawUnsafe<Array<{ inserted: number; contracts: number }>>(
-      `
-      WITH src AS (
-        SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(
-          tx_hash text, block_number bigint, block_time timestamptz, from_addr text, to_addr text,
-          contract_address text, method_id text, tx_type text, gas_used bigint, fee_wei numeric,
-          success boolean, is_spam boolean)
-      ),
-      ins AS (
-        INSERT INTO elysium_tx (tx_hash, block_number, block_time, from_addr, to_addr,
-          contract_address, method_id, tx_type, gas_used, fee_wei, success, is_spam)
-        SELECT tx_hash, block_number, block_time, from_addr, to_addr,
-          contract_address, method_id, tx_type, gas_used, fee_wei, success, is_spam
-        FROM src
-        ON CONFLICT (tx_hash) DO NOTHING
-        RETURNING tx_hash, block_number, block_time, from_addr, contract_address, is_spam,
-          (NOT is_spam AND COALESCE(tx_type, '') NOT IN (${BRIDGE_TYPES_SQL})) AS is_user
-      ),
-      c AS (
-        INSERT INTO elysium_contract (address, deployer, deploy_tx, deployed_at, block_number)
-        SELECT DISTINCT ON (contract_address) contract_address, from_addr, tx_hash, block_time, block_number
-        FROM ins WHERE contract_address IS NOT NULL
-        ORDER BY contract_address, block_time
-        ON CONFLICT (address) DO NOTHING
-        RETURNING 1
-      ),
-      a AS (
-        INSERT INTO elysium_address (address, first_seen, first_day)
-        SELECT from_addr, min(block_time), (min(block_time) AT TIME ZONE 'UTC')::date
-        FROM ins WHERE is_user GROUP BY from_addr
-        ON CONFLICT (address) DO UPDATE
-          SET first_seen = EXCLUDED.first_seen, first_day = EXCLUDED.first_day
-          WHERE EXCLUDED.first_seen < elysium_address.first_seen
-        RETURNING 1
-      ),
-      d AS (
-        INSERT INTO elysium_address_day (address, day, tx_count)
-        SELECT from_addr, (block_time AT TIME ZONE 'UTC')::date, count(*)::int
-        FROM ins WHERE is_user GROUP BY 1, 2
-        ON CONFLICT (address, day) DO UPDATE
-          SET tx_count = elysium_address_day.tx_count + EXCLUDED.tx_count
-        RETURNING 1
-      ),
-      r AS (
-        -- A transaction of a day that is over: that day's rollups are rebuilt (see
-        -- ElysiumRollupRepository.buildDay for why this lives in the insert's own statement).
-        INSERT INTO elysium_day_rollup (day, dirty)
-        SELECT DISTINCT (block_time AT TIME ZONE 'UTC')::date, true
-        FROM ins
-        WHERE (block_time AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date
-        ON CONFLICT (day) DO UPDATE SET dirty = true WHERE NOT elysium_day_rollup.dirty
-        RETURNING 1
-      ),
-      h AS (
-        -- And of an hour that is over: that hour's rollup is rebuilt, for the same reason and
-        -- in the same way (ElysiumRollupRepository.buildHour). The row is written whether or
-        -- not the hour was ever built: a build that starts meanwhile then finds it.
-        INSERT INTO elysium_hour_rollup (hour, dirty)
-        SELECT DISTINCT date_trunc('hour', block_time, 'UTC'), true
-        FROM ins
-        WHERE block_time < date_trunc('hour', now(), 'UTC')
-        ORDER BY 1
-        ON CONFLICT (hour) DO UPDATE SET dirty = true WHERE NOT elysium_hour_rollup.dirty
-        RETURNING 1
-      )
-      SELECT (SELECT count(*) FROM ins)::int AS inserted,
-             (SELECT count(*) FROM c)::int AS contracts,
-             (SELECT count(*) FROM a)::int AS addresses,
-             (SELECT count(*) FROM d)::int AS address_days,
-             (SELECT count(*) FROM r)::int AS rollup_days,
-             (SELECT count(*) FROM h)::int AS rollup_hours
-      `,
+      insertTxsSql(false),
       JSON.stringify(rows)
     );
     return { inserted: result[0]?.inserted ?? 0, contracts: result[0]?.contracts ?? 0 };
+  }
+
+  /**
+   * The insert of a page that holds old rows. It takes the facts' lock first, so that no fold
+   * runs beside it, reads the day the history facts go up to, and adds what it inserts into the
+   * days up to there to the facts themselves (a fold will never read those days again). The
+   * days after are left to their fold, which starts once this transaction is over and reads
+   * its rows. Each transaction is then counted once, by one of the two.
+   */
+  private async insertOldTxs(rows: TxRow[]): Promise<{ inserted: number; contracts: number }> {
+    return prismaHistorical.$transaction(
+      async (tx) => {
+        // A fold holds the lock for as long as it reads its day: longer than the pool's own limit.
+        await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = ${OLD_INSERT_LOCK_TIMEOUT_MS}`);
+        await tx.$executeRawUnsafe(
+          `INSERT INTO elysium_fact_state (fact) VALUES ('${HISTORY_FACT}') ON CONFLICT (fact) DO NOTHING`
+        );
+        const state = await tx.$queryRawUnsafe<Array<{ through: string | null }>>(LOCK_FACTS_SQL);
+        const through = state[0]?.through ? state[0].through.slice(0, 10) : null;
+        const result = await tx.$queryRawUnsafe<Array<{ inserted: number; contracts: number }>>(
+          insertTxsSql(true),
+          JSON.stringify(rows),
+          through
+        );
+        return { inserted: result[0]?.inserted ?? 0, contracts: result[0]?.contracts ?? 0 };
+      },
+      { timeout: OLD_INSERT_LOCK_TIMEOUT_MS + 120_000, maxWait: 20_000 }
+    );
   }
 
   /** Inserts RPC-read calls to the project contracts; a tx already stored is skipped. */
@@ -842,11 +957,14 @@ export class ElysiumIngestRepository {
          ORDER BY l.stats_at LIMIT $1::int)
       ),
       best AS (SELECT DISTINCT ON (token) token, pri, ord FROM picks ORDER BY token, pri)
-      SELECT l.token, coalesce(l.creator, t.from_addr) AS creator, l.curve, l.pool,
+      SELECT l.token, coalesce(l.creator, l.tx_from, t.from_addr) AS creator, l.curve, l.pool,
              (l.symbol IS NULL AND l.stats_at IS NULL) AS "needsName", l.holders AS "lastHolders"
       FROM best
       JOIN elysium_launch l ON l.token = best.token
-      LEFT JOIN elysium_tx t ON t.tx_hash = l.tx_hash AND l.creator IS NULL
+      -- Only for a launch whose creator is not copied onto it yet (elysium_launch.tx_from): the
+      -- launch and its transaction carry the same time, which keeps the lookup inside one day.
+      LEFT JOIN elysium_tx t ON l.creator IS NULL AND l.tx_from IS NULL
+        AND t.tx_hash = l.tx_hash AND t.block_time = l.created_at
       ORDER BY best.pri, best.ord
       LIMIT $1::int
       `,

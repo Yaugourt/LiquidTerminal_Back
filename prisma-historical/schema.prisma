@@ -242,7 +242,12 @@ model ElysiumDexSwap {
   recipient   String   @db.VarChar(42)
   amount0     Decimal  @db.Decimal(80, 0)
   amount1     Decimal  @db.Decimal(80, 0)
+  /// Who sent the transaction, copied from elysium_tx by the ingestion's upkeep; null until then,
+  /// and for good when elysium_tx never held the transaction.
+  txFrom      String?  @map("tx_from") @db.VarChar(42)
 
+  // Plus a partial index Prisma cannot describe (migration 20261112180000):
+  // elysium_dex_swap_tx_from_idx on (tx_from, block_time) for the rows that have one.
   @@id([txHash, logIndex])
   @@index([blockTime])
   @@index([pool, blockTime])
@@ -301,6 +306,9 @@ model ElysiumLaunch {
   lastLog     Int?      @map("last_log")
   /// Tokens the bonding curve has sold so far (buys minus sells, raw units); kept by the trade insert.
   curveSold   Decimal?  @map("curve_sold") @db.Decimal(80, 0)
+  /// Who sent the launch transaction (the creator when the event names none), copied from
+  /// elysium_tx by the ingestion's upkeep for the launches without a `creator`.
+  txFrom      String?   @map("tx_from") @db.VarChar(42)
 
   @@index([createdAt])
   @@index([curve])
@@ -325,6 +333,9 @@ model ElysiumLaunchTrade {
   quoteAmount Decimal  @map("quote_amount") @db.Decimal(80, 0)
   tokenAmount Decimal  @map("token_amount") @db.Decimal(80, 0)
   price       Float
+  /// Who sent the transaction (the trader when the event names none: V4 swaps only see the
+  /// router), copied from elysium_tx by the ingestion's upkeep for the trades without a `trader`.
+  txFrom      String?  @map("tx_from") @db.VarChar(42)
 
   @@id([txHash, logIndex])
   @@index([token, blockTime])
@@ -503,6 +514,57 @@ model ElysiumWindowState {
   classifiedAt  DateTime? @map("classified_at") @db.Timestamptz(3)
 
   @@map("elysium_window_state")
+}
+
+/// Where a set of history facts stands (ElysiumFactsRepository): the last UTC day folded into
+/// its tables. 'history' = elysium_target_seen + elysium_address_method. The row is also the
+/// lock a fold and an insert of old transactions take in turn.
+model ElysiumFactState {
+  fact       String    @id @db.VarChar(32)
+  throughDay DateTime? @map("through_day") @db.Date
+  updatedAt  DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  @@map("elysium_fact_state")
+}
+
+/// First and last transaction sent to an address (spam included), over the folded days.
+model ElysiumTargetSeen {
+  toAddr  String   @id @map("to_addr") @db.VarChar(42)
+  firstAt DateTime @map("first_at") @db.Timestamptz(3)
+  lastAt  DateTime @map("last_at") @db.Timestamptz(3)
+
+  @@map("elysium_target_seen")
+}
+
+/// Non-spam transactions sent by an address per method, over the folded days. methodKey: the
+/// selector, '' without calldata, 'create' for a contract creation.
+model ElysiumAddressMethod {
+  address   String @db.VarChar(42)
+  methodKey String @map("method_key") @db.VarChar(10)
+  txs       BigInt
+
+  @@id([address, methodKey])
+  @@map("elysium_address_method")
+}
+
+/// A contract of the ecosystem directory and the last UTC day its wallets were folded up to.
+model ElysiumProjectContract {
+  toAddr     String    @id @map("to_addr") @db.VarChar(42)
+  throughDay DateTime? @map("through_day") @db.Date
+
+  @@map("elysium_project_contract")
+}
+
+/// Per directory contract and sender: non-spam transactions and the first of them, over the
+/// days folded for that contract.
+model ElysiumProjectWallet {
+  toAddr   String   @map("to_addr") @db.VarChar(42)
+  fromAddr String   @map("from_addr") @db.VarChar(42)
+  txs      BigInt
+  firstAt  DateTime @map("first_at") @db.Timestamptz(3)
+
+  @@id([toAddr, fromAddr])
+  @@map("elysium_project_wallet")
 }
 
 /// Watermark per ingestion stream (tx, bridge, tokens) for resume + monitoring.

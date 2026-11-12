@@ -10,6 +10,7 @@ import { ElysiumIngestRepository, ElysiumStream } from '../../repositories/prism
 import { ELYSIUM_PROJECTS } from '../../constants/elysium-projects';
 import { BLOCK_BATCH, ElysiumRpcLogs } from './elysium-rpc-logs';
 import { ElysiumRollupService } from './elysium-rollup.service';
+import { ElysiumUpkeepService } from './elysium-upkeep.service';
 import { IngestRejects } from './elysium-ingest-rejects';
 import { currentTick, tickStep, TickGivenUpError, type TickContext } from './elysium-tick';
 import { ElysiumDayCheckService } from './elysium-day-check.service';
@@ -151,6 +152,11 @@ const STATE_WRITE_EVERY_MS = 30_000;
 const TOKENS_TICK_LIMIT_MS = 20 * MINUTE_MS;
 /** A day's rollups are built in one transaction of up to 15 minutes. */
 const ROLLUP_TICK_LIMIT_MS = 20 * MINUTE_MS;
+/**
+ * A step of the upkeep pass is one transaction: a day folded into the history facts (up to 15
+ * minutes), or the check of every row of elysium_tx before the table is split (once, long).
+ */
+const UPKEEP_TICK_LIMIT_MS = 45 * MINUTE_MS;
 
 const TX_LIVE_INTERVAL_MS = 30_000;
 const TX_STEP_MS = HOUR_MS;
@@ -300,6 +306,8 @@ const LAUNCH_HOLDERS_FULL = 1000;
 const DAY_CHECK_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
 /** Day rollups: wait after a pass that failed or found the builder's lock taken. */
 const ROLLUP_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
+/** Upkeep: wait after a pass that failed as a whole or found its lock taken. */
+const UPKEEP_RETRY_INTERVAL_MS = MINUTE_MS;
 /**
  * A token whose holder figures cannot be read is left alone for this long, then tried again.
  * One such token used to end the run where it stood, and came first again on the next run: the
@@ -431,6 +439,7 @@ export class ElysiumIngestionService {
   private readonly throttle = new CallThrottle();
   private readonly rpcLogs = ElysiumRpcLogs.getInstance();
   private readonly rollups = ElysiumRollupService.getInstance();
+  private readonly upkeep = ElysiumUpkeepService.getInstance();
   /** What the running ticks read and did not store; written to the database as each tick ends. */
   private readonly rejects = new IngestRejects();
   /** When each stream's last completed run was recorded, and the provider's head last written. */
@@ -537,6 +546,7 @@ export class ElysiumIngestionService {
     this.schedule('launchstats', 120_000, () => this.launchStatsTick());
     if (ElysiumRollupService.isEnabled()) this.schedule('rollup', 60_000, () => this.rollups.tick());
     if (ElysiumIngestionService.isDayCheckEnabled()) this.schedule('check', 150_000, () => this.dayCheck.tick());
+    if (ElysiumUpkeepService.isEnabled()) this.schedule('upkeep', 75_000, () => this.upkeep.tick());
     logDeduplicator.info('Elysium ingestion started');
   }
 
@@ -627,7 +637,8 @@ export class ElysiumIngestionService {
    * block for, a fallback with nothing to follow. The rollup builder keeps its own row.
    */
   private async noteCompleted(stream: ElysiumStream): Promise<void> {
-    if (stream === 'rollup') return;
+    // The rollup builder keeps its own row, and so does each job of the upkeep pass.
+    if (stream === 'rollup' || stream === 'upkeep') return;
     const now = Date.now();
     if (now - (this.completedAt.get(stream) ?? 0) < STATE_WRITE_EVERY_MS) return;
     this.completedAt.set(stream, now);
@@ -681,6 +692,7 @@ export class ElysiumIngestionService {
     if (stream === 'tokens') return TOKENS_TICK_LIMIT_MS;
     if (stream === 'rollup') return ROLLUP_TICK_LIMIT_MS;
     if (stream === 'launchstate') return LAUNCH_STATE_TICK_LIMIT_MS;
+    if (stream === 'upkeep') return UPKEEP_TICK_LIMIT_MS;
     return TICK_LIMIT_MS;
   }
 
@@ -696,6 +708,7 @@ export class ElysiumIngestionService {
     if (stream === 'launchstate') return LAUNCH_STATE_RETRY_MS;
     if (stream === 'rollup') return ROLLUP_RETRY_INTERVAL_MS;
     if (stream === 'check') return DAY_CHECK_RETRY_INTERVAL_MS;
+    if (stream === 'upkeep') return UPKEEP_RETRY_INTERVAL_MS;
     return TOKENS_INTERVAL_MS;
   }
 

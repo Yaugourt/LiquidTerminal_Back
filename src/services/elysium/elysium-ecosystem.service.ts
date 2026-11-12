@@ -32,7 +32,12 @@ const SERIES_DAYS = 14;
  * the statement runs: the stream moves on meanwhile, and a call it had stored by then was in
  * both tables, counted twice until the next computation.
  */
-const NOT_STORED = Prisma.sql`NOT EXISTS (SELECT 1 FROM elysium_tx st WHERE st.tx_hash = lv.tx_hash)`;
+const NOT_STORED = Prisma.sql`NOT EXISTS (
+  SELECT 1 FROM elysium_tx st
+  WHERE st.tx_hash = lv.tx_hash
+    -- The same transaction, so the same block: a day around it is all that has to be looked at
+    -- (and not every day elysium_tx holds, once it is split by day).
+    AND st.block_time >= lv.block_time - interval '1 day' AND st.block_time <= lv.block_time + interval '1 day')`;
 
 /** USD value of one unit of a launch quote: the HYPE price for HYPE quotes, $1 for test USDC, else null. */
 function quoteUsd(quote: string, hypeUsd: number | null): number | null {
@@ -146,30 +151,71 @@ export class ElysiumEcosystemService {
     return viewScheduler.readOrCompute(this.allTimeView());
   }
 
+  /**
+   * Per project, since the first block: transactions, wallets, first transaction.
+   *
+   * The days folded for each contract come from elysium_project_wallet (one row per contract
+   * and sender), the days after them from elysium_tx, and the calls the provider has not
+   * indexed yet from the RPC's rows. It was a read of every transaction ever sent to a
+   * project, longer with each day of history. One statement: the folded day of a contract and
+   * its wallets are read as of the same instant, so no day is counted twice or left out.
+   */
   private async computeAllTime(): Promise<AllTimeRow[]> {
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
     const cursor = (await this.readTxCursor())?.toISOString() ?? null;
+    // Where the contract furthest behind stands, read first: a floor that lets the statement
+    // below read the days after it in one pass (each contract's own day, read by that statement,
+    // is what decides which of its transactions are counted from elysium_tx).
+    const floorRows = await prismaHistoricalAggregate.$queryRaw<Array<{ unfolded: number; floor: string | null }>>`
+      SELECT count(*) FILTER (WHERE c.through_day IS NULL)::int AS unfolded,
+             (min(c.through_day) - 1)::text AS floor
+      FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
+      LEFT JOIN elysium_project_contract c ON c.to_addr = r.addr`;
+    const floor =
+      floorRows[0] && Number(floorRows[0].unfolded) === 0 && floorRows[0].floor
+        ? `${floorRows[0].floor.slice(0, 10)}T00:00:00.000Z`
+        : null;
     // Per project and sender first, then per project: count(DISTINCT sender) sorted every call
     // ever sent to a project, on disk.
     return hashGrouped(
       prismaHistoricalAggregate,
       (tx) => tx.$queryRaw<AllTimeRow[]>`
         WITH reg AS (
-          SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
+          SELECT r.slug, r.addr,
+                 COALESCE(((c.through_day + 1)::timestamp AT TIME ZONE 'UTC'), '-infinity'::timestamptz) AS after
+          FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
+          LEFT JOIN elysium_project_contract c ON c.to_addr = r.addr
         ),
         calls AS (
-          SELECT from_addr, to_addr, block_time FROM elysium_tx WHERE NOT is_spam
+          SELECT reg.slug, w.from_addr, w.txs, w.first_at
+          FROM reg JOIN elysium_project_wallet w ON w.to_addr = reg.addr
           UNION ALL
-          SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
+          SELECT reg.slug, t.from_addr, count(*), min(t.block_time)
+          FROM reg
+          JOIN elysium_tx t ON t.to_addr = reg.addr AND t.block_time >= reg.after
+          WHERE NOT t.is_spam AND t.block_time >= COALESCE(${floor}::timestamptz, '-infinity'::timestamptz)
+          GROUP BY reg.slug, t.from_addr
+          UNION ALL
+          -- A contract that stands before the floor after all (listed between the two reads):
+          -- its days up to the floor. No contract in the usual case, and nothing read.
+          SELECT reg.slug, t.from_addr, count(*), min(t.block_time)
+          FROM reg
+          JOIN elysium_tx t ON t.to_addr = reg.addr AND t.block_time >= reg.after AND t.block_time < ${floor}::timestamptz
+          WHERE NOT t.is_spam AND reg.after < ${floor}::timestamptz
+          GROUP BY reg.slug, t.from_addr
+          UNION ALL
+          SELECT reg.slug, lv.from_addr, count(*), min(lv.block_time)
+          FROM reg
+          JOIN elysium_tx_live lv ON lv.to_addr = reg.addr
           WHERE lv.block_time > COALESCE(${cursor}::timestamptz, 'infinity'::timestamptz)
             AND ${NOT_STORED}
+          GROUP BY reg.slug, lv.from_addr
         )
         SELECT slug, sum(txs)::int AS txs, count(*)::int AS wallets, extract(epoch FROM min(first_at))::float8 AS first_at
         FROM (
-          SELECT reg.slug, t.from_addr, count(*) AS txs, min(t.block_time) AS first_at
-          FROM reg
-          JOIN calls t ON t.to_addr = reg.addr
-          GROUP BY reg.slug, t.from_addr
+          SELECT slug, from_addr, sum(txs) AS txs, min(first_at) AS first_at
+          FROM calls
+          GROUP BY slug, from_addr
         ) s GROUP BY slug`
     );
   }

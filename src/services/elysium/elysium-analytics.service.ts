@@ -38,6 +38,7 @@ import { hypedexerCreditMeter } from '../../utils/hypedexer-credit-meter';
 import { positiveIntEnv } from '../../utils/env';
 import { FairGate } from '../../utils/fairGate';
 import { ELYSIUM_GENESIS } from './elysium-ingest.util';
+import { AFTER_HISTORY_FACTS, SWAP_SENDER_JOIN } from './elysium-facts.sql';
 import {
   closedRollupDays,
   closedRollupHours,
@@ -88,6 +89,11 @@ const DAY_MS = 24 * HOUR_MS;
  * judge a token that may have been launched minutes ago (who deployed it, how much it is called).
  */
 const ADDRESS_PROFILE_KEEP_S = 600;
+/**
+ * How far back an address's profile looks for swaps whose sender is not copied onto them yet
+ * (the upkeep pass looks at the same two hours every minute, see ElysiumUpkeepService).
+ */
+const SWAP_SENDER_LAG_MS = 2 * 3_600_000;
 const CONTRACT_PROFILE_KEEP_S = 120;
 /**
  * Profiles computed at once: each is eight to eleven statements on the read pool (10
@@ -1492,9 +1498,9 @@ export class ElysiumAnalyticsService {
           }>
         >`
           SELECT s.pool, s.version, p.fee, p.token0, p.token1, k0.symbol AS sym0, k1.symbol AS sym1,
-                 count(*)::int AS swaps, count(DISTINCT COALESCE(t.from_addr, s.sender))::int AS traders
+                 count(*)::int AS swaps, count(DISTINCT COALESCE(s.tx_from, t.from_addr, s.sender))::int AS traders
           FROM elysium_dex_swap s
-          LEFT JOIN elysium_tx t ON t.tx_hash = s.tx_hash
+          ${SWAP_SENDER_JOIN}
           LEFT JOIN elysium_dex_pool p ON p.pool = s.pool
           LEFT JOIN elysium_token k0 ON k0.address = p.token0
           LEFT JOIN elysium_token k1 ON k1.address = p.token1
@@ -1530,8 +1536,8 @@ export class ElysiumAnalyticsService {
                  (SELECT count(*) FROM elysium_dex_swap)::int AS swaps,
                  (SELECT count(*) FROM elysium_dex_pool WHERE created_at >= ${ts(since24h)}::timestamptz)::int AS pools24h,
                  (SELECT count(*) FROM elysium_dex_swap WHERE block_time >= ${ts(since24h)}::timestamptz)::int AS swaps24h,
-                 (SELECT count(DISTINCT COALESCE(t.from_addr, s.sender)) FROM elysium_dex_swap s
-                   LEFT JOIN elysium_tx t ON t.tx_hash = s.tx_hash
+                 (SELECT count(DISTINCT COALESCE(s.tx_from, t.from_addr, s.sender)) FROM elysium_dex_swap s
+                   ${SWAP_SENDER_JOIN}
                    WHERE s.block_time >= ${ts(since24h)}::timestamptz)::int AS traders24h`,
       ]);
 
@@ -1714,9 +1720,29 @@ export class ElysiumAnalyticsService {
           SELECT count(*)::int AS n, (extract(epoch FROM max(deployed_at)) * 1000)::float8 AS last
           FROM elysium_contract WHERE deployer = ${a}`,
         prismaHistoricalRead.$queryRaw<Array<{ swaps: number; pools: number; swaps24h: number }>>`
-          SELECT count(*)::int AS swaps, count(DISTINCT s.pool)::int AS pools,
-                 count(*) FILTER (WHERE s.block_time >= ${ts(since24h)}::timestamptz)::int AS swaps24h
-          FROM elysium_dex_swap s JOIN elysium_tx t ON t.tx_hash = s.tx_hash WHERE t.from_addr = ${a}`,
+          -- By the sender copied onto each swap (elysium_dex_swap.tx_from): it was a join of the
+          -- address's whole history in elysium_tx with the swaps. Two cases still go through
+          -- elysium_tx: the swaps of the last hours that have no sender copied yet (the copy
+          -- runs once a minute), and every swap while the copy has not been through the history
+          -- once (the first minutes after it shipped).
+          WITH copy AS (
+            SELECT COALESCE((SELECT backfill_done FROM elysium_ingest_state WHERE stream = 'txsender'), false) AS done
+          )
+          SELECT count(*)::int AS swaps, count(DISTINCT u.pool)::int AS pools,
+                 count(*) FILTER (WHERE u.block_time >= ${ts(since24h)}::timestamptz)::int AS swaps24h
+          FROM (
+            SELECT s.pool, s.block_time FROM elysium_dex_swap s
+            WHERE s.tx_from = ${a} AND (SELECT done FROM copy)
+            UNION ALL
+            SELECT s.pool, s.block_time
+            FROM elysium_tx t JOIN elysium_dex_swap s ON s.tx_hash = t.tx_hash AND s.block_time = t.block_time
+            WHERE (SELECT done FROM copy) AND t.from_addr = ${a}
+              AND t.block_time >= ${ts(new Date(now.getTime() - SWAP_SENDER_LAG_MS))}::timestamptz AND s.tx_from IS NULL
+            UNION ALL
+            SELECT s.pool, s.block_time
+            FROM elysium_tx t JOIN elysium_dex_swap s ON s.tx_hash = t.tx_hash AND s.block_time = t.block_time
+            WHERE NOT (SELECT done FROM copy) AND t.from_addr = ${a}
+          ) u`,
         prismaHistoricalRead.$queryRaw<
           Array<{ deposits: number; withdrawals: number; hype_in: number; hype_out: number }>
         >`
@@ -1726,9 +1752,17 @@ export class ElysiumAnalyticsService {
                  COALESCE(sum(amount) FILTER (WHERE direction = 'withdrawal' AND symbol = 'HYPE' AND route = 'native'), 0)::float8 AS hype_out
           FROM elysium_bridge_transfer WHERE from_addr = ${a} OR to_addr = ${a}`,
         prismaHistoricalRead.$queryRaw<Array<{ method_id: string | null; to_null: boolean; txs: number }>>`
-          SELECT CASE WHEN to_addr IS NULL THEN NULL ELSE method_id END AS method_id,
-                 (to_addr IS NULL) AS to_null, count(*)::int AS txs
-          FROM elysium_tx WHERE from_addr = ${a} AND NOT is_spam
+          -- The folded days from elysium_address_method, the days after them from elysium_tx: one
+          -- statement, so both are read as of the same instant and no day is counted twice.
+          SELECT method_id, to_null, sum(txs)::int AS txs FROM (
+            SELECT NULLIF(NULLIF(m.method_key, ''), 'create') AS method_id, (m.method_key = 'create') AS to_null, m.txs
+            FROM elysium_address_method m WHERE m.address = ${a}
+            UNION ALL
+            SELECT CASE WHEN t.to_addr IS NULL THEN NULL ELSE t.method_id END, (t.to_addr IS NULL), count(*)
+            FROM elysium_tx t
+            WHERE t.from_addr = ${a} AND NOT t.is_spam AND t.block_time >= ${AFTER_HISTORY_FACTS}
+            GROUP BY 1, 2
+          ) u
           GROUP BY 1, 2 ORDER BY txs DESC, 1 NULLS FIRST, 2 LIMIT 6`,
         this.methodNames(prismaHistoricalRead),
       ]);
@@ -1805,10 +1839,20 @@ export class ElysiumAnalyticsService {
             FROM elysium_tx t WHERE t.to_addr = ${a} AND ${weekRaw} AND NOT t.is_spam
           ) u`,
         distinctCallers([a], since7d, now, coverage, prismaHistoricalRead),
-        // First and last call through the (to_addr, block_time) index: an all-time count is too slow on busy contracts.
+        // First and last call: over the folded days from elysium_target_seen, over the days after
+        // them through the (to_addr, block_time) index of elysium_tx. One statement: both are read
+        // as of the same instant.
         prismaHistoricalRead.$queryRaw<Array<{ first: number | null; last: number | null }>>`
-          SELECT (SELECT (extract(epoch FROM block_time) * 1000)::float8 FROM elysium_tx WHERE to_addr = ${a} ORDER BY block_time ASC LIMIT 1) AS first,
-                 (SELECT (extract(epoch FROM block_time) * 1000)::float8 FROM elysium_tx WHERE to_addr = ${a} ORDER BY block_time DESC LIMIT 1) AS last`,
+          SELECT (extract(epoch FROM COALESCE(
+                    (SELECT s.first_at FROM elysium_target_seen s WHERE s.to_addr = ${a}),
+                    (SELECT t.block_time FROM elysium_tx t
+                      WHERE t.to_addr = ${a} AND t.block_time >= ${AFTER_HISTORY_FACTS} ORDER BY t.block_time ASC LIMIT 1)
+                  )) * 1000)::float8 AS first,
+                 (extract(epoch FROM COALESCE(
+                    (SELECT t.block_time FROM elysium_tx t
+                      WHERE t.to_addr = ${a} AND t.block_time >= ${AFTER_HISTORY_FACTS} ORDER BY t.block_time DESC LIMIT 1),
+                    (SELECT s.last_at FROM elysium_target_seen s WHERE s.to_addr = ${a})
+                  )) * 1000)::float8 AS last`,
         prismaHistoricalRead.$queryRaw<Array<{ method_id: string | null; txs: number }>>`
           SELECT method_id, sum(txs)::int AS txs FROM (
             SELECT NULLIF(d.method_id, '') AS method_id, sum(d.txs)::bigint AS txs
