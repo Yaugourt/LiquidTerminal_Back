@@ -60,7 +60,14 @@ const METHODS = ['0xa9059cbb', '0x095ea7b3', '0x38ed1739', null];
  * stands still that answer never changes. A run of these tests that started at a minute :03
  * never saw the builder come to rest (the first run in CI did, at 09:03 UTC).
  */
-const BASE = Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS + 30_000;
+const NOW_MINUTE = Math.floor(Date.now() / MINUTE_MS) * MINUTE_MS + 30_000;
+const FORCE_EARLY_MS = 4 * MINUTE_MS;
+/**
+ * Never in the first minutes of an hour: an hour is built once the tx stream is 3 minutes past
+ * its end, so a run started at 14:02 found the hour of 13:00 not built yet and failed (one run
+ * in twenty, seen 2026-11-12). Such a run takes its clock six minutes earlier.
+ */
+const BASE = NOW_MINUTE % HOUR_MS < FORCE_EARLY_MS ? NOW_MINUTE - 6 * MINUTE_MS : NOW_MINUTE;
 function setClock(ms: number): void {
   jest.setSystemTime(ms);
 }
