@@ -220,6 +220,20 @@ const DEX_LIVE_INTERVAL_MS = 60_000;
 const DEX_STEP_MS = 24 * HOUR_MS;
 const DEX_OVERLAP_MS = 20_000;
 const DEX_SETTLE_MS = 15_000;
+/**
+ * The V2 and V3 swap logs are the same rows for two streams: the DEX swaps, and the trades of
+ * the launches that moved to a pair or a pool. Each stream read them from the provider for the
+ * same seconds (2,880 calls a day and every swap billed twice). The launchpad stream, which
+ * reads them every 30 s, now also stores them as DEX swaps, and the DEX stream reads the swaps
+ * itself only where the launchpad stream has not (see ownSwapsFrom).
+ *
+ * The DEX stream leaves a window's swaps to the launchpad stream only while that stream is no
+ * further behind the window's end than this: three of its periods. Past it the DEX stream reads
+ * them itself, from where the launchpad stream stopped.
+ */
+const SWAPS_FED_SLACK_MS = 90_000;
+/** The swap topics both streams decode. */
+const SHARED_SWAP_TOPICS: ReadonlySet<string> = new Set([DEX_TOPICS.v2Swap, DEX_TOPICS.v3Swap]);
 
 const METHODS_INTERVAL_MS = 30 * MINUTE_MS;
 /** Only the most frequent selectors are resolved. */
@@ -459,6 +473,20 @@ export class ElysiumIngestionService {
   /** The same for the two log streams (their backfill windows are a day long). */
   private dexStepMs = DEX_STEP_MS;
   private launchpadStepMs = LAUNCHPAD_STEP_MS;
+  /**
+   * The run of time, without a hole, over which this process's launchpad stream also stored the
+   * V2 and V3 swaps it read as DEX swaps (see SWAPS_FED_SLACK_MS); null before its first live
+   * window, and after one that was cut.
+   */
+  private swapsFed: { from: number; to: number } | null = null;
+  /**
+   * Up to where the DEX swaps are stored for sure, as far as this process knows: the end of the
+   * DEX stream's last own read, or where the launchpad stream stood when a window was last left
+   * to it. Null until the DEX stream's first window in this process.
+   */
+  private dexSwapsDue: number | null = null;
+  /** DEX swaps the launchpad stream stored since the DEX stream last counted its rows. */
+  private fedSwapRows = 0;
   /** Next block the live tx fallback reads, null until resolved from its cursor. */
   private liveBlock: number | null = null;
   /** When this process started polling, and what it has done about the launch market state since. */
@@ -721,7 +749,7 @@ export class ElysiumIngestionService {
     return lagging && head !== null && end.getTime() > head.getTime() ? 'rpc' : 'provider';
   }
 
-  /** Every log with `topic0` in the window, page by page, from the chosen source. */
+  /** Every log with `topic0` in the window, page by page, from the chosen source. True when the window was cut at the page cap. */
   private async pageLogs(
     stream: ElysiumStream,
     source: LogSource,
@@ -729,17 +757,17 @@ export class ElysiumIngestionService {
     start: Date,
     end: Date,
     onPage: (rows: unknown[]) => Promise<void>
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (source === 'rpc') {
       this.ensureRunning();
       await onPage(await this.rpcLogs.getLogs(topic0, start, end));
-      return;
+      return false;
     }
     const time = { start_time: toUpstreamTime(start), end_time: toUpstreamTime(end) };
     // A topic with more logs than the page cap in this window: the caller reads it in halves,
     // down to the smallest step. It used to be cut here, at any window length, and the cursor
     // moved on: a day of backfill with 200,000 swaps of one kind lost the rest for good.
-    await this.pageAll(stream, '/logs', { ...time, topic0 }, onPage, { truncate: this.atSmallestStep(stream) });
+    return this.pageAll(stream, '/logs', { ...time, topic0 }, onPage, { truncate: this.atSmallestStep(stream) });
   }
 
   /** Whether the stream's windows are down to the smallest step (only then may one be cut). */
@@ -1271,7 +1299,7 @@ export class ElysiumIngestionService {
   // dex stream
   // ---------------------------------------------------------------------------
 
-  private async ingestDexWindow(start: Date, end: Date, source: LogSource): Promise<number> {
+  private async ingestDexWindow(start: Date, end: Date, source: LogSource, live: boolean): Promise<number> {
     let inserted = 0;
     for (const topic0 of [DEX_TOPICS.v2PairCreated, DEX_TOPICS.v3PoolCreated]) {
       await this.pageLogs('dex', source, topic0, start, end, async (raw) => {
@@ -1279,13 +1307,65 @@ export class ElysiumIngestionService {
         inserted += await this.writeRows('dex', rows, (part) => this.repo.insertDexPools(part), (r) => r.pool);
       });
     }
-    for (const topic0 of [DEX_TOPICS.v2Swap, DEX_TOPICS.v3Swap]) {
-      await this.pageLogs('dex', source, topic0, start, end, async (raw) => {
-        const rows = dedupeBy(this.decodeCounted<DexSwapRow>('dex', raw, decodeSwap), (r) => `${r.tx_hash}:${r.log_index}`);
-        inserted += await this.writeRows('dex', rows, (part) => this.repo.insertDexSwaps(part), (r) => `${r.tx_hash}:${r.log_index}`);
-      });
+    const swapsFrom = this.ownSwapsFrom(start.getTime(), end.getTime(), live);
+    if (swapsFrom === null) {
+      // Left to the launchpad stream, which has them stored up to where it stands.
+      this.dexSwapsDue = Math.max(this.dexSwapsDue ?? 0, this.swapsFed?.to ?? 0);
+    } else {
+      const from = new Date(swapsFrom);
+      for (const topic0 of [DEX_TOPICS.v2Swap, DEX_TOPICS.v3Swap]) {
+        await this.pageLogs('dex', source, topic0, from, end, async (raw) => {
+          inserted += await this.storeDexSwaps(raw);
+        });
+      }
+      this.dexSwapsDue = end.getTime();
     }
+    // The swaps the launchpad stream stored meanwhile are rows of this stream too.
+    inserted += this.fedSwapRows;
+    this.fedSwapRows = 0;
     return inserted;
+  }
+
+  /** Decodes a page of V2 or V3 swap logs and stores them as DEX swaps; how many were new. */
+  private async storeDexSwaps(raw: readonly unknown[]): Promise<number> {
+    const rows = dedupeBy(this.decodeCounted<DexSwapRow>('dex', raw, decodeSwap), (r) => `${r.tx_hash}:${r.log_index}`);
+    return this.writeRows('dex', rows, (part) => this.repo.insertDexSwaps(part), (r) => `${r.tx_hash}:${r.log_index}`);
+  }
+
+  /**
+   * Where the DEX stream has to read the swaps of its window [start, end] from itself; null when
+   * the launchpad stream stores them (see SWAPS_FED_SLACK_MS).
+   *
+   * The swaps are left to the launchpad stream only when it has stored them, without a hole,
+   * from where the DEX swaps are known stored, and stands within SWAPS_FED_SLACK_MS of this
+   * window's end: what it has not read yet of the window, it reads at its next run. If it then
+   * stops, it is further behind at the next window, and the DEX stream reads from where it
+   * stopped. And a process that starts knows nothing of what the one before it had left to the
+   * launchpad stream, which is never more than that margin: its first window reads the swaps
+   * from that much earlier, once (a `live` window only: nothing is ever left to the launchpad
+   * stream while the DEX stream replays its history).
+   */
+  private ownSwapsFrom(start: number, end: number, live: boolean): number | null {
+    // Behind the window's start: read from a re-read margin before it, as a window is before its cursor.
+    const from =
+      this.dexSwapsDue === null
+        ? live
+          ? Math.max(ELYSIUM_GENESIS.getTime(), start - SWAPS_FED_SLACK_MS)
+          : start
+        : this.dexSwapsDue < start
+          ? this.dexSwapsDue - DEX_OVERLAP_MS
+          : start;
+    const fed = this.swapsFed;
+    const left = live && this.dexSwapsDue !== null && fed !== null && fed.from <= from && fed.to >= end - SWAPS_FED_SLACK_MS;
+    return left ? null : from;
+  }
+
+  /** Notes a live launchpad window whose swaps were stored as DEX swaps too; one that was cut starts the run over. */
+  private noteSwapsFed(start: number, end: number, whole: boolean): void {
+    const fed = this.swapsFed;
+    if (!whole) this.swapsFed = null;
+    else if (fed && start <= fed.to) this.swapsFed = { from: Math.min(fed.from, start), to: Math.max(fed.to, end) };
+    else this.swapsFed = { from: start, to: end };
   }
 
   /**
@@ -1325,7 +1405,7 @@ export class ElysiumIngestionService {
       if (!w) return DEX_LIVE_INTERVAL_MS;
       let inserted: number;
       try {
-        inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging));
+        inserted = await this.ingestDexWindow(w.start, w.end, this.logSource(w.end, head, lagging), backfillDone);
       } catch (error) {
         if (!(error instanceof PageCapError)) throw error;
         // One topic has more logs in this window than the page cap: read it in halves (the rows
@@ -1563,8 +1643,19 @@ export class ElysiumIngestionService {
     return markets;
   }
 
-  private async ingestLaunchpadWindow(start: Date, end: Date, source: LogSource): Promise<number> {
+  /**
+   * `feedDex`: the V2 and V3 swap logs of the window are also stored as DEX swaps (a live window;
+   * see SWAPS_FED_SLACK_MS). `swapsCut` is then true when one of the two topics was cut at the
+   * page cap, so that the DEX stream is not told the window's swaps are all there.
+   */
+  private async ingestLaunchpadWindow(
+    start: Date,
+    end: Date,
+    source: LogSource,
+    feedDex = false
+  ): Promise<{ inserted: number; swapsCut: boolean }> {
     let inserted = 0;
+    let swapsCut = false;
     // Launches first, so trades in the same window find their market.
     for (const topic0 of LAUNCH_TOPIC_ORDER) {
       await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
@@ -1585,7 +1676,10 @@ export class ElysiumIngestionService {
     // Read per page of logs, after the launches and the graduations above: a pair a graduation
     // just added (Neuriio) is there for its swaps of this window.
     for (const topic0 of TRADE_TOPICS) {
-      await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
+      const shared = feedDex && SHARED_SWAP_TOPICS.has(topic0);
+      const cut = await this.pageLogs('launchpad', source, topic0, start, end, async (raw) => {
+        // First as DEX swaps: every swap is one, whether or not a launch trades on its pool.
+        if (shared) this.fedSwapRows += await this.storeDexSwaps(raw);
         const markets = await this.launchMarketsFor(raw);
         const trades: LaunchTradeRow[] = [];
         for (const r of raw) {
@@ -1600,8 +1694,9 @@ export class ElysiumIngestionService {
           (r) => `${r.tx_hash}:${r.log_index}`
         );
       });
+      if (shared && cut) swapsCut = true;
     }
-    return inserted;
+    return { inserted, swapsCut };
   }
 
   /** A status-like value longer than its column, stored cut: counted once per row and field, with the value. */
@@ -1734,7 +1829,10 @@ export class ElysiumIngestionService {
       if (!w) return LAUNCHPAD_LIVE_INTERVAL_MS;
       let inserted: number;
       try {
-        inserted = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging));
+        // Only a live window: a replay of the history would store every old swap a second time for nothing.
+        const read = await this.ingestLaunchpadWindow(w.start, w.end, this.logSource(w.end, head, lagging), backfillDone);
+        inserted = read.inserted;
+        if (backfillDone) this.noteSwapsFed(w.start.getTime(), w.end.getTime(), !read.swapsCut);
       } catch (error) {
         if (!(error instanceof PageCapError)) throw error;
         this.launchpadStepMs = Math.max(MIN_STEP_MS, Math.floor(this.launchpadStepMs / 2));
