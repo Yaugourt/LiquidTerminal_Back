@@ -82,8 +82,13 @@ function dailyCadence(days: number): ViewCadence {
 }
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
-/** A profile's last value is served, while it is computed again, for this long after it was computed. */
-const PROFILE_KEEP_S = 600;
+/**
+ * A profile's last value is served, while it is computed again, for this long after it was
+ * computed. An address: 10 minutes. A contract: 2 minutes, because the token check reads it to
+ * judge a token that may have been launched minutes ago (who deployed it, how much it is called).
+ */
+const ADDRESS_PROFILE_KEEP_S = 600;
+const CONTRACT_PROFILE_KEEP_S = 120;
 /**
  * Profiles computed at once: each is eight to eleven statements on the read pool (10
  * connections). One per client, so that the second place is always someone else's.
@@ -170,18 +175,19 @@ export class ElysiumAnalyticsService {
    * the same 20 s of queries again every minute, and waited for them each
    * time; any number of profiles could be computed at once, each one eight to
    * eleven statements on the ten connections of their pool. Now a value under
-   * a minute old is served as it is; an older one is served too, for ten
-   * minutes at most, while one computation replaces it behind; only an address
-   * nobody looked at for ten minutes is waited for. PROFILE_MAX computations
+   * a minute old is served as it is; an older one is served too, for `keepS`
+   * at most (ten minutes for an address, two for a contract), while one
+   * computation replaces it behind; only a profile nobody looked at for that
+   * long is waited for. PROFILE_MAX computations
    * run at once, one per client: the others wait their turn, up to 20 s, then
    * are told to come back (GateBusyError).
    */
-  private profile<T>(name: string, address: string, client: string, fn: () => Promise<T>): Promise<T> {
+  private profile<T>(name: string, address: string, client: string, keepS: number, fn: () => Promise<T>): Promise<T> {
     return cacheService.getOrRefresh<T>(
       `${CACHE_PREFIX}:${name}:${address}`,
       () => profileGate.run(client, fn),
       CACHE_TTL_S,
-      PROFILE_KEEP_S
+      keepS
     );
   }
 
@@ -1691,7 +1697,7 @@ export class ElysiumAnalyticsService {
   /** Tags and counts for one address, computed from the ingested tables. */
   public getAddress(address: string, client = ''): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.profile('address', a, client, async () => {
+    return this.profile('address', a, client, ADDRESS_PROFILE_KEEP_S, async () => {
       const now = new Date();
       const since24h = new Date(now.getTime() - DAY_MS);
       const [seen, act, net, deploys, dex, bridge, methods, names] = await Promise.all([
@@ -1773,7 +1779,7 @@ export class ElysiumAnalyticsService {
    */
   public getContract(address: string, client = ''): Promise<unknown> {
     const a = address.toLowerCase();
-    return this.profile('contract', a, client, async () => {
+    return this.profile('contract', a, client, CONTRACT_PROFILE_KEEP_S, async () => {
       const now = new Date();
       const since7d = new Date(now.getTime() - 7 * DAY_MS);
       // One contract's own rows: bounded whatever the plan, so an unreadable list of built days reads them raw.
