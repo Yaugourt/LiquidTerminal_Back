@@ -5,6 +5,7 @@ import { ViewResult, viewScheduler, type ViewCadence, type ViewDef } from '../..
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { ELYSIUM_PROJECTS, ElysiumProject } from '../../constants/elysium-projects';
 import { HYPE_QUOTES, quoteDecimals, USD_QUOTES } from './elysium-launchpad.util';
+import { hashGrouped } from './elysium-rollup.reader';
 
 const PROJECTS_KEY = 'elysium:ecosystem:projects:v5';
 const ALL_TIME_KEY = 'elysium:ecosystem:alltime:v1';
@@ -148,22 +149,29 @@ export class ElysiumEcosystemService {
   private async computeAllTime(): Promise<AllTimeRow[]> {
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
     const cursor = (await this.readTxCursor())?.toISOString() ?? null;
-    return prismaHistoricalAggregate.$queryRaw<AllTimeRow[]>`
-      WITH reg AS (
-        SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
-      ),
-      calls AS (
-        SELECT from_addr, to_addr, block_time FROM elysium_tx WHERE NOT is_spam
-        UNION ALL
-        SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
-        WHERE lv.block_time > COALESCE(${cursor}::timestamptz, 'infinity'::timestamptz)
-          AND ${NOT_STORED}
-      )
-      SELECT reg.slug, count(*)::int AS txs, count(DISTINCT t.from_addr)::int AS wallets,
-             extract(epoch FROM min(t.block_time))::float8 AS first_at
-      FROM reg
-      JOIN calls t ON t.to_addr = reg.addr
-      GROUP BY reg.slug`;
+    // Per project and sender first, then per project: count(DISTINCT sender) sorted every call
+    // ever sent to a project, on disk.
+    return hashGrouped(
+      prismaHistoricalAggregate,
+      (tx) => tx.$queryRaw<AllTimeRow[]>`
+        WITH reg AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
+        ),
+        calls AS (
+          SELECT from_addr, to_addr, block_time FROM elysium_tx WHERE NOT is_spam
+          UNION ALL
+          SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
+          WHERE lv.block_time > COALESCE(${cursor}::timestamptz, 'infinity'::timestamptz)
+            AND ${NOT_STORED}
+        )
+        SELECT slug, sum(txs)::int AS txs, count(*)::int AS wallets, extract(epoch FROM min(first_at))::float8 AS first_at
+        FROM (
+          SELECT reg.slug, t.from_addr, count(*) AS txs, min(t.block_time) AS first_at
+          FROM reg
+          JOIN calls t ON t.to_addr = reg.addr
+          GROUP BY reg.slug, t.from_addr
+        ) s GROUP BY slug`
+    );
   }
 
   /**
@@ -258,48 +266,68 @@ export class ElysiumEcosystemService {
     const txCursor = await this.readTxCursor();
     const cursorIso = txCursor?.toISOString() ?? null;
 
-    const [activity, daily, pads, padVolumes, hypeUsd, allTime, verified] = await Promise.all([
-      prismaHistoricalAggregate.$queryRaw<ActivityRow[]>`
-        WITH reg AS (
-          SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
-        )
-        SELECT reg.slug,
-               count(DISTINCT t.from_addr) FILTER (WHERE t.block_time >= ${since7}::timestamptz)::int AS wallets,
-               count(*) FILTER (WHERE t.block_time >= ${since7}::timestamptz)::int AS txs,
-               count(DISTINCT t.from_addr) FILTER (WHERE t.block_time < ${since7}::timestamptz)::int AS wallets_prev7,
-               count(DISTINCT t.from_addr) FILTER (WHERE t.block_time >= ${since1}::timestamptz)::int AS wallets24,
-               count(DISTINCT t.from_addr) FILTER (WHERE t.block_time >= ${since2}::timestamptz
-                                                     AND t.block_time < ${since1}::timestamptz)::int AS wallets_prev24
-        FROM reg
-        JOIN (
-          SELECT from_addr, to_addr, block_time FROM elysium_tx
-          WHERE block_time >= ${since14}::timestamptz AND NOT is_spam
-          UNION ALL
-          SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
+    const [calls, pads, padVolumes, hypeUsd, allTime, verified] = await Promise.all([
+      // The 14 days of calls to the project contracts, read once: per project, sender and
+      // rolling 24-hour bucket (bucket 0 is the last 24h, so the latest one is never a partial
+      // day), with the side of each boundary the call falls on. The window figures and the
+      // daily series are then counted from those rows. They were two statements that each
+      // read the 14 days and sorted them on disk for their distinct counts.
+      hashGrouped(prismaHistoricalAggregate, async (tx) => {
+        // Kept for the two counts below in a table of this transaction, not in a CTE, and the
+        // provider's rows apart from the live ones: Postgres then reads elysium_tx with
+        // several workers, and that read is what this view costs.
+        //
+        // No nested loop for the provider's rows: the planner expects a few rows per address
+        // and looks each project contract up through the index, one after the other; together
+        // they hold a fifth of the 14 days, read three times faster in one pass and hashed
+        // (measured 2026-11-12).
+        await tx.$executeRaw`SET LOCAL enable_nestloop = off`;
+        await tx.$executeRaw`
+          CREATE TEMP TABLE _elysium_project_calls ON COMMIT DROP AS
+          SELECT reg.slug, t.from_addr,
+                 floor(extract(epoch FROM (${nowIso}::timestamptz - t.block_time)) / 86400)::int AS bucket,
+                 (t.block_time >= ${since7}::timestamptz) AS in7,
+                 (t.block_time >= ${since1}::timestamptz) AS in1,
+                 (t.block_time >= ${since2}::timestamptz AND t.block_time < ${since1}::timestamptz) AS in2,
+                 (t.block_time <= ${nowIso}::timestamptz) AS past,
+                 count(*) AS txs
+          FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS reg(slug text, addr text)
+          JOIN elysium_tx t ON t.to_addr = reg.addr
+          WHERE t.block_time >= ${since14}::timestamptz AND NOT t.is_spam
+          GROUP BY 1, 2, 3, 4, 5, 6, 7`;
+        await tx.$executeRaw`SET LOCAL enable_nestloop = on`;
+        // The calls read from the RPC after the provider's cursor (a small table): same columns.
+        await tx.$executeRaw`
+          INSERT INTO _elysium_project_calls
+          SELECT reg.slug, lv.from_addr,
+                 floor(extract(epoch FROM (${nowIso}::timestamptz - lv.block_time)) / 86400)::int,
+                 (lv.block_time >= ${since7}::timestamptz),
+                 (lv.block_time >= ${since1}::timestamptz),
+                 (lv.block_time >= ${since2}::timestamptz AND lv.block_time < ${since1}::timestamptz),
+                 (lv.block_time <= ${nowIso}::timestamptz),
+                 count(*)
+          FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS reg(slug text, addr text)
+          JOIN elysium_tx_live lv ON lv.to_addr = reg.addr
           WHERE lv.block_time >= ${since14}::timestamptz
             AND lv.block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
             AND ${NOT_STORED}
-        ) t ON t.to_addr = reg.addr
-        GROUP BY reg.slug`,
-      // Bucket 0 is the last 24h; buckets are rolling so the latest one is never a partial day.
-      prismaHistoricalAggregate.$queryRaw<Array<{ slug: string; bucket: number; users: number }>>`
-        WITH reg AS (
-          SELECT * FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
-        )
-        SELECT reg.slug,
-               floor(extract(epoch FROM (${nowIso}::timestamptz - t.block_time)) / 86400)::int AS bucket,
-               count(DISTINCT t.from_addr)::int AS users
-        FROM reg
-        JOIN (
-          SELECT from_addr, to_addr, block_time FROM elysium_tx
-          WHERE block_time >= ${since14}::timestamptz AND block_time <= ${nowIso}::timestamptz AND NOT is_spam
-          UNION ALL
-          SELECT lv.from_addr, lv.to_addr, lv.block_time FROM elysium_tx_live lv
-          WHERE lv.block_time >= ${since14}::timestamptz AND lv.block_time <= ${nowIso}::timestamptz
-            AND lv.block_time > COALESCE(${cursorIso}::timestamptz, 'infinity'::timestamptz)
-            AND ${NOT_STORED}
-        ) t ON t.to_addr = reg.addr
-        GROUP BY 1, 2`,
+          GROUP BY 1, 2, 3, 4, 5, 6, 7`;
+        const activity = await tx.$queryRaw<ActivityRow[]>`
+          SELECT slug, count(*) FILTER (WHERE in7)::int AS wallets, COALESCE(sum(txs7), 0)::int AS txs,
+                 count(*) FILTER (WHERE prev7)::int AS wallets_prev7,
+                 count(*) FILTER (WHERE in1)::int AS wallets24, count(*) FILTER (WHERE in2)::int AS wallets_prev24
+          FROM (
+            -- One row per project and sender: which windows it sent in.
+            SELECT slug, bool_or(in7) AS in7, bool_or(NOT in7) AS prev7, bool_or(in1) AS in1, bool_or(in2) AS in2,
+                   sum(txs) FILTER (WHERE in7) AS txs7
+            FROM _elysium_project_calls GROUP BY slug, from_addr
+          ) s GROUP BY slug`;
+        const daily = await tx.$queryRaw<Array<{ slug: string; bucket: number; users: number }>>`
+          SELECT slug, bucket, count(*)::int AS users FROM (
+            SELECT slug, bucket FROM _elysium_project_calls WHERE past GROUP BY slug, bucket, from_addr
+          ) d GROUP BY slug, bucket`;
+        return { activity, daily };
+      }),
       prismaHistoricalAggregate.$queryRaw<Array<{ launchpad: string; launches: number }>>`
         SELECT l.launchpad, count(*) FILTER (WHERE l.created_at >= ${since7}::timestamptz)::int AS launches
         FROM elysium_launch l
@@ -316,6 +344,7 @@ export class ElysiumEcosystemService {
       this.readVerified(),
     ]);
     const activityGap = await this.readActivityGap(txCursor, now);
+    const { activity, daily } = calls;
 
     const allBySlug = new Map(allTime.map((r) => [r.slug, r]));
     const bySlug = new Map(activity.map((r) => [r.slug, r]));
