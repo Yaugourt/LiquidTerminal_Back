@@ -1,5 +1,12 @@
 /** The gate has no room for this caller right now; it is told when to come back. */
 export class GateBusyError extends Error {
+  /**
+   * The caller's own refusal, not a failure of what it asked for: a cache that runs a loader
+   * through a gate must neither mark the key as failing nor run the loader a second time
+   * (see isCallerRefusal).
+   */
+  readonly callerRefusal = true;
+
   constructor(
     public readonly retryAfterS = 1,
     /** True when the caller is over its own share, false when the gate as a whole is full. */

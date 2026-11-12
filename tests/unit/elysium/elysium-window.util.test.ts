@@ -10,6 +10,7 @@ import {
   windowWork,
   WINDOW_MAX_DELTA_DAYS,
   WINDOW_MAX_DELTA_HOURS,
+  WINDOW_MAX_RAW_MS,
   WINDOW_REBASE_WAIT_MS,
   type RollupBuiltAt,
   type WindowState,
@@ -95,6 +96,16 @@ describe('windowDelta', () => {
     const moved = state(7, DAYS, TAIL, { baseDays: [{ day: '2026-11-03', at: BUILT_AT }, ...DAYS.slice(0, 5).map((day) => ({ day, at: BUILT_AT }))] });
     expect(windowDelta(p, moved, built(DAYS, TAIL), '3')).toBeNull();
     expect(windowUnitsValid(moved, built([...DAYS, '2026-11-03'], TAIL))).toBe(true);
+  });
+
+  it('gives the table up when the plan leaves more than six hours to elysium_tx (a dirty day, hours not built)', () => {
+    const st = state(7, DAYS, TAIL);
+    const raw = (hours: number) => [{ from: new Date('2026-11-10T00:00:00Z'), to: new Date(Date.parse('2026-11-10T00:00:00Z') + hours * HOUR) }];
+    expect(windowDelta({ days: DAYS, hours: TAIL, raw: raw(WINDOW_MAX_RAW_MS / HOUR) }, st, everything, '3')).not.toBeNull();
+    expect(windowDelta({ days: DAYS, hours: TAIL, raw: raw(WINDOW_MAX_RAW_MS / HOUR + 1) }, st, everything, '3')).toBeNull();
+    // Counted over all the ranges.
+    const split = [...raw(4), { from: new Date('2026-11-03T08:00:00Z'), to: new Date('2026-11-03T11:00:00Z') }];
+    expect(windowDelta({ days: DAYS, hours: TAIL, raw: split }, st, everything, '3')).toBeNull();
   });
 
   it('gives the table up when it is too far from the plan to be worth it', () => {

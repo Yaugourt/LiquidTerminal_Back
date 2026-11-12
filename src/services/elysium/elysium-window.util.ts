@@ -66,6 +66,12 @@ export interface WindowDelta {
  */
 export const WINDOW_MAX_DELTA_DAYS = 2;
 export const WINDOW_MAX_DELTA_HOURS = 30;
+/**
+ * And past this much of the window left to elysium_tx (normally about two hours; a day marked
+ * dirty, or hours that are not built, make it a day or more): the delta would hold every
+ * address of that time, which is the grouping the table was made to avoid.
+ */
+export const WINDOW_MAX_RAW_MS = 6 * 3_600_000;
 /** After midnight the base waits this long for yesterday's day rollup before it is rebuilt without it. */
 export const WINDOW_REBASE_WAIT_MS = 45 * 60_000;
 
@@ -89,12 +95,13 @@ export function windowUnitsValid(state: WindowState, built: RollupBuiltAt): bool
 /**
  * What a reader whose window is `plan` reads beside the table, or null when
  * the table cannot be used: not ready, classes worked out before the last
- * contract removal, a rollup of its list rebuilt or dropped since, or too far
- * from the plan to be worth it.
+ * contract removal, a rollup of its list rebuilt or dropped since, too far
+ * from the plan to be worth it, or a plan that leaves too much to elysium_tx.
  */
 export function windowDelta(plan: RollupPlan, state: WindowState | undefined, built: RollupBuiltAt, epoch: string): WindowDelta | null {
   if (!state || !state.ready || state.epoch !== epoch) return null;
   if (!windowUnitsValid(state, built)) return null;
+  if (plan.raw.reduce((ms, r) => ms + (r.to.getTime() - r.from.getTime()), 0) > WINDOW_MAX_RAW_MS) return null;
   const planDays = new Set(plan.days);
   const planHours = new Set(plan.hours);
   const coverDays = new Set(state.coverDays.map((d) => d.day));

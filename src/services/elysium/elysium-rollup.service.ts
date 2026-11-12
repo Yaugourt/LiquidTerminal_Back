@@ -10,6 +10,7 @@ import {
   closedRollupDays,
   closedRollupHours,
   firstKeptDay,
+  HOUR_CLOSE_MARGIN_MS,
   HOUR_KEEP_SLACK,
   HOUR_MS,
   HOUR_RECENT_KEEP,
@@ -22,6 +23,7 @@ import {
   ROLLUP_SENDERS_BUILD_DAYS,
   ROLLUP_SENDERS_KEEP_DAYS,
   utcHourStart,
+  wantedRollupHours,
   WINDOW_SPANS,
 } from './elysium-rollup.util';
 import { windowTarget, windowWork } from './elysium-window.util';
@@ -44,6 +46,9 @@ const HOURS_PASS_BUDGET_MS = 60_000;
 const HOUR_PRUNE_EVERY_MS = 3_600_000;
 /** The classes of a window table's rows are looked at again this often when nothing else touched the table. */
 const RECLASSIFY_EVERY_MS = 5 * 60_000;
+/** The next pass when an hour only waits for the tx stream's cursor, and how close behind the clock that cursor has to be. */
+const CURSOR_WAIT_MS = 20_000;
+const CURSOR_NEAR_MS = 2 * 60_000;
 const DAY_MS = 86_400_000;
 
 /**
@@ -80,8 +85,17 @@ export class ElysiumRollupService {
   private readonly failed = new Map<string, { failures: number; retryAt: number; message: string }>();
   /** Hours whose build failed, the same way (keyed by the hour's start, epoch ms). */
   private readonly failedHours = new Map<number, { failures: number; retryAt: number; message: string }>();
-  /** The last failure of each window table's upkeep (key 0: the pass over the classes), until it works again. */
-  private readonly windowErrors = new Map<number, string>();
+  /**
+   * Window tables whose upkeep failed (key 0: the pass over the classes), the same way: a table
+   * that fails is left alone for a while, longer each time. Without it a refresh that cannot
+   * end (a statement over its time limit) was started again on every pass, each try holding the
+   * builders' lock for minutes and leaving its rows to be cleaned.
+   */
+  private readonly failedWindows = new Map<number, { failures: number; retryAt: number; message: string }>();
+  /** The last failure of the hours pass as a whole (its list could not be read), until one goes through. */
+  private hoursError: string | null = null;
+  /** An hour has ended, its margin too, and only the tx stream's cursor, seconds behind, keeps it from being built. */
+  private hourWaitsForCursor = false;
   private reclassifiedAt = 0;
 
   public static getInstance(): ElysiumRollupService {
@@ -102,11 +116,34 @@ export class ElysiumRollupService {
   private async passed(now: Date): Promise<void> {
     const failing = [...this.failed.entries()].sort((a, b) => a[0].localeCompare(b[0])).pop();
     const failingHour = [...this.failedHours.entries()].sort((a, b) => a[0] - b[0]).pop();
-    const failingWindow = [...this.windowErrors.entries()][0];
+    const failingWindow = [...this.failedWindows.entries()][0];
     if (failing) await this.states.recordError('rollup', `${failing[0]}: ${failing[1].message}`);
     else if (failingHour) await this.states.recordError('rollup', `${new Date(failingHour[0]).toISOString()}: ${failingHour[1].message}`);
-    else if (failingWindow) await this.states.recordError('rollup', `window ${failingWindow[0] || 'classes'}: ${failingWindow[1]}`);
+    else if (this.hoursError) await this.states.recordError('rollup', `hours: ${this.hoursError}`);
+    else if (failingWindow) await this.states.recordError('rollup', `window ${failingWindow[0] || 'classes'}: ${failingWindow[1].message}`);
     else await this.states.advance('rollup', { cursor: now });
+  }
+
+  /** Records a failure of a window table's upkeep (0: the classes) and when to try it again. */
+  private windowFailed(span: number, error: unknown): void {
+    const failures = (this.failedWindows.get(span)?.failures ?? 0) + 1;
+    const message = error instanceof Error ? error.message : String(error);
+    this.failedWindows.set(span, {
+      failures,
+      retryAt: Date.now() + Math.min(RETRY_MAX_MS, RETRY_MIN_MS * 2 ** (failures - 1)),
+      message: message.slice(0, 300),
+    });
+  }
+
+  /**
+   * The delay before the next pass when nothing waits: the next hour close or midnight, and
+   * sooner when an hour is only waiting for the tx stream's cursor (it moves every 30 s: the
+   * pass at "end of the hour + 3 min" used to find it a few seconds short, and come back five
+   * minutes later).
+   */
+  private idleDelay(): number {
+    const wake = nextRollupWakeMs(new Date(Date.now()), IDLE_INTERVAL_MS);
+    return this.hourWaitsForCursor ? Math.min(wake, CURSOR_WAIT_MS) : wake;
   }
 
   /**
@@ -115,6 +152,13 @@ export class ElysiumRollupService {
    */
   private async buildHours(now: Date, cursor: Date | null): Promise<boolean> {
     const closed = closedRollupHours(cursor, now, ELYSIUM_GENESIS);
+    // An hour over for more than its margin that the cursor has not passed yet, with a cursor
+    // that is close behind the clock (a stream that stands still is not waited for this way).
+    const closedSet = new Set(closed);
+    this.hourWaitsForCursor =
+      cursor !== null &&
+      now.getTime() - cursor.getTime() < CURSOR_NEAR_MS &&
+      wantedRollupHours(now, ELYSIUM_GENESIS).some((hour) => hour + HOUR_MS + HOUR_CLOSE_MARGIN_MS <= now.getTime() && !closedSet.has(hour));
     if (closed.length === 0) return false;
     const known = new Map((await this.repo.listHours(Math.min(...closed))).map((h) => [h.hour, h]));
     const pending = closed.filter((hour) => {
@@ -160,8 +204,9 @@ export class ElysiumRollupService {
   /**
    * The window tables: each one brought to what a window of its span holds now, when it
    * differs enough (windowWork), and its classes looked at again every few minutes otherwise.
-   * `pendingDays`: the closed days that wait for their rollup. Resolves to whether a table has
-   * to be tried again shortly.
+   * `pendingDays`: the closed days that wait for their rollup and that the builder is still
+   * trying (a day whose build keeps failing is not waited for: the tables are made without it,
+   * as a reader's own window is). Resolves to whether a table has to be tried again shortly.
    */
   private async maintainWindows(now: Date, pendingDays: string[]): Promise<boolean> {
     if (!windowsEnabled()) return false;
@@ -175,6 +220,7 @@ export class ElysiumRollupService {
     }
     const today = Math.floor(now.getTime() / DAY_MS) * DAY_MS;
     for (const span of WINDOW_SPANS) {
+      if ((this.failedWindows.get(span)?.retryAt ?? 0) > Date.now()) continue;
       try {
         const plan = planWindow(new Date(now.getTime() - span * DAY_MS), now, coverage);
         const target = windowTarget(plan, coverage.built);
@@ -197,25 +243,28 @@ export class ElysiumRollupService {
             ms: Date.now() - startedAt,
           });
         }
-        this.windowErrors.delete(span);
+        this.failedWindows.delete(span);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.windowErrors.set(span, message.slice(0, 300));
-        logDeduplicator.warn('Elysium rollups: window upkeep failed', { span, errorType: error instanceof Error ? error.name : typeof error });
+        this.windowFailed(span, error);
+        logDeduplicator.warn('Elysium rollups: window upkeep failed', {
+          span,
+          failures: this.failedWindows.get(span)?.failures,
+          errorType: error instanceof Error ? error.name : typeof error,
+        });
       }
       tickStep();
     }
     // The classes of the rows, every few minutes: one pass for all the tables.
-    if (Date.now() - this.reclassifiedAt >= RECLASSIFY_EVERY_MS) {
+    if (Date.now() - this.reclassifiedAt >= RECLASSIFY_EVERY_MS && (this.failedWindows.get(0)?.retryAt ?? 0) <= Date.now()) {
       try {
         const changed = await this.windows.reclassify();
         if (changed !== 'busy') {
           this.reclassifiedAt = Date.now();
           if (changed.size > 0) logDeduplicator.info('Elysium rollups: window classes', { changed: Object.fromEntries(changed) });
         }
-        this.windowErrors.delete(0);
+        this.failedWindows.delete(0);
       } catch (error) {
-        this.windowErrors.set(0, (error instanceof Error ? error.message : String(error)).slice(0, 300));
+        this.windowFailed(0, error);
         logDeduplicator.warn('Elysium rollups: window classes not looked at', { errorType: error instanceof Error ? error.name : typeof error });
       }
       tickStep();
@@ -278,14 +327,27 @@ export class ElysiumRollupService {
 
     // Hours, then the window tables that read them: seconds of work that every view waits on,
     // done before the day, which takes minutes and comes once in 24 hours.
-    const hoursLeft = await this.buildHours(now, cursor);
-    const windowsAgain = await this.maintainWindows(now, pending);
+    // The tables wait for the hours: while some are still to be built (the first start, a long
+    // stop), each pass would bring every table to a few hours more, a rewrite of its totals each time.
+    // A pass over the hours that cannot even start (their list unread) does not keep the
+    // tables from being looked at, nor the day from being built.
+    let hoursLeft = false;
+    try {
+      hoursLeft = await this.buildHours(now, cursor);
+      this.hoursError = null;
+    } catch (error) {
+      this.hoursError = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+      logDeduplicator.warn('Elysium rollups: hours pass failed', { errorType: error instanceof Error ? error.name : typeof error });
+    }
+    tickStep();
+    const tried = pending.filter((day) => (this.failed.get(day)?.retryAt ?? 0) <= now.getTime());
+    const windowsAgain = hoursLeft ? false : await this.maintainWindows(now, tried);
     const soon = hoursLeft || windowsAgain;
 
     const ready = pending.filter((day) => (this.failed.get(day)?.retryAt ?? 0) <= now.getTime());
     if (ready.length === 0) {
       await this.passed(now);
-      return soon ? BACKLOG_INTERVAL_MS : nextRollupWakeMs(new Date(Date.now()), IDLE_INTERVAL_MS);
+      return soon ? BACKLOG_INTERVAL_MS : this.idleDelay();
     }
 
     const day = ready[0];
@@ -307,7 +369,7 @@ export class ElysiumRollupService {
       logDeduplicator.warn('Elysium rollups: day build failed', { day, failures, errorType: error instanceof Error ? error.name : typeof error });
       await this.passed(now);
       // The other days that wait are built meanwhile.
-      return ready.length > 1 || soon ? BACKLOG_INTERVAL_MS : nextRollupWakeMs(new Date(Date.now()), IDLE_INTERVAL_MS);
+      return ready.length > 1 || soon ? BACKLOG_INTERVAL_MS : this.idleDelay();
     }
     this.failed.delete(day);
     logDeduplicator.info('Elysium rollups: day pass', {

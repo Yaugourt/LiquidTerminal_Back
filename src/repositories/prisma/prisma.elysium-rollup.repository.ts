@@ -335,13 +335,21 @@ export class ElysiumRollupRepository {
 
   /**
    * Drops the hours before `beforeMs` that are not in `keep` (epoch ms of each hour's start):
-   * their rows, and their state. The hours from `beforeMs` on are all kept.
+   * their rows, and their state. The hours from `beforeMs` on are all kept. Under the builders'
+   * lock, and skipped (0) when a build holds it: a build of an hour that just left the wanted
+   * ones, still running beside this, could commit its rows between the two deletes and leave an
+   * hour declared built with none.
    */
   public async pruneHours(beforeMs: number, keep: number[]): Promise<number> {
     const before = new Date(beforeMs).toISOString();
     const kept = keep.filter((hour) => hour < beforeMs).map((hour) => new Date(hour).toISOString());
     return prismaHistorical.$transaction(
       async (tx) => {
+        const lock = await tx.$queryRawUnsafe<Array<{ ok: boolean }>>(
+          `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok`,
+          BUILD_LOCK_KEY
+        );
+        if (!lock[0]?.ok) return 0;
         await tx.$executeRawUnsafe(
           `DELETE FROM elysium_hour_rollup WHERE hour < $1::timestamptz AND hour <> ALL($2::text[]::timestamptz[])`,
           before,

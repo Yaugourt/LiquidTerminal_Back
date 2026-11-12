@@ -101,6 +101,26 @@ function seedRows(): TxFixture[] {
       })
     );
   }
+  // Forty more contracts of twenty deployers, with the same fee and gas on every transaction and
+  // one to three transactions a day each: more known contracts than the 25 a list shows, more
+  // deployers than 15, and equal sums everywhere, so that what a list keeps and in what order
+  // rests on the cut and on the tie-breakers. A few of them also have transactions in the last
+  // hours (the edges, and the part read from elysium_tx), which moves them across the cut.
+  const tied = Array.from({ length: 40 }, (_, i) => A(0xa000 + i));
+  tied.forEach((c, i) => rows.push(tx(first + 60_000 + i * 1_000, { to_addr: null, contract_address: c, from_addr: A(0xdd00 + (i % 20)) })));
+  const same = { fee_wei: '5000000000000', gas_used: '50000', method_id: '0xa9059cbb', success: true };
+  for (let day = 0; day < 10; day++) {
+    tied.forEach((c, i) => {
+      for (let k = 0; k <= i % 3; k++) {
+        const at = first + 2 * HOUR_MS + day * DAY_MS + ((i * 37 + k * 211) % 1300) * MINUTE_MS;
+        if (at < BASE - 2 * MINUTE_MS) rows.push(tx(at, { to_addr: c, ...same }));
+      }
+    });
+  }
+  tied.filter((_, i) => i % 7 === 0).forEach((c, i) => {
+    rows.push(tx(BASE - 80 * MINUTE_MS + i * 1_000, { to_addr: c, ...same }));
+    rows.push(tx(BASE - 5 * HOUR_MS + i * 1_000, { to_addr: c, ...same }));
+  });
   // A contract created in the last hours: only in the edges of every window.
   rows.push(tx(BASE - 3 * HOUR_MS, { to_addr: null, contract_address: A(0xc0ff), from_addr: DEP2 }));
   rows.push(tx(BASE - 3 * HOUR_MS + 30_000, { to_addr: A(0xc0ff), method_id: '0xa9059cbb' }));
@@ -322,6 +342,27 @@ describe('window tables', () => {
     expect(used).toEqual({ fees: 3, contracts: 2 });
   });
 
+  it('the lists are cut: 25 contracts and 15 deployers of more, in the same order both ways, equal sums included', async () => {
+    const fees = (await analytics.feesView('7d').compute()) as {
+      totals: { apps: number };
+      contracts: Array<{ address: string; feesHype: number }>;
+      deployers: Array<{ deployer: string; feesHype: number }>;
+    };
+    expect(fees.contracts).toHaveLength(25);
+    expect(fees.deployers).toHaveLength(15);
+    expect(fees.totals.apps).toBeGreaterThan(40);
+    // Equal sums on both sides of the cut: the order among them is by address.
+    const ties = fees.contracts.filter((c, i, all) => all.some((o, j) => j !== i && o.feesHype === c.feesHype));
+    expect(ties.length).toBeGreaterThan(4);
+    for (let i = 1; i < fees.contracts.length; i++) {
+      const [a, b] = [fees.contracts[i - 1], fees.contracts[i]];
+      expect(a.feesHype > b.feesHype || (a.feesHype === b.feesHype && a.address < b.address)).toBe(true);
+    }
+    const contracts = (await analytics.contractsView('7d').compute()) as { rows: Array<{ address: string; txs: number }> };
+    expect(contracts.rows).toHaveLength(25);
+    expect(new Set(contracts.rows.map((r) => r.txs)).size).toBeLessThan(25);
+  });
+
   it('still does a few minutes later, and once an hour has closed, before and after the builder`s pass', async () => {
     setClock(Date.now() + 7 * MINUTE_MS);
     expect(await sameBothWays()).toEqual({ fees: 3, contracts: 2 });
@@ -412,10 +453,11 @@ describe('window tables', () => {
     expect(delta).not.toBeNull();
     await expect(windowReader.feesFromWindow(state, plan, delta)).resolves.not.toBeNull();
     await expect(windowReader.feesFromWindow({ ...state, version: String(BigInt(state.version) + 1n) }, plan, delta)).resolves.toBeNull();
-    // A rollup it takes off that is not the one the table was read from.
-    const hour = state.coverHours[0];
-    const taken = { ...delta, subHours: [{ hour: hour.hour, at: hour.at + 1 }] };
-    await expect(windowReader.topContractsFromWindow(state, plan, taken)).resolves.toBeNull();
+    // A rollup the table stands for that is not the one it was read from, whether the delta takes it off or not.
+    const other = { ...state, coverHours: state.coverHours.map((h, i) => (i === 0 ? { ...h, at: h.at + 1 } : h)) };
+    await expect(windowReader.topContractsFromWindow(other, plan, delta)).resolves.toBeNull();
+    const otherDay = { ...state, coverDays: state.coverDays.map((d, i) => (i === 2 ? { ...d, at: d.at + 1 } : d)) };
+    await expect(windowReader.feesFromWindow(otherDay, plan, delta)).resolves.toBeNull();
   });
 
   it('refuses to bring a table to rollups that are not the ones the caller read', async () => {
@@ -427,6 +469,36 @@ describe('window tables', () => {
     await expect(windows.refresh(7, moved, { rebase: false })).resolves.toBe('stale');
     expect((await q<{ v: string }>(`SELECT version::text AS v FROM elysium_window_state WHERE span = 7`))[0].v).toBe(version);
     await expect(windows.refresh(9, moved, { rebase: false })).rejects.toThrow('Invalid window span');
+    // A day rebuilt since the base was summed, named with its new build time and no rebase asked.
+    const day = state.baseDays[1].day;
+    await x(`UPDATE elysium_day_rollup SET built_at = built_at + interval '1 second' WHERE day = $1::date`, day);
+    const rebuilt = (await readRollupCoverage(now)).built.days.get(day)!;
+    const target = { days: state.coverDays.map((d) => (d.day === day ? { ...d, at: rebuilt } : d)), hours: state.coverHours };
+    await expect(windows.refresh(7, target, { rebase: false })).resolves.toBe('stale');
+    await expect(windows.refresh(7, target, { rebase: true })).resolves.toBe('refreshed');
+    // The 30-day table holds that day too, at its old build time: it is not read until the builder has moved its base.
+    expect(await sameBothWays()).toEqual({ fees: 2, contracts: 2 });
+    await build();
+    await tablesMatchRaw();
+    expect(await sameBothWays()).toEqual({ fees: 3, contracts: 2 });
+  });
+
+  it('an address whose class changed and that has a transaction in the last hour is classed as of now, before the builder`s pass', async () => {
+    // An unknown address of the tables, with a transaction a few minutes ago, entered in the registry just now.
+    const recent = EOAS[7];
+    await ingest.insertTxs([tx(Date.now() - 10 * MINUTE_MS, { to_addr: recent }), tx(Date.now() - 9 * MINUTE_MS, { to_addr: EOAS[8] })]);
+    await x(`INSERT INTO elysium_token (address, standard, name, symbol, transfer_count) VALUES ($1, 'erc20', 'Recent', 'RCT', 1)`, recent);
+    // And a contract deployed a minute ago at an address the tables hold as unknown.
+    await ingest.insertTxs([tx(Date.now() - MINUTE_MS, { to_addr: null, contract_address: EOAS[8], from_addr: DEP2 })]);
+    expect((await kindOf(30, recent))?.kind).toBe(0);
+    expect((await kindOf(30, EOAS[8]))?.kind).toBe(0);
+    // No pass of the builder: the tables still say unknown, and the views say what the rollups alone say.
+    expect(await sameBothWays()).toEqual({ fees: 3, contracts: 2 });
+    const fees = (await analytics.feesView('30d').compute()) as { contracts: Array<{ address: string }>; deployers: Array<{ deployer: string; contracts: number }> };
+    expect(fees.contracts.map((c) => c.address)).toContain(recent);
+    await build();
+    await tablesMatchRaw();
+    expect(await sameBothWays()).toEqual({ fees: 3, contracts: 2 });
   });
 
   it('the other views that read the hours agree with elysium_tx', async () => {

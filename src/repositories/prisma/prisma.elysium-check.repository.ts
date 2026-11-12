@@ -504,6 +504,7 @@ export class ElysiumCheckRepository {
       `INSERT INTO elysium_hour_rollup (hour, dirty)
        SELECT DISTINCT date_trunc('hour', a::timestamptz, 'UTC'), true FROM unnest($1::text[]) AS a
        WHERE a::timestamptz < date_trunc('hour', now(), 'UTC')
+       ORDER BY 1
        ON CONFLICT (hour) DO UPDATE SET dirty = true WHERE NOT elysium_hour_rollup.dirty`,
       [...new Set(ats)]
     );

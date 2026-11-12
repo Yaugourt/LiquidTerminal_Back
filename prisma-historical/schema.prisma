@@ -471,7 +471,7 @@ model ElysiumDeployerWindow {
   contracts Int
 
   @@id([span, deployer])
-  @@index([span, feeWei(sort: Desc), deployer])
+  @@index([span, feeWei(sort: Desc), deployer], map: "elysium_deployer_window_fee_idx")
   @@map("elysium_deployer_window")
 }
 

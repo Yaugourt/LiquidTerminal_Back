@@ -164,6 +164,11 @@ export class ElysiumWindowRepository {
           const full = !state.ready || state.epoch !== epoch;
           const rebase = full || opts.rebase;
           const baseDays = rebase ? target.days : state.baseDays;
+          // A base that stays must be the sums of the days as the target names them: a day kept
+          // in both with another build time was rebuilt since the base was summed. The builder
+          // asks for a rebase then (windowWork); a caller that does not gets nothing changed.
+          const targetAt = new Map(target.days.map((d) => [d.day, d.at]));
+          if (!rebase && state.baseDays.some((d) => targetAt.has(d.day) && targetAt.get(d.day) !== d.at)) throw new WindowStaleError();
           const targetDays = new Set(target.days.map((d) => d.day));
           const baseSet = new Set(baseDays.map((d) => d.day));
           const addDays = target.days.filter((d) => !baseSet.has(d.day));

@@ -20,9 +20,9 @@ import type { WindowDelta, WindowState } from './elysium-window.util';
  * by the builder on each of its passes).
  *
  * Each statement also returns a guard: the table's version and whether the
- * rollups it takes off are still the ones the table was read from. A reader
- * that planned with another version, or finds one of them rebuilt, got sums
- * that do not belong together: it drops them and plans again.
+ * rollups it stands for are still the ones it was read from. A reader that
+ * planned with another version, or finds one of them rebuilt, got sums that
+ * do not belong together: it drops them and plans again.
  */
 
 const agg = prismaHistoricalAggregate;
@@ -30,14 +30,19 @@ const agg = prismaHistoricalAggregate;
 const texts = (values: Array<string | number>): string[] => values.map((v) => String(v));
 const isoHours = (hours: number[]): string[] => hours.map((h) => new Date(h).toISOString());
 
-/** The guard's columns: the table's version, and how many of the rollups taken off are the ones the table was read from. */
-function guardSql(span: number, delta: WindowDelta): Prisma.Sql {
+/**
+ * The guard's columns: the table's version, and how many of the rollups the table stands for
+ * are still the ones it was read from. All of them, not only the ones the delta takes off: a
+ * day both the table and the plan hold, rebuilt between the plan and this statement, would
+ * leave the table's sums of it beside the new day totals read here.
+ */
+function guardSql(state: WindowState): Prisma.Sql {
   return Prisma.sql`
-    SELECT (SELECT version::text FROM elysium_window_state WHERE span = ${span}::smallint) AS version,
-           (SELECT count(*) FROM unnest(${delta.subDays.map((d) => d.day)}::text[]::date[], ${texts(delta.subDays.map((d) => d.at))}::text[]::bigint[]) AS u(day, at)
+    SELECT (SELECT version::text FROM elysium_window_state WHERE span = ${state.span}::smallint) AS version,
+           (SELECT count(*) FROM unnest(${state.coverDays.map((d) => d.day)}::text[]::date[], ${texts(state.coverDays.map((d) => d.at))}::text[]::bigint[]) AS u(day, at)
              JOIN elysium_day_rollup r ON r.day = u.day
              WHERE r.built_at IS NOT NULL AND round(extract(epoch FROM r.built_at) * 1000)::bigint = u.at)::int AS days,
-           (SELECT count(*) FROM unnest(${isoHours(delta.subHours.map((h) => h.hour))}::text[]::timestamptz[], ${texts(delta.subHours.map((h) => h.at))}::text[]::bigint[]) AS u(hour, at)
+           (SELECT count(*) FROM unnest(${isoHours(state.coverHours.map((h) => h.hour))}::text[]::timestamptz[], ${texts(state.coverHours.map((h) => h.at))}::text[]::bigint[]) AS u(hour, at)
              JOIN elysium_hour_rollup r ON r.hour = u.hour
              WHERE r.built_at IS NOT NULL AND round(extract(epoch FROM r.built_at) * 1000)::bigint = u.at)::int AS hours`;
 }
@@ -79,8 +84,8 @@ function classedSql(span: number): Prisma.Sql {
     LEFT JOIN elysium_target_window w ON w.span = ${span}::smallint AND w.to_addr = e.address`;
 }
 
-function guardHolds(guard: { version: string | null; days: number; hours: number } | undefined, state: WindowState, delta: WindowDelta): boolean {
-  return guard !== undefined && guard.version === state.version && guard.days === delta.subDays.length && guard.hours === delta.subHours.length;
+function guardHolds(guard: { version: string | null; days: number; hours: number } | undefined, state: WindowState): boolean {
+  return guard !== undefined && guard.version === state.version && guard.days === state.coverDays.length && guard.hours === state.coverHours.length;
 }
 
 export interface FeeRow {
@@ -103,7 +108,7 @@ export async function feesFromWindow(state: WindowState, plan: RollupPlan, delta
     WITH st AS (
       SELECT * FROM elysium_window_state WHERE span = ${span}::smallint
     ),
-    guard AS (${guardSql(span, delta)}),
+    guard AS (${guardSql(state)}),
     raw AS MATERIALIZED (
       -- The raw part of the window, read once: per target for the non-spam transactions sent
       -- to an address, and one row (address NULL) for the rest, contract creations and spam.
@@ -210,7 +215,7 @@ export async function feesFromWindow(state: WindowState, plan: RollupPlan, delta
     (SELECT 'deployer', deployer, (fee / 1e18)::float8, txs::int, gas::text, n::int FROM dcand WHERE n > 0 ORDER BY fee DESC, deployer LIMIT 15)`);
 
   const guard = rows.find((r) => r.kind === 'guard');
-  if (!guardHolds(guard ? { version: guard.key, days: guard.txs, hours: guard.n } : undefined, state, delta)) return null;
+  if (!guardHolds(guard ? { version: guard.key, days: guard.txs, hours: guard.n } : undefined, state)) return null;
   return rows.filter((r) => r.kind !== 'guard');
 }
 
@@ -227,7 +232,7 @@ export interface TopContractRow {
 export async function topContractsFromWindow(state: WindowState, plan: RollupPlan, delta: WindowDelta): Promise<TopContractRow[] | null> {
   const span = state.span;
   const rows = await withWorkMem(agg, (tx) => tx.$queryRaw<Array<{ kind: string; address: string | null; txs: number; gas_used: string | null; n: number }>>`
-    WITH guard AS (${guardSql(span, delta)}),
+    WITH guard AS (${guardSql(state)}),
     e AS MATERIALIZED (${deltaSql(
       Prisma.sql`SELECT t.to_addr AS address, 0::numeric AS fee, count(*)::bigint AS txs, sum(t.gas_used) AS gas
                  FROM elysium_tx t
@@ -251,7 +256,7 @@ export async function topContractsFromWindow(state: WindowState, plan: RollupPla
     (SELECT 'contract', address, txs::int, gas::text, 0 FROM cand WHERE txs > 0 ORDER BY txs DESC, address LIMIT 25)`);
 
   const guard = rows.find((r) => r.kind === 'guard');
-  if (!guardHolds(guard ? { version: guard.address, days: guard.txs, hours: guard.n } : undefined, state, delta)) return null;
+  if (!guardHolds(guard ? { version: guard.address, days: guard.txs, hours: guard.n } : undefined, state)) return null;
   return rows
     .filter((r) => r.kind === 'contract' && r.address !== null)
     .map((r) => ({ address: r.address as string, txs: r.txs, gas_used: r.gas_used ?? '0' }));

@@ -168,6 +168,7 @@ export class ElysiumIngestRepository {
         SELECT DISTINCT date_trunc('hour', block_time, 'UTC'), true
         FROM ins
         WHERE block_time < date_trunc('hour', now(), 'UTC')
+        ORDER BY 1
         ON CONFLICT (hour) DO UPDATE SET dirty = true WHERE NOT elysium_hour_rollup.dirty
         RETURNING 1
       )

@@ -308,8 +308,38 @@ describe('ElysiumRollupService.tick', () => {
         stream: 'tx', cursor: new Date('2026-11-10T08:01:30.000Z'), rows: 0n, backfillDone: true, lastError: null, updatedAt: new Date(NOW),
       });
       listHours.mockResolvedValue(built(LAST));
-      await svc.tick();
+      // The hour has not been over for three minutes: nothing to wait the cursor for either.
+      await expect(svc.tick()).resolves.toBe(65_000);
       expect(buildHour).not.toHaveBeenCalled();
+    });
+
+    it('comes back 20 s later when an hour only waits for the cursor, seconds behind; not for a stream that stands still', async () => {
+      // 08:03:05, the pass of "end of the hour + 3 min": the cursor, moved every 30 s, is at 08:02:50.
+      (Date.now as jest.Mock).mockReturnValue(Date.parse('2026-11-10T08:03:05.000Z'));
+      const cursorAt = (iso: string): void => {
+        (states.getState as jest.Mock).mockResolvedValue({ stream: 'tx', cursor: new Date(iso), rows: 0n, backfillDone: true, lastError: null, updatedAt: new Date(NOW) });
+        listHours.mockImplementation(async () => closedRollupHours(new Date(iso), new Date(Date.now()), ELYSIUM_GENESIS).map((hour) => ({ hour, built: true, dirty: false })));
+      };
+      cursorAt('2026-11-10T08:02:50.000Z');
+      await expect(svc.tick()).resolves.toBe(20_000);
+      expect(buildHour).not.toHaveBeenCalled();
+      // The cursor passed: built, and the next pass is the next close.
+      cursorAt('2026-11-10T08:03:01.000Z');
+      listHours.mockResolvedValue(built(LAST));
+      await expect(svc.tick()).resolves.toBe(IDLE);
+      expect(buildHour).toHaveBeenCalledWith(LAST);
+      // A stream stopped for an hour is not polled every 20 s.
+      cursorAt('2026-11-10T07:02:00.000Z');
+      await expect(svc.tick()).resolves.toBe(IDLE);
+    });
+
+    it('a pass over the hours that cannot start is recorded, and the day is still built', async () => {
+      const recordError = jest.spyOn(states, 'recordError').mockResolvedValue(undefined);
+      listHours.mockRejectedValue(new Error('timeout exceeded when trying to connect'));
+      listDays.mockResolvedValue(allBuilt().slice(0, -1));
+      await svc.tick();
+      expect(buildDay).toHaveBeenCalledTimes(1);
+      expect(recordError).toHaveBeenCalledWith('rollup', 'hours: timeout exceeded when trying to connect');
     });
 
     it('redoes a dirty hour and an hour whose build never ended', async () => {
@@ -432,6 +462,17 @@ describe('ElysiumRollupService.tick', () => {
       expect((refresh.mock.calls[2][1] as { days: unknown[] }).days).toHaveLength(29);
     });
 
+    it('waits for the hours: no table is touched while a pass leaves hours to build', async () => {
+      readRollupCoverage.mockResolvedValue(coverageWith());
+      listHours.mockResolvedValue([]);
+      await expect(svc.tick()).resolves.toBe(SOON);
+      expect(buildHour).toHaveBeenCalledTimes(12);
+      expect(refresh).not.toHaveBeenCalled();
+      listHours.mockImplementation(async () => allHoursBuilt());
+      await svc.tick();
+      expect(refresh).toHaveBeenCalledTimes(3);
+    });
+
     it('reads the rollups` state on the writers` pool', async () => {
       readRollupCoverage.mockResolvedValue(coverageWith());
       await svc.tick();
@@ -513,6 +554,70 @@ describe('ElysiumRollupService.tick', () => {
       await expect(svc.tick()).resolves.toBe(SOON);
       expect(refresh).not.toHaveBeenCalled();
       expect(buildDay).toHaveBeenCalledTimes(1);
+    });
+
+    it('a table that keeps failing is left alone for 5 minutes, then 10: not started again on every pass', async () => {
+      jest.spyOn(states, 'recordError').mockResolvedValue(undefined);
+      readRollupCoverage.mockResolvedValue(coverageWith());
+      refresh.mockImplementation(async (span: number) => {
+        if (span === 30) throw new Error('canceling statement due to statement timeout');
+        return 'refreshed';
+      });
+      let clock = NOW;
+      (Date.now as jest.Mock).mockImplementation(() => clock);
+      const tries = (): number => refresh.mock.calls.filter((c) => c[0] === 30).length;
+      await svc.tick();
+      expect(tries()).toBe(1);
+      clock += 4 * 60_000;
+      await svc.tick();
+      expect(tries()).toBe(1);
+      clock += 2 * 60_000;
+      await svc.tick();
+      expect(tries()).toBe(2);
+      clock += 9 * 60_000;
+      await svc.tick();
+      expect(tries()).toBe(2);
+      clock += 2 * 60_000;
+      refresh.mockResolvedValue('refreshed');
+      await svc.tick();
+      expect(tries()).toBe(3);
+      // It went through: the builder's error is cleared.
+      expect(states.advance).toHaveBeenLastCalledWith('rollup', { cursor: new Date(clock) });
+    });
+
+    it('the pass over the classes that fails is left alone the same way', async () => {
+      const recordError = jest.spyOn(states, 'recordError').mockResolvedValue(undefined);
+      readRollupCoverage.mockResolvedValue(coverageWith());
+      reclassify.mockRejectedValue(new Error('lock timeout'));
+      let clock = NOW;
+      (Date.now as jest.Mock).mockImplementation(() => clock);
+      await svc.tick();
+      expect(recordError).toHaveBeenCalledWith('rollup', 'window classes: lock timeout');
+      clock += 4 * 60_000;
+      await svc.tick();
+      expect(reclassify).toHaveBeenCalledTimes(1);
+      clock += 2 * 60_000;
+      await svc.tick();
+      expect(reclassify).toHaveBeenCalledTimes(2);
+    });
+
+    it('a day whose build keeps failing is not waited for: the tables are made without it', async () => {
+      const failing = '2026-10-20';
+      jest.spyOn(states, 'recordError').mockResolvedValue(undefined);
+      listDays.mockResolvedValue(allBuilt().filter((d) => d.day !== failing));
+      buildDay.mockRejectedValue(new Error('statement timeout'));
+      const coverage = coverageWith();
+      coverage.days.delete(failing);
+      (coverage.built.days as Map<string, number>).delete(failing);
+      readRollupCoverage.mockResolvedValue(coverage);
+      // First pass: the day is still being tried, the 30-day table waits for it.
+      await svc.tick();
+      expect(refresh.mock.calls.map((c) => c[0])).toEqual([1, 7]);
+      // Its build failed: on the next pass the table is made from the 28 days that are built.
+      await svc.tick();
+      const last = refresh.mock.calls[refresh.mock.calls.length - 1] as [number, { days: unknown[] }];
+      expect(last[0]).toBe(30);
+      expect(last[1].days).toHaveLength(28);
     });
 
     it('does nothing to the tables when they are switched off', async () => {

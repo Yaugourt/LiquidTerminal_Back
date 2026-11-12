@@ -214,6 +214,18 @@ What to do:
   same `ready = false` as above.
 - Disk: the hour rollups hold about 6 days of hours and the three tables a row per address
   called in their window; together about 13 % of the transaction table.
+- **Going back to a release from before 2026-11-12, then forward again**: the older code does
+  not mark an hour when it writes to `elysium_tx`, so the hours built before the rollback may
+  have missed transactions when the newer code returns. Empty them before redeploying it; the
+  builder builds the hours it wants again within minutes, and the window tables follow:
+
+  ```sql
+  DELETE FROM elysium_hour_rollup;
+  DELETE FROM elysium_call_hour;
+  UPDATE elysium_window_state SET ready = false, version = version + 1 WHERE span > 0;
+  ```
+
+  The day rollups need nothing: every release since 2026-11-10 marks the days.
 
 ## 7. Rows were left out
 
