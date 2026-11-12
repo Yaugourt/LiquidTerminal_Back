@@ -1754,12 +1754,14 @@ export class ElysiumAnalyticsService {
             WHERE s.tx_from = ${a} AND (SELECT done FROM copy)
             UNION ALL
             SELECT s.pool, s.block_time
-            FROM elysium_tx t JOIN elysium_dex_swap s ON s.tx_hash = t.tx_hash AND s.block_time = t.block_time
+            FROM elysium_tx t JOIN elysium_dex_swap s ON s.tx_hash = t.tx_hash
+              AND s.block_time >= t.block_time - interval '1 day' AND s.block_time <= t.block_time + interval '1 day'
             WHERE (SELECT done FROM copy) AND t.from_addr = ${a}
               AND t.block_time >= ${ts(new Date(now.getTime() - SWAP_SENDER_LAG_MS))}::timestamptz AND s.tx_from IS NULL
             UNION ALL
             SELECT s.pool, s.block_time
-            FROM elysium_tx t JOIN elysium_dex_swap s ON s.tx_hash = t.tx_hash AND s.block_time = t.block_time
+            FROM elysium_tx t JOIN elysium_dex_swap s ON s.tx_hash = t.tx_hash
+              AND s.block_time >= t.block_time - interval '1 day' AND s.block_time <= t.block_time + interval '1 day'
             WHERE NOT (SELECT done FROM copy) AND t.from_addr = ${a}
           ) u`,
         prismaHistoricalRead.$queryRaw<

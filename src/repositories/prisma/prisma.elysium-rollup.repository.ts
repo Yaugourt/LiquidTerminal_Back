@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { prismaHistorical } from '../../core/prisma.historical.service';
 import { BRIDGE_TX_TYPES } from '../../services/elysium/elysium-ingest.util';
 import { HOUR_MS, ROLLUP_CALLER_SET_MIN_TXS } from '../../services/elysium/elysium-rollup.util';
+import { ElysiumPartitionRepository } from './prisma.elysium-partition.repository';
 
 /** Constant SQL list of the bridge tx types (no user input involved). */
 const BRIDGE_TYPES_SQL = BRIDGE_TX_TYPES.map((t) => `'${t}'`).join(', ');
@@ -43,6 +44,19 @@ export type RollupBuildResult =
 
 class RollupDayDirtyError extends Error {}
 class RollupBusyError extends Error {}
+
+/**
+ * Refuses to build a rollup from a span elysium_tx no longer holds (its old days are dropped
+ * once a keep is set): the build would find no transaction and replace the real rollup, which
+ * nothing could then bring back, with an empty one. The builder's pass leaves these out; this
+ * is for whatever else would ask (a day marked to be rebuilt by hand).
+ */
+async function assertHeld(startMs: number, what: string): Promise<void> {
+  const heldFromMs = await ElysiumPartitionRepository.getInstance().floorMs();
+  if (heldFromMs !== null && startMs < heldFromMs) {
+    throw new Error(`Rollup not built: the transactions of ${what} are no longer held (elysium_tx starts ${new Date(heldFromMs).toISOString()})`);
+  }
+}
 
 function assertDay(day: string): void {
   if (!DAY_RE.test(day)) throw new Error(`Invalid rollup day: ${day}`);
@@ -99,6 +113,7 @@ export class ElysiumRollupRepository {
     const from = `${day}T00:00:00.000Z`;
     const to = new Date(Date.parse(from) + 86_400_000).toISOString();
     const token = randomUUID();
+    await assertHeld(Date.parse(from), `day ${day}`);
 
     // Another build is running, of this day or of another: its row is left alone. The reset
     // below used to come first, and took the running build's token with it: the build that was
@@ -249,6 +264,7 @@ export class ElysiumRollupRepository {
     const from = new Date(hourMs).toISOString();
     const to = new Date(hourMs + HOUR_MS).toISOString();
     const token = randomUUID();
+    await assertHeld(hourMs, `hour ${from}`);
 
     const free = await prismaHistorical.$queryRawUnsafe<Array<{ ok: boolean }>>(
       `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok`,

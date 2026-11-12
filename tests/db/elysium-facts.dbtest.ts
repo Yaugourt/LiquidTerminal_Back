@@ -153,13 +153,14 @@ describe("the transaction's sender on the rows read from its logs", () => {
 
   it('is copied where the transaction is held, at the same time; a row that names its own trader or creator is left alone', async () => {
     const copied = await facts.copyTxSenders(new Date(today - DAY_MS), new Date(today + DAY_MS));
-    expect(copied).toEqual({ swaps: 2, trades: 1, launches: 1 });
+    expect(copied).toEqual({ swaps: 3, trades: 1, launches: 1 });
     expect(await q(`SELECT log_index, tx_from FROM elysium_dex_swap ORDER BY tx_hash, log_index`)).toEqual(
       expect.arrayContaining([
         { log_index: 0, tx_from: sender },
         { log_index: 1, tx_from: sender },
-        // Same hash, another time: not the same transaction row.
-        { log_index: 2, tx_from: null },
+        // Read from the log with another time than the transaction now has (the chain put it in
+        // another block and the daily comparison moved it): still its swap.
+        { log_index: 2, tx_from: sender },
       ])
     );
     expect(await q(`SELECT tx_from FROM elysium_dex_swap WHERE tx_hash = $1`, H(0xdead01))).toEqual([{ tx_from: null }]);
@@ -180,7 +181,7 @@ describe("the transaction's sender on the rows read from its logs", () => {
     expect(await facts.copyTxSenders(new Date(today - DAY_MS), new Date(today + DAY_MS))).toEqual({ swaps: 0, trades: 0, launches: 0 });
     await x(`UPDATE elysium_dex_swap SET tx_from = NULL`);
     expect(await facts.copyTxSenders(new Date(today - 3 * DAY_MS), new Date(today - 2 * DAY_MS))).toEqual({ swaps: 0, trades: 0, launches: 0 });
-    expect(await facts.copyTxSenders(new Date(today - DAY_MS), new Date(today + DAY_MS))).toMatchObject({ swaps: 2 });
+    expect(await facts.copyTxSenders(new Date(today - DAY_MS), new Date(today + DAY_MS))).toMatchObject({ swaps: 3 });
   });
 
   it("an address's swaps are the same before the copy has been through the history, and after", async () => {
@@ -188,12 +189,70 @@ describe("the transaction's sender on the rows read from its logs", () => {
     // No row for the copy yet: the page goes through elysium_tx.
     await x(`UPDATE elysium_dex_swap SET tx_from = NULL`);
     await x(`DELETE FROM elysium_ingest_state WHERE stream = 'txsender'`);
-    expect(await swapsOf()).toEqual({ swaps: 2, pools: 1, swaps24h: 2 });
+    expect(await swapsOf()).toEqual({ swaps: 3, pools: 1, swaps24h: 3 });
     // History copied, and these recent swaps not yet: still found, through the transactions of the last hours.
     await repo.advance('txsender', { cursor: new Date(), backfillDone: true });
-    expect(await swapsOf()).toEqual({ swaps: 2, pools: 1, swaps24h: 2 });
+    expect(await swapsOf()).toEqual({ swaps: 3, pools: 1, swaps24h: 3 });
     await facts.copyTxSenders(new Date(today - DAY_MS), new Date(today + DAY_MS));
-    expect(await swapsOf()).toEqual({ swaps: 2, pools: 1, swaps24h: 2 });
+    expect(await swapsOf()).toEqual({ swaps: 3, pools: 1, swaps24h: 3 });
+  });
+});
+
+describe("the sender of transactions that arrive long after their logs", () => {
+  const sender = A(0x5e3);
+  const swapAt = (hash: string, time: string): Promise<number> =>
+    x(
+      `INSERT INTO elysium_dex_swap (tx_hash, log_index, pool, version, block_time, block_number, sender, recipient, amount0, amount1)
+       VALUES ($1, 0, $2, 'v2', $3::timestamptz, 1, $4, $4, 1, -1)`,
+      hash,
+      A(0x9002),
+      time,
+      A(0x79)
+    );
+
+  beforeAll(wipe);
+
+  it('a page of old transactions gives the swaps read from their logs a sender, whether it stores them or finds them stored', async () => {
+    const old = tx({ block_time: at(30, 500), from_addr: sender });
+    await swapAt(old.tx_hash, old.block_time);
+    expect((await repo.insertTxs([old])).inserted).toBe(1);
+    expect(await q(`SELECT tx_from FROM elysium_dex_swap WHERE tx_hash = $1`, old.tx_hash)).toEqual([{ tx_from: sender }]);
+    // Read again after the copy had failed the first time: nothing to store, the sender still to copy.
+    await x(`UPDATE elysium_dex_swap SET tx_from = NULL`);
+    expect((await repo.insertTxs([old])).inserted).toBe(0);
+    expect(await q(`SELECT tx_from FROM elysium_dex_swap WHERE tx_hash = $1`, old.tx_hash)).toEqual([{ tx_from: sender }]);
+  });
+
+  it('the copy goes from where it stopped to where the tx stream stands, however far that is, and is done only once that stream has been through the history', async () => {
+    const upkeep = ElysiumUpkeepService.getInstance() as unknown as {
+      copySenders: (now: Date, tx: { cursor: Date | null; backfillDone: boolean } | null) => Promise<boolean>;
+    };
+    await wipe();
+    // The tx stream stood still for 20 days while the swaps kept arriving, then read them all at once.
+    const rows = [18, 12, 6, 1].map((n) => tx({ block_time: at(n, 900), from_addr: sender }));
+    for (const r of rows) await swapAt(r.tx_hash, r.block_time);
+    await x(
+      `INSERT INTO elysium_tx (tx_hash, block_number, block_time, from_addr, to_addr, gas_used, fee_wei, success, is_spam)
+       SELECT tx_hash, block_number, block_time, from_addr, to_addr, 1, 1, true, false
+       FROM jsonb_to_recordset($1::jsonb) AS r(tx_hash text, block_number bigint, block_time timestamptz, from_addr text, to_addr text)`,
+      JSON.stringify(rows)
+    );
+    await repo.advance('txsender', { cursor: new Date(today - 20 * DAY_MS), backfillDone: true });
+    const now = new Date();
+    let passes = 0;
+    while ((await upkeep.copySenders(now, { cursor: now, backfillDone: true })) && passes < 30) passes += 1;
+    expect(await q(`SELECT count(*)::int AS n FROM elysium_dex_swap WHERE tx_from = $1`, sender)).toEqual([{ n: 4 }]);
+
+    // A database whose tx stream is still loading the chain's history: the copy follows it, and does not say it is done.
+    await x(`DELETE FROM elysium_ingest_state WHERE stream = 'txsender'`);
+    await x(`UPDATE elysium_dex_swap SET tx_from = NULL`);
+    const early = new Date(today - 15 * DAY_MS);
+    while ((await upkeep.copySenders(now, { cursor: early, backfillDone: false })) && passes < 200) passes += 1;
+    expect(await q(`SELECT backfill_done FROM elysium_ingest_state WHERE stream = 'txsender'`)).toEqual([{ backfill_done: false }]);
+    expect(await q(`SELECT count(*)::int AS n FROM elysium_dex_swap WHERE tx_from = $1`, sender)).toEqual([{ n: 1 }]);
+    while ((await upkeep.copySenders(now, { cursor: now, backfillDone: true })) && passes < 400) passes += 1;
+    expect(await q(`SELECT backfill_done FROM elysium_ingest_state WHERE stream = 'txsender'`)).toEqual([{ backfill_done: true }]);
+    expect(await q(`SELECT count(*)::int AS n FROM elysium_dex_swap WHERE tx_from = $1`, sender)).toEqual([{ n: 4 }]);
   });
 });
 

@@ -63,8 +63,8 @@ export class ElysiumFactsRepository {
    * Copies the sender of their transaction onto the swaps, the trades without a trader and the
    * launches without a creator of ]after, upTo] that do not have it yet. A row and its
    * transaction are in the same block, so they carry the same time: the lookup names the hash
-   * and the time, and only reads the days of the span. A row whose transaction elysium_tx does
-   * not hold is left as it is. Returns how many rows got a sender.
+   * and the time (a day on each side), and only reads the days around the span. A row whose
+   * transaction elysium_tx does not hold is left as it is. Returns how many rows got a sender.
    */
   public async copyTxSenders(after: Date, upTo: Date): Promise<{ swaps: number; trades: number; launches: number }> {
     if (!(after.getTime() < upTo.getTime())) return { swaps: 0, trades: 0, launches: 0 };
@@ -73,14 +73,30 @@ export class ElysiumFactsRepository {
     return prismaHistorical.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${SENDER_TIMEOUT_MS}`);
+        // The launches are locked first and in one order, before anything else is written, as
+        // every writer of a launch does (the trade insert, a rebuild of the market state, a
+        // removal): two of them then wait for each other instead of deadlocking.
+        await tx.$queryRawUnsafe(
+          `SELECT token FROM elysium_launch
+           WHERE creator IS NULL AND tx_from IS NULL
+             AND created_at > $1::timestamptz AND created_at <= $2::timestamptz
+           ORDER BY token FOR UPDATE`,
+          from,
+          to
+        );
         // Each lookup is a subquery run for one row that lacks its sender (OFFSET 0 keeps the rows
-        // to fill a list of their own): however many there are, a row opens the one day of
-        // elysium_tx its transaction is in, and never the whole span.
+        // to fill a list of their own): however many there are, a row opens the day of
+        // elysium_tx its transaction is in and the one on each side (a transaction the chain put
+        // in another block since has another time than the row read from its log), never the
+        // whole span.
         const swaps = await tx.$executeRawUnsafe(
           `UPDATE elysium_dex_swap s SET tx_from = todo.sender
            FROM (
              SELECT r.tx_hash, r.log_index,
-                    (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = r.tx_hash AND t.block_time = r.block_time LIMIT 1) AS sender
+                    (SELECT t.from_addr FROM elysium_tx t
+                      WHERE t.tx_hash = r.tx_hash
+                        AND t.block_time >= r.block_time - interval '1 day' AND t.block_time <= r.block_time + interval '1 day'
+                      LIMIT 1) AS sender
              FROM elysium_dex_swap r
              WHERE r.tx_from IS NULL AND r.block_time > $1::timestamptz AND r.block_time <= $2::timestamptz
              OFFSET 0
@@ -93,7 +109,10 @@ export class ElysiumFactsRepository {
           `UPDATE elysium_launch_trade s SET tx_from = todo.sender
            FROM (
              SELECT r.tx_hash, r.log_index,
-                    (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = r.tx_hash AND t.block_time = r.block_time LIMIT 1) AS sender
+                    (SELECT t.from_addr FROM elysium_tx t
+                      WHERE t.tx_hash = r.tx_hash
+                        AND t.block_time >= r.block_time - interval '1 day' AND t.block_time <= r.block_time + interval '1 day'
+                      LIMIT 1) AS sender
              FROM elysium_launch_trade r
              WHERE r.trader IS NULL AND r.tx_from IS NULL
                AND r.block_time > $1::timestamptz AND r.block_time <= $2::timestamptz
@@ -103,22 +122,14 @@ export class ElysiumFactsRepository {
           from,
           to
         );
-        // The launches are locked first and in one order, as every writer of a launch does (the
-        // trade insert, a rebuild of the market state): two of them then wait for each other
-        // instead of deadlocking.
-        await tx.$queryRawUnsafe(
-          `SELECT token FROM elysium_launch
-           WHERE creator IS NULL AND tx_from IS NULL
-             AND created_at > $1::timestamptz AND created_at <= $2::timestamptz
-           ORDER BY token FOR UPDATE`,
-          from,
-          to
-        );
         const launches = await tx.$executeRawUnsafe(
           `UPDATE elysium_launch l SET tx_from = todo.sender
            FROM (
              SELECT r.token,
-                    (SELECT t.from_addr FROM elysium_tx t WHERE t.tx_hash = r.tx_hash AND t.block_time = r.created_at LIMIT 1) AS sender
+                    (SELECT t.from_addr FROM elysium_tx t
+                      WHERE t.tx_hash = r.tx_hash
+                        AND t.block_time >= r.created_at - interval '1 day' AND t.block_time <= r.created_at + interval '1 day'
+                      LIMIT 1) AS sender
              FROM elysium_launch r
              WHERE r.creator IS NULL AND r.tx_from IS NULL
                AND r.created_at > $1::timestamptz AND r.created_at <= $2::timestamptz

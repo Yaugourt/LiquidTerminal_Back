@@ -21,7 +21,7 @@ const SPLIT_BOUND_CONSTRAINT = 'elysium_tx_split_bound';
  * A statement of the split that needs the table for itself waits this long for it, then gives
  * the pass up: every statement that arrives meanwhile waits behind it.
  */
-const EXCLUSIVE_LOCK_TIMEOUT_MS = 3_000;
+const EXCLUSIVE_LOCK_TIMEOUT_MS = 2_000;
 /** The one pass over every row of elysium_tx (the check of the bound): no time limit of the pool's applies to it. */
 const VALIDATE_TIMEOUT_MS = 3 * 3_600_000;
 
@@ -32,6 +32,8 @@ export interface TxLayout {
   parts: TxPartition[];
   /** A table whose detach was started and not finished. */
   detaching: string[];
+  /** A part taken out of elysium_tx whose table is still there (a drop that stopped between its two statements). */
+  orphans: string[];
   /** While not split: the bound being prepared, and whether every row was checked against it. */
   pending: { cutMs: number; validated: boolean } | null;
 }
@@ -112,6 +114,7 @@ export class ElysiumPartitionRepository {
         partitioned: false,
         parts: [],
         detaching: [],
+        orphans: [],
         pending: c && c.cut_ms !== null ? { cutMs: Math.round(Number(c.cut_ms)), validated: c.validated } : null,
       };
     }
@@ -135,7 +138,15 @@ export class ElysiumPartitionRepository {
       parts.push({ name: r.name, fromMs: r.lo_ms === null ? null : Math.round(Number(r.lo_ms)), toMs: Math.round(Number(r.hi_ms)) });
     }
     parts.sort((a, b) => a.toMs - b.toMs);
-    return { partitioned: true, parts, detaching, pending: null };
+    // Tables with a part's name that are no longer parts: only a drop makes one (a day table is
+    // created and attached in one transaction), when it stopped after the detach.
+    const loose = await prismaHistorical.$queryRawUnsafe<Array<{ name: string }>>(
+      `SELECT c.relname::text AS name FROM pg_class c
+       WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind = 'r'
+         AND (c.relname = '${LEGACY_PARTITION}' OR c.relname ~ '^elysium_tx_d[0-9]{8}$')
+         AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)`
+    );
+    return { partitioned: true, parts, detaching, orphans: loose.map((r) => r.name), pending: null };
   }
 
   /**
@@ -197,6 +208,9 @@ export class ElysiumPartitionRepository {
           // No day or hour is being read into its rollup, no window table refreshed: they hold the table for minutes.
           const free = await tx.$queryRawUnsafe<Array<{ ok: boolean }>>(`SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok`, BUILD_LOCK_KEY);
           if (!free[0]?.ok) return 'busy' as const;
+          await tx.$executeRawUnsafe(`LOCK TABLE elysium_tx IN ACCESS EXCLUSIVE MODE`);
+          // Read under the lock: another process cannot replace the bound between this and the attach
+          // (which would then read every row with the table held).
           const check = await tx.$queryRawUnsafe<Array<{ ok: boolean }>>(
             `SELECT con.convalidated
                     AND (regexp_match(pg_get_constraintdef(con.oid), '''([^'']+)'''))[1]::timestamptz = $1::timestamptz AS ok
@@ -205,7 +219,6 @@ export class ElysiumPartitionRepository {
             cut
           );
           if (!check[0]?.ok) throw new Error('elysium_tx split: the bound is not verified');
-          await tx.$executeRawUnsafe(`LOCK TABLE elysium_tx IN ACCESS EXCLUSIVE MODE`);
           await tx.$executeRawUnsafe(`ALTER TABLE elysium_tx RENAME TO ${LEGACY_PARTITION}`);
           await tx.$executeRawUnsafe(
             `CREATE TABLE elysium_tx (LIKE ${LEGACY_PARTITION} INCLUDING DEFAULTS INCLUDING STORAGE) PARTITION BY RANGE (block_time)`
@@ -280,9 +293,14 @@ export class ElysiumPartitionRepository {
    * read the part without blocking the ones that arrive (it is not one transaction: a detach
    * interrupted half-way is finished by the next call).
    */
-  public async drop(part: string, state: 'attached' | 'detaching'): Promise<void> {
+  public async drop(part: string, state: 'attached' | 'detaching' | 'orphan'): Promise<void> {
     if (part !== LEGACY_PARTITION && partitionDay(part) === null) throw new Error(`Not a part of elysium_tx: ${part}`);
     const name = quoteIdent(part);
+    if (state === 'orphan') {
+      // Already taken out: only its table is left.
+      await prismaHistorical.$executeRawUnsafe(`DROP TABLE IF EXISTS ${name}`);
+      return;
+    }
     // Each statement on its own (a concurrent detach cannot run inside a transaction), under the
     // writers' pool's own limits: it waits at most that long for the statements still reading the part.
     if (state === 'detaching') {
@@ -327,7 +345,9 @@ export class ElysiumPartitionRepository {
       // left unfinished for days (the upkeep pass stopped). The bound is taken off so that the
       // table takes its rows again; the upkeep prepares a new one when it runs.
       const cut = layout.pending?.cutMs;
-      if (cut === undefined || !days.some((day) => dayStartMs(day) + DAY_MS > cut)) return 0;
+      const ahead = Math.floor(now.getTime() / DAY_MS) * DAY_MS + PARTITIONS_AHEAD_DAYS * DAY_MS;
+      // Only for a row of today or the days ahead: a row with an absurd time is refused, and the bound stays.
+      if (cut === undefined || !days.some((day) => dayStartMs(day) + DAY_MS > cut && dayStartMs(day) <= ahead)) return 0;
       await prismaHistorical.$transaction(
         async (tx) => {
           await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = ${EXCLUSIVE_LOCK_TIMEOUT_MS}`);
@@ -349,6 +369,15 @@ export class ElysiumPartitionRepository {
       if (await this.ensureDay(day)) made += 1;
     }
     return made;
+  }
+
+  /** The time of the newest transaction held (epoch ms); null when there is none. */
+  public async newestTxMs(): Promise<number | null> {
+    const rows = await prismaHistorical.$queryRawUnsafe<Array<{ ms: number | null }>>(
+      `SELECT (extract(epoch FROM max(block_time)) * 1000)::float8 AS ms FROM elysium_tx`
+    );
+    const ms = rows[0]?.ms;
+    return ms === null || ms === undefined ? null : Math.round(Number(ms));
   }
 
   /** The UTC days of the last `days` whose rollup is built and not marked to be rebuilt. */

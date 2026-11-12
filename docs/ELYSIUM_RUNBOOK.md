@@ -169,9 +169,14 @@ without a rollup is still served, from the raw table, slower, with the same figu
   ```
 
   The views stop reading that day's rollup at once and read the raw table until it is built
-  again (a day takes from a few seconds to a few minutes).
+  again (a day takes from a few seconds to a few minutes). **Only for a day `elysium_tx` still
+  holds** (`database.tx.heldFrom` in `/status/ops`; null: every day): once old days are dropped
+  (section 9), the rollup of a dropped day is all that is left of it. The builder refuses to
+  build such a day again, and a day marked this way would stay unread by the views: set it back
+  (`dirty = false`).
 - The rollups themselves are the suspect: `ELYSIUM_ROLLUPS_ENABLED=false` on every service makes
   every view read the raw table alone, as before 2026-11-10 (the long windows get much slower).
+  Not once old days of `elysium_tx` are dropped under a keep: the views would then miss them.
 - Disk: `ELYSIUM_ROLLUP_KEEP_DAYS` (63 by default) is how many days are kept.
 
 ### Hours and window tables
@@ -290,6 +295,8 @@ of 1,000,000 was passed on most days.
 
 2. Grow the volume (Railway resizes it live, no restart), then update `HISTORICAL_DB_VOLUME_BYTES`.
 3. Free room without losing data: fewer rollup days (`ELYSIUM_ROLLUP_KEEP_DAYS`, never under 10).
+   Only while no keep is set on `elysium_tx` (below): with one, the rollups are what is left of
+   the dropped days, and the code holds them to 63 days whatever this variable says.
 4. Do not let it reach 100%: a full volume stops every write, and Postgres itself can stop. The
    streams then fail and read on from their cursors once there is room; what they could not
    store meanwhile is read again from the provider, as long as it keeps its history.
@@ -302,7 +309,8 @@ of 1,000,000 was passed on most days.
 nothing a page shows needs its old rows any more: what is shown "since the first block" lives in
 small tables the upkeep pass keeps (`elysium_target_seen`, `elysium_address_method`,
 `elysium_project_wallet`: the *history facts*, folded one day at a time, 10 days after the day
-ended), and the views read at most the last 63 days, from the rollups. Where it stands:
+ended), and the views go back 60 days at most (from the rollups, and from `elysium_tx` itself for
+the partial day at the far end of a window and for a day whose rollup is missing). Where it stands:
 `database.tx` in `/status/ops` (`split`, `parts`, `heldFrom`, `keepDays`, `factsThrough`), and
 the `upkeep` rows `txsender`, `facts`, `txparts`.
 
@@ -311,16 +319,19 @@ Two variables, on the service that runs the ingestion, each needs a restart:
 | Variable | Effect |
 | --- | --- |
 | `ELYSIUM_TX_SPLIT_ENABLED=true` | the table is split in one table per UTC day (once, see below) |
-| `ELYSIUM_TX_KEEP_DAYS=<n>` | once split, the days older than `n` are dropped, a table at a time; never fewer than 35 days (65 if the rollups are off or kept less than 63 days); unset: nothing is ever dropped |
+| `ELYSIUM_TX_KEEP_DAYS=<n>` | once split, the days older than `n` are dropped, a table at a time; never fewer than 65 days; unset: nothing is ever dropped |
 
 **The split.** It copies nothing. The upkeep pass (1) adds a check "every row is before the day
 after tomorrow" (instant), (2) has Postgres verify it against every row (one read of the whole
 table: minutes; reads and writes go on), (3) in one transaction of a few milliseconds renames
 the table to `elysium_tx_legacy`, creates the split `elysium_tx` with it as its first part, and
-adds the tables of the first days. Step 3 needs the table for itself: it waits 3 s at most, gives
-up if a rollup build is running or a long read holds the table, and is tried again a minute
-later (`Elysium upkeep: elysium_tx is split by day` in the log when done). A day's table is made
-3 days ahead; an insert that finds none makes it.
+adds the tables of the first days. Steps 1 and 3 need the table for itself for an instant: each
+waits 2 s at most (every statement on the table waits behind it meanwhile), gives up if a
+rollup build is running or a long read holds the table, and is tried again a minute later
+(`Elysium upkeep: elysium_tx is split by day` in the log when done). A day's table is made
+3 days ahead; an insert that finds none makes it. If `txparts` says `error` and the log names a
+transaction "dated after the split bound": a row with an absurd time is in the table; correct or
+delete it, the split starts on the next pass.
 
 **Before switching the split on**: the releases before 2026-11-12 cannot write to a split table
 (their insert names a conflict column the split table has no index on). Once split, going back
@@ -330,10 +341,14 @@ a few days.
 **What a keep frees, and when.** Everything stored before the split is one part
 (`elysium_tx_legacy`): it goes as a whole, the day its newest row leaves the keep. With a keep of
 `n` days set at the split, the disk therefore keeps growing for `n` more days, then drops by the
-size of that part, and stays level after. A day is dropped only when: it is wholly older than
-the keep, the history facts go past it (`factsThrough`), and, if it is within the last 63 days,
-its day rollup is built. `Elysium upkeep: part of elysium_tx dropped` in the log; two tables a
-pass at most.
+size of that part, and stays level after. A part is dropped only when: it is wholly older than
+the keep, the history facts go past it (`factsThrough`), the copy of the senders has been
+through it (`txsender` done), and every older part is gone (no day is ever missing in the
+middle: `heldFrom` is where `elysium_tx` starts). `Elysium upkeep: part of elysium_tx dropped`
+in the log; two tables a pass at most.
+
+With a keep set, do not switch the rollups off (`ELYSIUM_ROLLUPS_ENABLED=false`) and do not mark
+a dropped day to be rebuilt (section 6): the rollups are what is left of those days.
 
 Dropping is final: a transaction older than the oldest day kept is no longer stored when the
 provider lists it again (counted as `older-than-kept` in `rejects`, with a message), and a figure
@@ -341,21 +356,25 @@ provider lists it again (counted as `older-than-kept` in `rejects`, with a messa
 the days still held.
 
 **Undoing the split** (to go back to an older release), while `elysium_tx_legacy` is still
-there. Stop the ingestion first (`ELYSIUM_INGEST_ENABLED=false`), then, in one transaction:
+there. Stop the ingestion first, on every service that runs it (`ELYSIUM_INGEST_ENABLED=false`,
+the worker stopped), and remove `ELYSIUM_TX_SPLIT_ENABLED` and `ELYSIUM_TX_KEEP_DAYS`. Then, in
+one transaction:
 
 ```sql
 BEGIN;
 LOCK TABLE elysium_tx IN ACCESS EXCLUSIVE MODE;
 ALTER TABLE elysium_tx DETACH PARTITION elysium_tx_legacy;
 ALTER TABLE elysium_tx_legacy DROP CONSTRAINT IF EXISTS elysium_tx_split_bound;
-INSERT INTO elysium_tx_legacy SELECT * FROM elysium_tx;   -- the rows of the day tables
+-- The rows of the day tables. ON CONFLICT: a transaction held twice, a day apart, is kept once.
+INSERT INTO elysium_tx_legacy SELECT * FROM elysium_tx ON CONFLICT (tx_hash) DO NOTHING;
 DROP TABLE elysium_tx;                                     -- and the day tables with it
 ALTER TABLE elysium_tx_legacy RENAME TO elysium_tx;
 COMMIT;
 ```
 
-and leave `ELYSIUM_TX_SPLIT_ENABLED` unset. (`tests/db/elysium-partitions.dbtest.ts` runs this
-statement by statement.)
+The table is held for as long as the copy of the day tables' rows takes (about a minute per
+GB of them): the pages that read `elysium_tx` wait meanwhile, the views already computed stay
+served. (`tests/db/elysium-partitions.dbtest.ts` runs this statement by statement.)
 
 **A migration that changes `elysium_tx`** after the split: adding a column applies to every
 part at once; an index created on `elysium_tx` is built on every part inside the migration's

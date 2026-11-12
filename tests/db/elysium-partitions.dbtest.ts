@@ -14,10 +14,11 @@ import { prismaHistorical, prismaHistoricalAggregate, prismaHistoricalPages, pri
 import { ElysiumCheckRepository } from '../../src/repositories/prisma/prisma.elysium-check.repository';
 import { ElysiumFactsRepository } from '../../src/repositories/prisma/prisma.elysium-facts.repository';
 import { ElysiumPartitionRepository, LEGACY_PARTITION } from '../../src/repositories/prisma/prisma.elysium-partition.repository';
-import { BUILD_LOCK_KEY } from '../../src/repositories/prisma/prisma.elysium-rollup.repository';
+import { BUILD_LOCK_KEY, ElysiumRollupRepository } from '../../src/repositories/prisma/prisma.elysium-rollup.repository';
 import { ElysiumIngestRepository } from '../../src/repositories/prisma/prisma.elysium.repository';
 import { pgErrorCode } from '../../src/services/elysium/elysium-ingest.util';
 import { partitionName, TX_KEEP_MIN_DAYS } from '../../src/services/elysium/elysium-retention.util';
+import { ElysiumRollupService } from '../../src/services/elysium/elysium-rollup.service';
 import { directoryContracts, ElysiumUpkeepService } from '../../src/services/elysium/elysium-upkeep.service';
 import { A, H, disconnect, forgetSplitLayout, q, unsplit, wipe, wipeTables, x, type TxFixture } from './helpers';
 
@@ -78,7 +79,7 @@ describe('the split, from one plain table', () => {
   });
 
   it('a plain table says so, stores as before and has no floor', async () => {
-    expect(await parts.layout()).toEqual({ partitioned: false, parts: [], detaching: [], pending: null });
+    expect(await parts.layout()).toEqual({ partitioned: false, parts: [], detaching: [], orphans: [], pending: null });
     expect(await parts.floorMs()).toBeNull();
     expect((await repo.insertTxs(before)).inserted).toBe(0);
   });
@@ -279,13 +280,13 @@ describe('undoing the split, as the runbook says', () => {
       prismaHistorical.$executeRawUnsafe(`LOCK TABLE elysium_tx IN ACCESS EXCLUSIVE MODE`),
       prismaHistorical.$executeRawUnsafe(`ALTER TABLE elysium_tx DETACH PARTITION elysium_tx_legacy`),
       prismaHistorical.$executeRawUnsafe(`ALTER TABLE elysium_tx_legacy DROP CONSTRAINT IF EXISTS elysium_tx_split_bound`),
-      prismaHistorical.$executeRawUnsafe(`INSERT INTO elysium_tx_legacy SELECT * FROM elysium_tx`),
+      prismaHistorical.$executeRawUnsafe(`INSERT INTO elysium_tx_legacy SELECT * FROM elysium_tx ON CONFLICT (tx_hash) DO NOTHING`),
       prismaHistorical.$executeRawUnsafe(`DROP TABLE elysium_tx`),
       prismaHistorical.$executeRawUnsafe(`ALTER TABLE elysium_tx_legacy RENAME TO elysium_tx`),
     ]);
     parts.forgetFloor();
 
-    expect(await parts.layout()).toEqual({ partitioned: false, parts: [], detaching: [], pending: null });
+    expect(await parts.layout()).toEqual({ partitioned: false, parts: [], detaching: [], orphans: [], pending: null });
     expect(await q(`SELECT tx_hash FROM elysium_tx ORDER BY block_time`)).toEqual([{ tx_hash: old.tx_hash }, { tx_hash: fresh.tx_hash }]);
     // One table, one key on the hash: a hash is refused twice wherever its time is, as before the split.
     expect((await repo.insertTxs([old, fresh, tx({ block_time: at(0, 5) })])).inserted).toBe(1);
@@ -294,8 +295,9 @@ describe('undoing the split, as the runbook says', () => {
 });
 
 describe('old days dropped under a keep', () => {
-  const KEEP = TX_KEEP_MIN_DAYS; // 35
+  const KEEP = TX_KEEP_MIN_DAYS; // 65
   const contracts = directoryContracts();
+  const rollup = ElysiumRollupRepository.getInstance();
   const rollupBuilt = (n: number): Promise<number> =>
     x(`INSERT INTO elysium_day_rollup (day, built_at, dirty) VALUES ($1::date, now(), false) ON CONFLICT (day) DO UPDATE SET built_at = now(), dirty = false`, day(n));
   const factsThrough = async (n: number): Promise<void> => {
@@ -304,16 +306,24 @@ describe('old days dropped under a keep', () => {
     await x(`UPDATE elysium_fact_state SET through_day = $1::date WHERE fact = 'history'`, day(n));
     await x(`UPDATE elysium_project_contract SET through_day = $1::date`, day(n));
   };
+  const sendersCopied = (done: boolean): Promise<number> =>
+    x(
+      `INSERT INTO elysium_ingest_state (stream, cursor, backfill_done) VALUES ('txsender', now(), $1::boolean)
+       ON CONFLICT (stream) DO UPDATE SET cursor = now(), backfill_done = $1::boolean`,
+      done
+    );
   const pass = (): Promise<boolean> => upkeep.keepPartitions(new Date());
+  const OLD = [72, 70, 69, 68, 67, 66];
+  const RECENT = [65, 64, 10, 1, 0];
 
   beforeAll(async () => {
     forgetSplitLayout();
     await unsplit();
     await wipe();
     // A row in each of a few old days, and in recent ones.
-    await repo.insertTxs([40, 39, 38, 37, 36, 35, 34, 10, 1, 0].map((n) => tx({ block_time: at(n, 1000) })));
-    // Every day's rollup built, except the day 38 days ago.
-    for (let n = 70; n >= 1; n--) if (n !== 38) await rollupBuilt(n);
+    await repo.insertTxs([...OLD, ...RECENT].map((n) => tx({ block_time: at(n, 1000) })));
+    for (let n = 74; n >= 1; n--) await rollupBuilt(n);
+    await sendersCopied(true);
   });
 
   it('nothing is dropped without a keep, whatever is old', async () => {
@@ -325,7 +335,7 @@ describe('old days dropped under a keep', () => {
     expect(await q(`SELECT backfill_done, rows::int AS rows FROM elysium_ingest_state WHERE stream = 'txparts'`)).toEqual([{ backfill_done: true, rows: before.length }]);
   });
 
-  it('nor while the history facts do not hold the old days', async () => {
+  it('nor while the history facts do not hold the old days, nor while the senders are not copied', async () => {
     process.env.ELYSIUM_TX_KEEP_DAYS = String(KEEP);
     await x(`UPDATE elysium_fact_state SET through_day = NULL`);
     const before = await names();
@@ -336,10 +346,15 @@ describe('old days dropped under a keep', () => {
     await x(`UPDATE elysium_project_contract SET through_day = NULL WHERE to_addr = $1`, contracts[0]);
     expect(await pass()).toBe(false);
     expect(await names()).toEqual(before);
+    // And so does a copy of the senders that has not been through the history: a swap would lose its sender for good.
+    await factsThrough(10);
+    await sendersCopied(false);
+    expect(await pass()).toBe(false);
+    expect(await names()).toEqual(before);
+    await sendersCopied(true);
   });
 
-  it('then the days out of the keep go, two a pass, oldest first: everything before the split, then day by day', async () => {
-    await factsThrough(10);
+  it('then the days out of the keep go, two a pass, oldest first, and no day is left missing in the middle', async () => {
     expect(await pass()).toBe(true);
     let left = await names();
     expect(left).not.toContain(LEGACY_PARTITION);
@@ -347,38 +362,60 @@ describe('old days dropped under a keep', () => {
     let passes = 1;
     while ((await pass()) && passes < 60) passes += 1;
     left = await names();
-    // Kept: the day whose rollup is not built, and every day from the first kept one.
-    expect(left[0]).toBe(partitionName(day(38)));
-    expect(left[1]).toBe(partitionName(day(KEEP)));
-    expect(left).not.toContain(partitionName(day(36)));
-    // The rows of the days 38, 35, 34, 10, 1 and 0 days ago are still there.
-    expect(await q(`SELECT count(*)::int AS n FROM elysium_tx`)).toEqual([{ n: 6 }]);
-  });
-
-  it('a day whose rollup is not built waits for it, then goes', async () => {
-    expect(await names()).toContain(partitionName(day(38)));
-    await rollupBuilt(38);
-    await pass();
-    expect(await names()).not.toContain(partitionName(day(38)));
-    expect((await names())[0]).toBe(partitionName(day(KEEP)));
+    expect(left[0]).toBe(partitionName(day(KEEP)));
+    // Every day from the first kept one to the days ahead, none missing.
+    expect(left).toEqual(Array.from({ length: left.length }, (_, i) => partitionName(day(KEEP - i))));
+    expect(await q(`SELECT count(*)::int AS n FROM elysium_tx`)).toEqual([{ n: RECENT.length }]);
   });
 
   it('a row from before the oldest day kept is counted and left out; the days kept still take theirs', async () => {
     const floor = await parts.floorMs();
     expect(floor).toBe(today - KEEP * DAY_MS);
-    const tooOld = tx({ block_time: at(50, 5) });
+    const tooOld = tx({ block_time: at(70, 5) });
     const kept = tx({ block_time: at(KEEP, 5) });
     expect(await repo.insertTxs([tooOld, kept])).toMatchObject({ inserted: 1, tooOld: 1 });
     expect(await where(tooOld.tx_hash)).toEqual([]);
     expect(await repo.insertTxs([tooOld])).toMatchObject({ inserted: 0, tooOld: 1 });
     expect(await q(`SELECT (extract(epoch FROM cursor) * 1000)::float8 AS floor FROM elysium_ingest_state WHERE stream = 'txparts'`)).toEqual([{ floor }]);
+    // No table is made again for a day that was dropped.
+    expect(await parts.ensureDaysFor([day(70)], new Date())).toBe(0);
+    expect(await names()).not.toContain(partitionName(day(70)));
+  });
+
+  it('the rollup of a dropped day is never built again: it is all that is left of the day', async () => {
+    // Rollups kept longer than the transactions themselves (with the default spans a dropped day
+    // is also out of the rollups' own keep, and the builder never looks at it).
+    process.env.ELYSIUM_ROLLUP_KEEP_DAYS = '80';
+    // Marked by hand, as one would for a day one does not trust.
+    await x(`UPDATE elysium_day_rollup SET dirty = true WHERE day = $1::date`, day(70));
+    await x(`INSERT INTO elysium_call_day (day, to_addr, method_id, txs, failed, fee_wei, gas_used) VALUES ($1::date, $2, '', 7, 0, 1, 1)`, day(70), A(0xc0));
+    await expect(rollup.buildDay(day(70), { callers: false, senders: false })).rejects.toThrow('no longer held');
+    await expect(rollup.buildHour(today - 70 * DAY_MS)).rejects.toThrow('no longer held');
+    // The builder's own pass leaves the day out, and its figures stay.
+    await repo.advance('tx', { cursor: new Date(), backfillDone: true });
+    await ElysiumRollupService.getInstance().tick();
+    expect(await q(`SELECT txs FROM elysium_call_day WHERE day = $1::date`, day(70))).toEqual([{ txs: 7 }]);
+    // A day that is still held is built as before.
+    expect(await rollup.buildDay(day(KEEP), { callers: false, senders: false })).toBe('built');
+    delete process.env.ELYSIUM_ROLLUP_KEEP_DAYS;
   });
 
   it('the keep never goes under what the views read from elysium_tx', async () => {
-    process.env.ELYSIUM_TX_KEEP_DAYS = '3';
+    process.env.ELYSIUM_TX_KEEP_DAYS = '35';
     const before = await names();
     await pass();
     expect(await names()).toEqual(before);
+  });
+
+  it('a drop that stopped between its two statements is finished by the next pass', async () => {
+    process.env.ELYSIUM_TX_KEEP_DAYS = String(KEEP);
+    // The oldest day taken out of the table by hand, its own table left behind.
+    const oldest = (await names())[0];
+    await x(`ALTER TABLE elysium_tx DETACH PARTITION "${oldest}"`);
+    expect((await parts.layout()).orphans).toEqual([oldest]);
+    await pass();
+    expect((await parts.layout()).orphans).toEqual([]);
+    expect(await q(`SELECT count(*)::int AS n FROM pg_class WHERE relname = $1`, oldest)).toEqual([{ n: 0 }]);
   });
 });
 
@@ -421,6 +458,22 @@ describe('the upkeep pass on a plain table', () => {
     // A day later the next day ahead gets its table.
     await upkeep.keepPartitions(new Date(Date.now() + DAY_MS));
     expect(await names()).toContain(partitionName(day(-4)));
+  });
+
+  it('a transaction dated after the bound is said by name, and a row with an absurd time never takes a prepared bound off', async () => {
+    forgetSplitLayout();
+    await unsplit();
+    await wipeTables();
+    await parts.prepare(today + 2 * DAY_MS);
+    const absurd = await repo.insertTxs([tx({ block_time: '2099-01-01T00:00:00.000Z' })]).catch((e: unknown) => e);
+    expect(pgErrorCode(absurd)).toBe('23514');
+    expect((await parts.layout()).pending).toEqual({ cutMs: today + 2 * DAY_MS, validated: false });
+    // One stored before any bound existed: the split is not started, and the job says why.
+    await x(`ALTER TABLE elysium_tx DROP CONSTRAINT elysium_tx_split_bound`);
+    await repo.insertTxs([tx({ block_time: new Date(today + 2 * DAY_MS + 5000).toISOString() })]);
+    await expect(upkeep.keepPartitions(new Date())).rejects.toThrow('after the split bound');
+    expect((await parts.layout()).pending).toBeNull();
+    await wipeTables();
   });
 
   it('a bound left too close by a pass that could not finish is replaced by a later one', async () => {

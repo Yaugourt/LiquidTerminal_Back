@@ -1,4 +1,5 @@
 import { ElysiumIngestRepository } from '../../repositories/prisma/prisma.elysium.repository';
+import { ElysiumPartitionRepository } from '../../repositories/prisma/prisma.elysium-partition.repository';
 import { ElysiumRollupRepository } from '../../repositories/prisma/prisma.elysium-rollup.repository';
 import { ElysiumWindowRepository } from '../../repositories/prisma/prisma.elysium-window.repository';
 import { prismaHistorical } from '../../core/prisma.historical.service';
@@ -150,15 +151,18 @@ export class ElysiumRollupService {
    * The hours that wait for their rollup, the most pressing first, a few per pass. Resolves to
    * whether some are left for the next pass.
    */
-  private async buildHours(now: Date, cursor: Date | null): Promise<boolean> {
-    const closed = closedRollupHours(cursor, now, ELYSIUM_GENESIS);
+  private async buildHours(now: Date, cursor: Date | null, heldFromMs: number | null): Promise<boolean> {
+    // Never an hour elysium_tx no longer holds (see `tick`).
+    const closed = closedRollupHours(cursor, now, ELYSIUM_GENESIS).filter((hour) => heldFromMs === null || hour >= heldFromMs);
     // An hour over for more than its margin that the cursor has not passed yet, with a cursor
     // that is close behind the clock (a stream that stands still is not waited for this way).
     const closedSet = new Set(closed);
     this.hourWaitsForCursor =
       cursor !== null &&
       now.getTime() - cursor.getTime() < CURSOR_NEAR_MS &&
-      wantedRollupHours(now, ELYSIUM_GENESIS).some((hour) => hour + HOUR_MS + HOUR_CLOSE_MARGIN_MS <= now.getTime() && !closedSet.has(hour));
+      wantedRollupHours(now, ELYSIUM_GENESIS).some(
+        (hour) => (heldFromMs === null || hour >= heldFromMs) && hour + HOUR_MS + HOUR_CLOSE_MARGIN_MS <= now.getTime() && !closedSet.has(hour)
+      );
     if (closed.length === 0) return false;
     const known = new Map((await this.repo.listHours(Math.min(...closed))).map((h) => [h.hour, h]));
     const pending = closed.filter((hour) => {
@@ -317,8 +321,13 @@ export class ElysiumRollupService {
       tickStep();
     }
 
+    // Once old days of elysium_tx are dropped (a keep is set), their rollups are all that is left
+    // of them: a day from before the oldest one held is never built again, whatever its row
+    // says. Building it would read no transaction and write an empty day over the real one.
+    const heldFromMs = await ElysiumPartitionRepository.getInstance().floorMs();
     const known = new Map((await this.repo.listDays(firstKeptDay(now, keep))).map((d) => [d.day, d]));
     const pending = closed.filter((day) => {
+      if (heldFromMs !== null && Date.parse(`${day}T00:00:00.000Z`) < heldFromMs) return false;
       const state = known.get(day);
       return !state || !state.built || state.dirty;
     });
@@ -333,7 +342,7 @@ export class ElysiumRollupService {
     // tables from being looked at, nor the day from being built.
     let hoursLeft = false;
     try {
-      hoursLeft = await this.buildHours(now, cursor);
+      hoursLeft = await this.buildHours(now, cursor, heldFromMs);
       this.hoursError = null;
     } catch (error) {
       this.hoursError = (error instanceof Error ? error.message : String(error)).slice(0, 300);

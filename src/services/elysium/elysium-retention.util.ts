@@ -14,7 +14,7 @@
  * - the keep (ELYSIUM_TX_KEEP_DAYS): how many days of elysium_tx stay. Unset,
  *   everything stays.
  */
-import { ROLLUP_CALLERS_KEEP_DAYS, ROLLUP_KEEP_DAYS, rollupKeepDays } from './elysium-rollup.util';
+import { ROLLUP_KEEP_DAYS } from './elysium-rollup.util';
 
 const DAY_MS = 86_400_000;
 
@@ -31,26 +31,20 @@ export const FACTS_FINAL_DAYS = 10;
 
 /**
  * An insert whose oldest row is older than this takes the slow path that also
- * moves the history facts. One day short of FACTS_FINAL_DAYS: every row of a
- * day that can be folded is older than this, whatever the hour.
+ * moves the history facts. Two days short of FACTS_FINAL_DAYS: every row of a
+ * day that can be folded is older than this by a day at least, whatever the
+ * hour and whatever a process's clock is off by.
  */
-export const LATE_ROW_AGE_MS = (FACTS_FINAL_DAYS - 1) * DAY_MS;
+export const LATE_ROW_AGE_MS = (FACTS_FINAL_DAYS - 2) * DAY_MS;
 
 /**
- * The fewest days of elysium_tx that can be kept. The views read a day from
- * elysium_tx when its rollup lacks what they need, and the lists of callers
- * are only built for the last ROLLUP_CALLERS_KEEP_DAYS days: a window over
- * 30 days reads the callers of its quiet contracts from elysium_tx that far
- * back.
+ * The fewest days of elysium_tx that can be kept: what the views can still read
+ * from it. The widest go back 60 days (the fees over 30 days and the 30 days
+ * before them, whose first, partial day is always read from elysium_tx itself),
+ * a day whose rollup is missing is read from it too, and the rollups are kept
+ * ROLLUP_KEEP_DAYS days.
  */
-export const TX_KEEP_MIN_DAYS = ROLLUP_CALLERS_KEEP_DAYS + 1;
-
-/**
- * The fewest days kept when the day rollups do not cover the widest reads
- * (they are switched off, or ELYSIUM_ROLLUP_KEEP_DAYS was lowered): those
- * reads then go back to elysium_tx itself, up to 60 days.
- */
-export const TX_KEEP_NO_ROLLUP_DAYS = ROLLUP_KEEP_DAYS + 2;
+export const TX_KEEP_MIN_DAYS = ROLLUP_KEEP_DAYS + 2;
 
 export function dayKey(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
@@ -75,13 +69,12 @@ export function previousDay(day: string): string {
  * views need. Null when it is not set (or not a positive whole number):
  * everything is kept, nothing is ever dropped.
  */
-export function txKeepDays(env: NodeJS.ProcessEnv = process.env, rollupsEnabled = true): number | null {
+export function txKeepDays(env: NodeJS.ProcessEnv = process.env): number | null {
   const raw = (env.ELYSIUM_TX_KEEP_DAYS ?? '').trim();
   if (!/^\d+$/.test(raw)) return null;
   const asked = Number.parseInt(raw, 10);
   if (!Number.isSafeInteger(asked) || asked <= 0) return null;
-  const covered = rollupsEnabled && rollupKeepDays() >= ROLLUP_KEEP_DAYS;
-  return Math.max(asked, covered ? TX_KEEP_MIN_DAYS : TX_KEEP_NO_ROLLUP_DAYS);
+  return Math.max(asked, TX_KEEP_MIN_DAYS);
 }
 
 /**
@@ -160,32 +153,42 @@ export interface TxPartition {
 }
 
 /**
- * The partitions that can be dropped at `now`: wholly before the first kept
- * day, wholly inside what the history facts hold (`factsThrough`: the last day
- * folded, for every fact), and, inside the span the day rollups cover, only
- * when their days' rollups are built (`builtDays`): a view that finds a day's
- * rollup missing reads that day from elysium_tx. Oldest first.
+ * The partitions that can be dropped at `now`, oldest first: each wholly before
+ * the first kept day, wholly inside what the history facts hold (`factsThrough`:
+ * the last day folded, for every fact), wholly behind the copy of the senders
+ * (`sendersThroughMs`: where that copy stands, null while it has not been
+ * through the history), and, inside the span the day rollups cover, only when
+ * its days' rollups are built (`builtDays`): a view that finds a day's rollup
+ * missing reads that day from elysium_tx.
+ *
+ * Only the oldest ones in a row: the list stops at the first part that has to
+ * stay. What elysium_tx holds is then always "everything from its oldest part
+ * on", with no day missing in between, which is what the insert, the rollup
+ * builder and the status go by.
  */
 export function partitionsToDrop(
   parts: readonly TxPartition[],
   now: Date,
   keepDays: number,
   factsThrough: string | null,
+  sendersThroughMs: number | null,
   builtDays: ReadonlySet<string>
 ): TxPartition[] {
-  if (factsThrough === null) return [];
+  if (factsThrough === null || sendersThroughMs === null) return [];
   const firstKept = dayStartMs(firstKeptTxDay(now, keepDays));
   const factsEnd = dayStartMs(factsThrough) + DAY_MS;
   const today = Math.floor(now.getTime() / DAY_MS) * DAY_MS;
   const rollupFrom = today - ROLLUP_KEEP_DAYS * DAY_MS;
-  return parts
-    .filter((p) => {
-      if (p.toMs > firstKept || p.toMs > factsEnd) return false;
-      // Every day of it that a view can still ask the rollups for must be built.
-      for (let day = Math.max(p.fromMs ?? rollupFrom, rollupFrom); day < p.toMs; day += DAY_MS) {
-        if (!builtDays.has(dayKey(day))) return false;
-      }
-      return true;
-    })
-    .sort((a, b) => a.toMs - b.toMs);
+  const out: TxPartition[] = [];
+  for (const p of [...parts].sort((a, b) => a.toMs - b.toMs)) {
+    if (p.toMs > firstKept || p.toMs > factsEnd || p.toMs > sendersThroughMs) break;
+    // Every day of it that a view can still ask the rollups for must be built.
+    let built = true;
+    for (let day = Math.max(p.fromMs ?? rollupFrom, rollupFrom); day < p.toMs; day += DAY_MS) {
+      if (!builtDays.has(dayKey(day))) built = false;
+    }
+    if (!built) break;
+    out.push(p);
+  }
+  return out;
 }

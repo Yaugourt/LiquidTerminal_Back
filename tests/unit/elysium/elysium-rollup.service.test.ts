@@ -21,6 +21,7 @@ import {
   RollupDayState,
   RollupHourState,
 } from '../../../src/repositories/prisma/prisma.elysium-rollup.repository';
+import { ElysiumPartitionRepository } from '../../../src/repositories/prisma/prisma.elysium-partition.repository';
 import { ElysiumWindowRepository } from '../../../src/repositories/prisma/prisma.elysium-window.repository';
 import { ELYSIUM_GENESIS } from '../../../src/services/elysium/elysium-ingest.util';
 import { emptyRollupCoverage, type RollupCoverage } from '../../../src/services/elysium/elysium-rollup.reader';
@@ -59,6 +60,7 @@ describe('ElysiumRollupService.tick', () => {
   const states = ElysiumIngestRepository.getInstance();
   const repo = ElysiumRollupRepository.getInstance();
   const windows = ElysiumWindowRepository.getInstance();
+  let heldFrom: jest.SpyInstance;
   let listDays: jest.SpyInstance;
   let buildDay: jest.SpyInstance;
   let prune: jest.SpyInstance;
@@ -72,6 +74,8 @@ describe('ElysiumRollupService.tick', () => {
     (ElysiumRollupService as unknown as { instance?: unknown }).instance = undefined;
     svc = ElysiumRollupService.getInstance();
     jest.spyOn(Date, 'now').mockReturnValue(NOW);
+    // elysium_tx holds every day (no keep set), unless a test says where it starts.
+    heldFrom = jest.spyOn(ElysiumPartitionRepository.getInstance(), 'floorMs').mockResolvedValue(null);
     jest.spyOn(states, 'getState').mockResolvedValue({
       stream: 'tx',
       cursor: new Date(NOW - 60_000),
@@ -126,6 +130,19 @@ describe('ElysiumRollupService.tick', () => {
     // Even the last day that waited: the pass that follows brings the window tables to it.
     await expect(svc.tick()).resolves.toBe(SOON);
     expect(buildDay).toHaveBeenLastCalledWith('2026-10-08', { callers: false, senders: false });
+  });
+
+  it('never builds a day or an hour elysium_tx no longer holds: its rollup is all that is left of it', async () => {
+    // Old days were dropped under a keep: the table starts on 2026-11-05. Two days wait, one on each side.
+    heldFrom.mockResolvedValue(Date.parse('2026-11-05T00:00:00.000Z'));
+    listDays.mockResolvedValue(allBuilt().map((d) => (d.day === '2026-11-03' || d.day === '2026-11-06' ? { ...d, dirty: true } : d)));
+    await svc.tick();
+    expect(buildDay).toHaveBeenCalledTimes(1);
+    expect(buildDay.mock.calls[0][0]).toBe('2026-11-06');
+    buildDay.mockClear();
+    listDays.mockResolvedValue(allBuilt().map((d) => (d.day === '2026-11-03' ? { ...d, dirty: true } : d)));
+    await expect(svc.tick()).resolves.toBe(IDLE);
+    expect(buildDay).not.toHaveBeenCalled();
   });
 
   it('redoes a dirty day and a day whose build never ended', async () => {

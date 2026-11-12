@@ -29,8 +29,8 @@ const BACKLOG_INTERVAL_MS = 5_000;
 const JOB_BUDGET_MS = 30_000;
 
 /**
- * Every pass looks at the rows of the last two hours again: a swap or a trade is read from the
- * logs by its own stream, which can be behind the transactions' by a few minutes.
+ * Every step of the copy starts two hours before where the last one ended: a swap or a trade is
+ * read from the logs by its own stream, which can be behind the transactions' by a few minutes.
  */
 const SENDER_RECENT_MS = 2 * HOUR_MS;
 /**
@@ -39,9 +39,9 @@ const SENDER_RECENT_MS = 2 * HOUR_MS;
  */
 const SENDER_SWEEP_EVERY_MS = 6 * HOUR_MS;
 const SENDER_SWEEP_MS = (FACTS_FINAL_DAYS - 1) * DAY_MS;
-/** Days of history copied per transaction, and the overlap between two of them. */
+/** Time copied per transaction while the copy has ground to cover; halved when a step fails, down to an hour. */
 const SENDER_HISTORY_STEP_MS = 2 * DAY_MS;
-const SENDER_HISTORY_OVERLAP_MS = 2 * MINUTE_MS;
+const SENDER_MIN_STEP_MS = HOUR_MS;
 
 /** The split of elysium_tx starts at the UTC day this many days ahead: the check of every row has until then. */
 const SPLIT_LEAD_DAYS = 2;
@@ -87,6 +87,7 @@ export class ElysiumUpkeepService {
   private readonly facts = ElysiumFactsRepository.getInstance();
   private readonly parts = ElysiumPartitionRepository.getInstance();
   private lastSenderSweepAt = 0;
+  private senderStepMs = SENDER_HISTORY_STEP_MS;
   private analyzedDay = '';
 
   public static getInstance(): ElysiumUpkeepService {
@@ -114,7 +115,7 @@ export class ElysiumUpkeepService {
     const now = new Date(Date.now());
     const tx = await this.states.getState('tx');
     let more = false;
-    more = (await this.job('txsender', () => this.copySenders(now, tx?.cursor ?? null))) || more;
+    more = (await this.job('txsender', () => this.copySenders(now, tx))) || more;
     more = (await this.job('facts', () => this.foldFacts(now, tx))) || more;
     more = (await this.job('txparts', () => this.keepPartitions(now))) || more;
     return more ? BACKLOG_INTERVAL_MS : IDLE_INTERVAL_MS;
@@ -147,42 +148,55 @@ export class ElysiumUpkeepService {
   // 1. The transaction's sender on swaps, trades and launches
   // ---------------------------------------------------------------------------
 
-  private async copySenders(now: Date, txCursor: Date | null): Promise<boolean> {
+  private async copySenders(now: Date, tx: { cursor: Date | null; backfillDone: boolean } | null): Promise<boolean> {
     // elysium_tx is complete up to the tx stream's cursor: past it, a transaction may simply not be there yet.
+    const txCursor = tx?.cursor ?? null;
     if (!txCursor) return false;
     const target = new Date(Math.min(now.getTime(), txCursor.getTime()));
     const state = await this.states.getState('txsender');
+    let rows = 0;
 
-    let copied = await this.facts.copyTxSenders(new Date(target.getTime() - SENDER_RECENT_MS), target);
-    tickStep();
-    if (now.getTime() - this.lastSenderSweepAt >= SENDER_SWEEP_EVERY_MS && state?.backfillDone) {
+    // A few times a day, the days the daily comparison can still add transactions to.
+    if (state?.backfillDone && now.getTime() - this.lastSenderSweepAt >= SENDER_SWEEP_EVERY_MS) {
       const swept = await this.facts.copyTxSenders(new Date(target.getTime() - SENDER_SWEEP_MS), target);
-      copied = { swaps: copied.swaps + swept.swaps, trades: copied.trades + swept.trades, launches: copied.launches + swept.launches };
+      rows += swept.swaps + swept.trades + swept.launches;
       this.lastSenderSweepAt = now.getTime();
       tickStep();
     }
-    let rows = copied.swaps + copied.trades + copied.launches;
 
-    if (state?.backfillDone) {
-      await this.states.advance('txsender', { cursor: target, addRows: rows });
-      return false;
-    }
-    // The history, oldest first, a few days per transaction.
+    // From where the last pass stopped to where the tx stream stands, a few days per
+    // transaction, and the cursor only ever moves to the end of what was copied: the first
+    // start goes through the whole history this way, and so does the catch-up after the tx
+    // stream stood still for days and then read them in a few minutes. Each step starts two
+    // hours before where the last one ended (a swap is read from the logs by its own stream,
+    // which can be behind the transactions'), so a pass with nothing new still looks at the
+    // last two hours again.
     const startedAt = Date.now();
-    let from = state?.cursor ?? ELYSIUM_GENESIS;
-    let done = from.getTime() >= target.getTime();
-    while (!done && Date.now() - startedAt < JOB_BUDGET_MS) {
-      const to = new Date(Math.min(from.getTime() + SENDER_HISTORY_STEP_MS, target.getTime()));
-      const step = await this.facts.copyTxSenders(new Date(from.getTime() - SENDER_HISTORY_OVERLAP_MS), to);
+    let from = new Date(Math.min((state?.cursor ?? ELYSIUM_GENESIS).getTime(), target.getTime()));
+    let reached = false;
+    do {
+      const to = new Date(Math.min(from.getTime() + this.senderStepMs, target.getTime()));
+      let step: Awaited<ReturnType<ElysiumFactsRepository['copyTxSenders']>>;
+      try {
+        step = await this.facts.copyTxSenders(new Date(from.getTime() - SENDER_RECENT_MS), to);
+      } catch (error) {
+        // A step that cannot end (its time limit, on a cold disk) is tried again half as long.
+        this.senderStepMs = Math.max(SENDER_MIN_STEP_MS, Math.floor(this.senderStepMs / 2));
+        throw error;
+      }
+      this.senderStepMs = Math.min(SENDER_HISTORY_STEP_MS, this.senderStepMs * 2);
       rows += step.swaps + step.trades + step.launches;
       from = to;
-      done = to.getTime() >= target.getTime();
-      await this.states.advance('txsender', { cursor: to, addRows: rows, ...(done ? { backfillDone: true } : {}) });
+      reached = to.getTime() >= target.getTime();
+      // Done once: the copy has been through everything the tx stream holds, and that stream
+      // has itself been through the chain's history (before that, "everything" is a few hours).
+      const done = reached && Boolean(tx?.backfillDone);
+      await this.states.advance('txsender', { cursor: to, addRows: rows, ...(done && !state?.backfillDone ? { backfillDone: true } : {}) });
+      if (done && !state?.backfillDone) logDeduplicator.info('Elysium upkeep: transaction senders copied over the whole history');
       rows = 0;
       tickStep();
-    }
-    if (done) logDeduplicator.info('Elysium upkeep: transaction senders copied over the whole history');
-    return !done;
+    } while (!reached && Date.now() - startedAt < JOB_BUDGET_MS);
+    return !reached;
   }
 
   // ---------------------------------------------------------------------------
@@ -272,9 +286,17 @@ export class ElysiumUpkeepService {
       const pending = layout.pending;
       if (!pending || pending.cutMs - now.getTime() < SPLIT_MIN_LEAD_MS) {
         const cutMs = today + SPLIT_LEAD_DAYS * DAY_MS;
+        // A transaction dated at or after the bound (a row with an absurd time, stored long ago)
+        // would fail the check of every row, pass after pass: said by name instead.
+        const newest = await this.parts.newestTxMs();
+        if (newest !== null && newest >= cutMs) {
+          throw new Error(`elysium_tx is not split by day: it holds a transaction dated ${new Date(newest).toISOString()}, after the split bound`);
+        }
         const step = await this.parts.prepare(cutMs);
         if (step === 'done') logDeduplicator.info('Elysium upkeep: split of elysium_tx prepared', { from: dayKey(cutMs) });
-        return true;
+        // Busy: the table could not be had for an instant. Tried again at the next pass, a
+        // minute later, not at once: each try makes every statement on the table wait behind it.
+        return step === 'done';
       }
       if (!pending.validated) {
         const fromMs = Date.now();
@@ -284,20 +306,13 @@ export class ElysiumUpkeepService {
       }
       const days = partitionDaysWanted(now, dayKey(pending.cutMs));
       const step = await this.parts.split(pending.cutMs, days);
-      if (step === 'busy') return true;
+      if (step === 'busy') return false;
       this.parts.forgetFloor();
       logDeduplicator.info('Elysium upkeep: elysium_tx is split by day', { from: dayKey(pending.cutMs), days: days.length });
       layout = await this.parts.layout();
     }
 
-    // A detach that was interrupted half-way is finished first.
-    for (const name of layout.detaching) {
-      await this.parts.drop(name, 'detaching');
-      logDeduplicator.info('Elysium upkeep: part of elysium_tx dropped', { part: name });
-      tickStep();
-    }
-
-    // The tables of today and of the days ahead.
+    // The tables of today and of the days ahead, before anything that can fail below.
     const legacy = layout.parts.find((p) => p.fromMs === null);
     const firstOwnDay = layout.parts.reduce<number | null>((m, p) => (p.fromMs !== null && (m === null || p.fromMs < m) ? p.fromMs : m), null);
     const splitFrom = legacy ? legacy.toMs : firstOwnDay;
@@ -308,6 +323,19 @@ export class ElysiumUpkeepService {
         if (await this.parts.ensureDay(day)) logDeduplicator.info('Elysium upkeep: day table made', { day });
         tickStep();
       }
+    }
+
+    // A drop that stopped half-way is finished: a detach that was interrupted, or a part taken
+    // out whose table was not dropped (the process ended between the two statements).
+    for (const name of layout.detaching) {
+      await this.parts.drop(name, 'detaching');
+      logDeduplicator.info('Elysium upkeep: part of elysium_tx dropped', { part: name });
+      tickStep();
+    }
+    for (const name of layout.orphans) {
+      await this.parts.drop(name, 'orphan');
+      logDeduplicator.info('Elysium upkeep: table of a part already taken out dropped', { part: name });
+      tickStep();
     }
 
     // Statistics for the planner, once a UTC day: autovacuum does not look at the parent of the parts.
@@ -321,17 +349,19 @@ export class ElysiumUpkeepService {
     // The days older than the keep, when one is set and nothing reads them any more.
     let dropped = 0;
     let left = 0;
-    // Without the day rollups the widest views read elysium_tx itself: the keep's floor is then higher.
-    const rollups = (process.env.ELYSIUM_ROLLUPS_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
-    const keep = txKeepDays(process.env, rollups);
+    const keep = txKeepDays();
     if (keep !== null) {
       const standing = await this.facts.standing(directoryContracts());
       const through =
         standing.history !== null && standing.projectsThrough !== null
           ? [standing.history, standing.projectsThrough].sort()[0]
           : null;
+      // Where the copy of the senders stands: a swap whose transaction is dropped before its
+      // sender was copied would lose it for good.
+      const senders = await this.states.getState('txsender');
+      const sendersThrough = senders?.backfillDone && senders.cursor ? senders.cursor.getTime() : null;
       const built = await this.parts.builtRollupDays(ROLLUP_KEEP_DAYS + 2);
-      const candidates = partitionsToDrop(layout.parts, now, keep, through, built);
+      const candidates = partitionsToDrop(layout.parts, now, keep, through, sendersThrough, built);
       left = candidates.length;
       for (const part of candidates.slice(0, DROPS_PER_PASS)) {
         await this.parts.drop(part.name, 'attached');

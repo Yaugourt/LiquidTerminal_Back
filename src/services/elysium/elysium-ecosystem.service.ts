@@ -165,35 +165,41 @@ export class ElysiumEcosystemService {
   private async computeAllTime(): Promise<AllTimeRow[]> {
     const pairs = ELYSIUM_PROJECTS.flatMap((p) => p.contracts.map((c) => ({ slug: p.slug, addr: c.address })));
     const cursor = (await this.readTxCursor())?.toISOString() ?? null;
-    // Where the contract furthest behind stands, read first: a floor that lets the statement
-    // below read the days after it in one pass (each contract's own day, read by that statement,
-    // is what decides which of its transactions are counted from elysium_tx).
+    // The first instant after the folded days of the contract furthest behind, read first: a
+    // floor that lets the statement below read the days from there in one pass (each contract's
+    // own day, read by that statement, is what decides which of its transactions are counted
+    // from elysium_tx).
     const floorRows = await prismaHistoricalAggregate.$queryRaw<Array<{ unfolded: number; floor: string | null }>>`
       SELECT count(*) FILTER (WHERE c.through_day IS NULL)::int AS unfolded,
-             (min(c.through_day) - 1)::text AS floor
+             (min(c.through_day) + 1)::text AS floor
       FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
       LEFT JOIN elysium_project_contract c ON c.to_addr = r.addr`;
     const floor =
       floorRows[0] && Number(floorRows[0].unfolded) === 0 && floorRows[0].floor
         ? `${floorRows[0].floor.slice(0, 10)}T00:00:00.000Z`
         : null;
+    // The directory's contracts with the instant each one's folded days end. Written out in each
+    // part of the statement below rather than once in a WITH: a WITH read three times is kept
+    // aside by Postgres, and what is joined to it is then read by one process instead of several.
+    const reg = Prisma.sql`(
+      SELECT r.slug, r.addr,
+             COALESCE(((c.through_day + 1)::timestamp AT TIME ZONE 'UTC'), '-infinity'::timestamptz) AS after
+      FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
+      LEFT JOIN elysium_project_contract c ON c.to_addr = r.addr)`;
     // Per project and sender first, then per project: count(DISTINCT sender) sorted every call
     // ever sent to a project, on disk.
-    return hashGrouped(
-      prismaHistoricalAggregate,
-      (tx) => tx.$queryRaw<AllTimeRow[]>`
-        WITH reg AS (
-          SELECT r.slug, r.addr,
-                 COALESCE(((c.through_day + 1)::timestamp AT TIME ZONE 'UTC'), '-infinity'::timestamptz) AS after
-          FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS r(slug text, addr text)
-          LEFT JOIN elysium_project_contract c ON c.to_addr = r.addr
-        ),
-        calls AS (
+    return hashGrouped(prismaHistoricalAggregate, async (tx) => {
+      // No nested loop: the planner expects a few rows per contract and looks each one up through
+      // the index, one after the other; together they hold a fifth of the days read, three
+      // times faster in one pass and hashed (measured 2026-11-12: 1.5 s -> 0.5 s on the copy).
+      await tx.$executeRaw`SET LOCAL enable_nestloop = off`;
+      return tx.$queryRaw<AllTimeRow[]>`
+        WITH calls AS (
           SELECT reg.slug, w.from_addr, w.txs, w.first_at
-          FROM reg JOIN elysium_project_wallet w ON w.to_addr = reg.addr
+          FROM ${reg} reg JOIN elysium_project_wallet w ON w.to_addr = reg.addr
           UNION ALL
           SELECT reg.slug, t.from_addr, count(*), min(t.block_time)
-          FROM reg
+          FROM ${reg} reg
           JOIN elysium_tx t ON t.to_addr = reg.addr AND t.block_time >= reg.after
           WHERE NOT t.is_spam AND t.block_time >= COALESCE(${floor}::timestamptz, '-infinity'::timestamptz)
           GROUP BY reg.slug, t.from_addr
@@ -201,13 +207,13 @@ export class ElysiumEcosystemService {
           -- A contract that stands before the floor after all (listed between the two reads):
           -- its days up to the floor. No contract in the usual case, and nothing read.
           SELECT reg.slug, t.from_addr, count(*), min(t.block_time)
-          FROM reg
+          FROM ${reg} reg
           JOIN elysium_tx t ON t.to_addr = reg.addr AND t.block_time >= reg.after AND t.block_time < ${floor}::timestamptz
           WHERE NOT t.is_spam AND reg.after < ${floor}::timestamptz
           GROUP BY reg.slug, t.from_addr
           UNION ALL
           SELECT reg.slug, lv.from_addr, count(*), min(lv.block_time)
-          FROM reg
+          FROM ${reg} reg
           JOIN elysium_tx_live lv ON lv.to_addr = reg.addr
           WHERE lv.block_time > COALESCE(${cursor}::timestamptz, 'infinity'::timestamptz)
             AND ${NOT_STORED}
@@ -218,8 +224,8 @@ export class ElysiumEcosystemService {
           SELECT slug, from_addr, sum(txs) AS txs, min(first_at) AS first_at
           FROM calls
           GROUP BY slug, from_addr
-        ) s GROUP BY slug`
-    );
+        ) s GROUP BY slug`;
+    });
   }
 
   /**

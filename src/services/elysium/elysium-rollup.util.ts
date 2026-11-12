@@ -31,13 +31,17 @@ export const ROLLUP_SENDERS_KEEP_DAYS = 10;
 
 /**
  * Days of rollups kept: ELYSIUM_ROLLUP_KEEP_DAYS, 63 by default, never under
- * 10. The rollups take disk (a row per called address, selector and day); a
+ * 10 (never under 63 once a keep is set on elysium_tx itself). The rollups take disk (a row per called address, selector and day); a
  * shorter span frees it, and the only cost is speed: a window that reaches
  * past the kept days reads those days from elysium_tx, as it did before.
  */
 export function rollupKeepDays(): number {
   const raw = Number.parseInt(process.env.ELYSIUM_ROLLUP_KEEP_DAYS ?? '', 10);
   if (!Number.isFinite(raw) || raw <= 0) return ROLLUP_KEEP_DAYS;
+  // With a keep set on elysium_tx (ELYSIUM_TX_KEEP_DAYS), its old days are dropped and the
+  // rollups are all that is left of them: a rollup day dropped then could not be built again,
+  // so the span is never shortened below the default.
+  if (/^\d+$/.test((process.env.ELYSIUM_TX_KEEP_DAYS ?? '').trim())) return Math.max(ROLLUP_KEEP_DAYS, raw);
   return Math.max(ROLLUP_MIN_KEEP_DAYS, raw);
 }
 /** A day is built once the tx stream is this far past its end (the stream re-reads its last 20 s). */

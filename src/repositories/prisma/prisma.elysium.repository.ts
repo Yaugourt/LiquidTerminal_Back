@@ -10,7 +10,7 @@ import type {
 import type { RejectCount } from '../../services/elysium/elysium-ingest-rejects';
 import { LATE_ROW_AGE_MS } from '../../services/elysium/elysium-retention.util';
 import { LAUNCH_CREATOR_SQL } from '../../services/elysium/elysium-facts.sql';
-import { HISTORY_FACT, LOCK_FACTS_SQL } from './prisma.elysium-facts.repository';
+import { ElysiumFactsRepository, HISTORY_FACT, LOCK_FACTS_SQL } from './prisma.elysium-facts.repository';
 import { ElysiumPartitionRepository } from './prisma.elysium-partition.repository';
 
 /** Market keys looked up per statement (a page of 1,000 logs names at most 3,000). */
@@ -289,7 +289,18 @@ export class ElysiumIngestRepository {
     const lateBefore = Date.now() - LATE_ROW_AGE_MS;
     const old = rows.some((r) => !(Date.parse(r.block_time) >= lateBefore));
     const run = async (): Promise<{ inserted: number; contracts: number }> => {
-      if (old) return this.insertOldTxs(rows);
+      if (old) {
+        const stored = await this.insertOldTxs(rows);
+        // The swaps, trades and launches read from these transactions' logs long ago get their
+        // sender now: the upkeep's copy only goes back over the days a transaction usually
+        // arrives late in. Whatever was stored this time: a page read again after this failed
+        // stores nothing new, and still has to do it.
+        const times = rows.map((r) => Date.parse(r.block_time)).filter((t) => Number.isFinite(t));
+        if (times.length > 0) {
+          await ElysiumFactsRepository.getInstance().copyTxSenders(new Date(Math.min(...times) - 1000), new Date(Math.max(...times)));
+        }
+        return stored;
+      }
       const result = await prismaHistorical.$queryRawUnsafe<Array<{ inserted: number; contracts: number }>>(
         insertTxsSql(false),
         JSON.stringify(rows)
@@ -303,8 +314,9 @@ export class ElysiumIngestRepository {
       // was stopped for longer than that). The tables are made here and the page is stored.
       if (pgErrorCode(error) !== '23514') throw error;
       const days = rows.map((r) => r.block_time.slice(0, 10));
-      const made = await ElysiumPartitionRepository.getInstance().ensureDaysFor(days, new Date(Date.now()));
-      if (made === 0) throw error;
+      await ElysiumPartitionRepository.getInstance().ensureDaysFor(days, new Date(Date.now()));
+      // Tried once more whatever was made here: the upkeep may have made the table meanwhile. A
+      // row that is still refused (an absurd time) is then the caller's to set aside.
       return { ...(await run()), tooOld };
     }
   }
