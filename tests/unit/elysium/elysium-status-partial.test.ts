@@ -38,9 +38,12 @@ describe('the status when a part of it cannot be read', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  /** The four reads of the status, in the order it makes them: built days, sizes, rejects, compared days. */
-  const reads = (days: unknown, sizes: unknown, rejects: unknown, checks: unknown): void => {
-    for (const value of [days, sizes, rejects, checks]) {
+  /**
+   * The reads of the status, in the order it makes them: built days, built hours, window
+   * tables, sizes, rejects, compared days.
+   */
+  const reads = (days: unknown, sizes: unknown, rejects: unknown, checks: unknown, hours: unknown = [], windows: unknown = []): void => {
+    for (const value of [days, hours, windows, sizes, rejects, checks]) {
       if (value instanceof Error) mockQueryRaw.mockRejectedValueOnce(value);
       else mockQueryRaw.mockResolvedValueOnce(value);
     }
@@ -61,6 +64,21 @@ describe('the status when a part of it cannot be read', () => {
     expect(status.partial).toEqual(['rollups', 'credits']);
     expect(status.rollups).toMatchObject({ builtDays: null, waitingDays: null });
     expect(status.database.bytes).toBe(60e9);
+  });
+
+  it('the hours or the window tables unread: the rollups are named, and neither is shown as "none"', async () => {
+    reads([], sizes, [], [], new Error('timeout'), [{ span: 7, ready: true, days: 6, hours: 23, refreshed_ms: NOW - 60_000, based_ms: NOW - 3_600_000 }]);
+    let status = await compute();
+    expect(status.partial).toEqual(['rollups', 'credits']);
+    expect(status.rollups.hours).toBeNull();
+    expect(status.rollups.windows).toEqual([
+      { span: 7, ready: true, days: 6, hours: 23, refreshedAt: new Date(NOW - 60_000).toISOString(), basedAt: new Date(NOW - 3_600_000).toISOString() },
+    ]);
+    reads([], sizes, [], [], [], new Error('timeout'));
+    status = await compute();
+    expect(status.partial).toEqual(['rollups', 'credits']);
+    expect(status.rollups.windows).toBeNull();
+    expect(status.rollups.hours).toEqual({ built: 0, waiting: expect.any(Number) });
   });
 
   it('the sizes, the rejects and the compared days unread: each is named, and the rest is served', async () => {

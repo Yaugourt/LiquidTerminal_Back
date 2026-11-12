@@ -1,15 +1,19 @@
 /**
- * Pure helpers of the Elysium day rollups: which days can be built, and how a
- * time window splits between rollup days and raw transactions. No I/O.
+ * Pure helpers of the Elysium rollups: which days and hours can be built, and
+ * how a time window splits between rollup days, rollup hours and raw
+ * transactions. No I/O.
  *
- * A rollup day is a whole UTC day of elysium_tx summed once the day is over.
- * A window is then read as: the whole days that are built, from the rollups;
- * everything else (its partial first day, today, a day not built yet) from
- * elysium_tx, exactly as before. The two parts never overlap and together
- * cover the window, so the figures are the ones the raw table alone gives.
+ * A rollup day is a whole UTC day of elysium_tx summed once the day is over; a
+ * rollup hour is the same for a whole UTC hour, kept only where a window's
+ * edges fall. A window is read as: the whole days that are built, from the day
+ * rollups; of the rest (its partial first day, today, a day not built yet),
+ * the whole hours that are built, from the hour rollups; and what is left
+ * from elysium_tx. The parts never overlap and together cover the window, so
+ * the figures are the ones the raw table alone gives.
  */
 
 const DAY_MS = 86_400_000;
+export const HOUR_MS = 3_600_000;
 
 /** Days of call rollups kept by default: the widest reads go back 60 days (economics, fees 30d and its previous 30d). */
 export const ROLLUP_KEEP_DAYS = 63;
@@ -45,6 +49,22 @@ export const ROLLUP_CLOSE_MARGIN_MS = 10 * 60_000;
  */
 export const ROLLUP_CALLER_SET_MIN_TXS = 500;
 
+/**
+ * An hour is built once the tx stream is this far past its end. Shorter than a day's margin: a
+ * transaction that arrives later marks its hour to be rebuilt, and an hour is a small build.
+ */
+export const HOUR_CLOSE_MARGIN_MS = 3 * 60_000;
+/**
+ * Hours kept behind the clock: the last day (the 24-hour windows), yesterday while its day
+ * rollup is not built, and a margin.
+ */
+export const HOUR_RECENT_KEEP = 50;
+/** An hour that left what the builder wants is kept this many hours more: a window table may still hold it. */
+export const HOUR_KEEP_SLACK = 3;
+/** The windows that have a table of their own (elysium_target_window), in days. */
+export const WINDOW_SPANS = [1, 7, 30] as const;
+export type WindowSpan = (typeof WINDOW_SPANS)[number];
+
 export interface RollupDayCoverage {
   /** elysium_caller_set / elysium_caller_day hold this day. */
   callers: boolean;
@@ -56,8 +76,10 @@ export interface RollupDayCoverage {
 export type RollupNeed = 'calls' | 'callers' | 'senders';
 
 export interface RollupPlan {
-  /** Whole UTC days (YYYY-MM-DD, ascending) read from the rollups. */
+  /** Whole UTC days (YYYY-MM-DD, ascending) read from the day rollups. */
   days: string[];
+  /** Whole UTC hours (epoch ms of their start, ascending) read from the hour rollups. */
+  hours: number[];
   /** The rest of the window, read from elysium_tx: [from, to) ranges, ascending, never touching. */
   raw: Array<{ from: Date; to: Date }>;
 }
@@ -70,21 +92,35 @@ function utcDayStart(ms: number): number {
   return Math.floor(ms / DAY_MS) * DAY_MS;
 }
 
+/** Start of the UTC hour `ms` falls in (epoch ms). */
+export function utcHourStart(ms: number): number {
+  return Math.floor(ms / HOUR_MS) * HOUR_MS;
+}
+
 /**
- * Splits [start, end) between the built days it wholly contains and raw
- * ranges. `coverage` holds the built, non-dirty days. An empty or inverted
- * window gives an empty plan.
+ * Splits [start, end) between the built days it wholly contains, the built
+ * hours the rest wholly contains, and raw ranges. `coverage` holds the built,
+ * non-dirty days; `hours` the built, non-dirty hours (epoch ms of their
+ * start), used only by a read of the call sums: the hour rollups hold no
+ * sender list. An empty or inverted window gives an empty plan.
  */
 export function planRollupWindow(
   start: Date,
   end: Date,
   coverage: ReadonlyMap<string, RollupDayCoverage>,
-  need: RollupNeed = 'calls'
+  need: RollupNeed = 'calls',
+  hours?: { has(hour: number): boolean }
 ): RollupPlan {
-  const plan: RollupPlan = { days: [], raw: [] };
+  const plan: RollupPlan = { days: [], hours: [], raw: [] };
   const from = start.getTime();
   const to = end.getTime();
   if (!(from < to)) return plan;
+
+  const raw = (segFrom: number, segTo: number): void => {
+    const last = plan.raw[plan.raw.length - 1];
+    if (last && last.to.getTime() === segFrom) last.to = new Date(segTo);
+    else plan.raw.push({ from: new Date(segFrom), to: new Date(segTo) });
+  };
 
   for (let day = utcDayStart(from); day < to; day += DAY_MS) {
     const segFrom = Math.max(from, day);
@@ -96,9 +132,17 @@ export function planRollupWindow(
       plan.days.push(dayKey(day));
       continue;
     }
-    const last = plan.raw[plan.raw.length - 1];
-    if (last && last.to.getTime() === segFrom) last.to = new Date(segTo);
-    else plan.raw.push({ from: new Date(segFrom), to: new Date(segTo) });
+    if (need !== 'calls' || !hours) {
+      raw(segFrom, segTo);
+      continue;
+    }
+    // The part of this day the window holds, hour by hour.
+    for (let hour = utcHourStart(segFrom); hour < segTo; hour += HOUR_MS) {
+      const partFrom = Math.max(segFrom, hour);
+      const partTo = Math.min(segTo, hour + HOUR_MS);
+      if (partFrom === hour && partTo === hour + HOUR_MS && hours.has(hour)) plan.hours.push(hour);
+      else raw(partFrom, partTo);
+    }
   }
   return plan;
 }
@@ -129,4 +173,68 @@ export function isWithinDays(day: string, now: Date, days: number): boolean {
 /** The first UTC day (YYYY-MM-DD) kept by a table that keeps `keepDays` days before today. */
 export function firstKeptDay(now: Date, keepDays: number): string {
   return dayKey(utcDayStart(now.getTime()) - keepDays * DAY_MS);
+}
+
+/**
+ * The hours whose rollup the builder wants at `now` (epoch ms of their start),
+ * the most pressing first:
+ * - the last HOUR_RECENT_KEEP hours: today, the first partial day of a 24-hour
+ *   window, and yesterday until its day rollup is built;
+ * - for each longer window, the hours after the one its start falls in, to
+ *   the end of the next UTC day: the rest of the window's first, partial day,
+ *   and the day that becomes the first one at the next midnight, built ahead.
+ * Nothing before the first hour of the chain, nothing that has not ended.
+ */
+export function wantedRollupHours(now: Date, genesis: Date): number[] {
+  const nowMs = now.getTime();
+  const current = utcHourStart(nowMs);
+  const first = utcHourStart(genesis.getTime());
+  // How soon each hour is used: hours ago for the recent ones, hours past the window's start for the others.
+  const urgency = new Map<number, number>();
+  const want = (hour: number, score: number): void => {
+    if (hour < first || hour >= current) return;
+    const known = urgency.get(hour);
+    if (known === undefined || score < known) urgency.set(hour, score);
+  };
+  for (let i = 1; i <= HOUR_RECENT_KEEP; i++) want(current - i * HOUR_MS, i);
+  for (const span of WINDOW_SPANS) {
+    if (span === 1) continue;
+    // The hour the window's start falls in is never whole in the window: the first one that is, is the next.
+    const startHour = utcHourStart(nowMs - span * DAY_MS);
+    const until = utcDayStart(startHour) + 2 * DAY_MS;
+    for (let hour = startHour + HOUR_MS, i = 0; hour < until; hour += HOUR_MS, i++) want(hour, i);
+  }
+  return [...urgency.entries()].sort((a, b) => a[1] - b[1] || b[0] - a[0]).map(([hour]) => hour);
+}
+
+/** Of the wanted hours, those the tx stream is done with: its cursor is HOUR_CLOSE_MARGIN_MS past their end. */
+export function closedRollupHours(cursor: Date | null, now: Date, genesis: Date): number[] {
+  if (!cursor) return [];
+  return wantedRollupHours(now, genesis).filter((hour) => hour + HOUR_MS + HOUR_CLOSE_MARGIN_MS <= cursor.getTime());
+}
+
+/**
+ * The hours whose rows are kept at `now`: the wanted ones, and the HOUR_KEEP_SLACK hours before
+ * each run of them, which a window table refreshed a little earlier may still be standing for.
+ */
+export function keptRollupHours(now: Date, genesis: Date): Set<number> {
+  const kept = new Set<number>();
+  for (const hour of wantedRollupHours(now, genesis)) {
+    for (let i = 0; i <= HOUR_KEEP_SLACK; i++) kept.add(hour - i * HOUR_MS);
+  }
+  return kept;
+}
+
+/**
+ * When the builder next has something to do if nothing is waiting now: at the next hour's
+ * close (its end plus the margin, a few seconds later), at the next UTC midnight (the days of
+ * every window move then, and the window tables with them), and no later than `idleMs`.
+ */
+export function nextRollupWakeMs(now: Date, idleMs: number): number {
+  const nowMs = now.getTime();
+  const slack = 5_000;
+  let close = utcHourStart(nowMs) + HOUR_CLOSE_MARGIN_MS + slack;
+  if (close <= nowMs) close += HOUR_MS;
+  const midnight = utcDayStart(nowMs) + DAY_MS + slack;
+  return Math.max(slack, Math.min(idleMs, close - nowMs, midnight - nowMs));
 }

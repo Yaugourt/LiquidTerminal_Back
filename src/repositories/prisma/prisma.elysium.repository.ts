@@ -102,7 +102,8 @@ export class ElysiumIngestRepository {
    * bridge-driven tx type) from the rows that were actually
    * inserted (RETURNING). A replayed row conflicts, is not returned, and so is
    * never counted twice; a crash rolls back the whole statement. A row of a
-   * past UTC day also marks that day's rollups as to be rebuilt.
+   * past UTC day also marks that day's rollups as to be rebuilt, and a row of a
+   * past UTC hour that hour's.
    */
   public async insertTxs(rows: TxRow[]): Promise<{ inserted: number; contracts: number }> {
     if (rows.length === 0) return { inserted: 0, contracts: 0 };
@@ -158,12 +159,24 @@ export class ElysiumIngestRepository {
         WHERE (block_time AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date
         ON CONFLICT (day) DO UPDATE SET dirty = true WHERE NOT elysium_day_rollup.dirty
         RETURNING 1
+      ),
+      h AS (
+        -- And of an hour that is over: that hour's rollup is rebuilt, for the same reason and
+        -- in the same way (ElysiumRollupRepository.buildHour). The row is written whether or
+        -- not the hour was ever built: a build that starts meanwhile then finds it.
+        INSERT INTO elysium_hour_rollup (hour, dirty)
+        SELECT DISTINCT date_trunc('hour', block_time, 'UTC'), true
+        FROM ins
+        WHERE block_time < date_trunc('hour', now(), 'UTC')
+        ON CONFLICT (hour) DO UPDATE SET dirty = true WHERE NOT elysium_hour_rollup.dirty
+        RETURNING 1
       )
       SELECT (SELECT count(*) FROM ins)::int AS inserted,
              (SELECT count(*) FROM c)::int AS contracts,
              (SELECT count(*) FROM a)::int AS addresses,
              (SELECT count(*) FROM d)::int AS address_days,
-             (SELECT count(*) FROM r)::int AS rollup_days
+             (SELECT count(*) FROM r)::int AS rollup_days,
+             (SELECT count(*) FROM h)::int AS rollup_hours
       `,
       JSON.stringify(rows)
     );

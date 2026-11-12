@@ -317,6 +317,7 @@ export class ElysiumCheckRepository {
         }
         await this.adjustSenders(tx, events);
         await this.markDaysDirty(tx, [...new Set(changed.flatMap((c) => [c.old_day.slice(0, 10), c.new_day.slice(0, 10)]))]);
+        await this.markHoursDirty(tx, changed.flatMap((c) => [c.old_at, c.new_at]));
         return changed.length;
       },
       { timeout: FIX_TIMEOUT_MS + 20_000, maxWait: 15_000 }
@@ -406,6 +407,16 @@ export class ElysiumCheckRepository {
           gone.filter((g) => g.was_user).map((g) => ({ from_addr: g.from_addr, kind: 'leave' as const, day: g.day.slice(0, 10), at: g.at }))
         );
         await this.markDaysDirty(tx, [...new Set(gone.map((g) => g.day.slice(0, 10)))]);
+        await this.markHoursDirty(tx, gone.map((g) => g.at));
+        // A contract that is gone: the window tables hold its address as a known contract, and
+        // the pass that keeps their classes up to date only ever looks at the unknown ones. The
+        // tables are worked out again from nothing (see elysium_window_state.epoch).
+        if (contracts.length > 0) {
+          await tx.$executeRawUnsafe(
+            `INSERT INTO elysium_window_state (span, version) VALUES (0, 1)
+             ON CONFLICT (span) DO UPDATE SET version = elysium_window_state.version + 1`
+          );
+        }
         return gone.length;
       },
       { timeout: FIX_TIMEOUT_MS + 20_000, maxWait: 15_000 }
@@ -483,6 +494,18 @@ export class ElysiumCheckRepository {
        ON CONFLICT (address) DO UPDATE SET first_seen = EXCLUDED.first_seen, first_day = EXCLUDED.first_day
          WHERE EXCLUDED.first_seen < elysium_address.first_seen`,
       json
+    );
+  }
+
+  /** The rollup of an hour that is over is rebuilt once its rows changed (as the tx insert does). `ats`: ISO times of the rows. */
+  private async markHoursDirty(tx: Tx, ats: string[]): Promise<void> {
+    if (ats.length === 0) return;
+    await tx.$executeRawUnsafe(
+      `INSERT INTO elysium_hour_rollup (hour, dirty)
+       SELECT DISTINCT date_trunc('hour', a::timestamptz, 'UTC'), true FROM unnest($1::text[]) AS a
+       WHERE a::timestamptz < date_trunc('hour', now(), 'UTC')
+       ON CONFLICT (hour) DO UPDATE SET dirty = true WHERE NOT elysium_hour_rollup.dirty`,
+      [...new Set(ats)]
     );
   }
 

@@ -136,6 +136,26 @@ describe('what is worth a message', () => {
     expect(keys(s)).toEqual(['rollups:error', 'rollups:waiting', 'upkeep:launchstate', 'view:elysium:analytics:fees:30d']);
   });
 
+  it('a window table that is not ready, or not refreshed for three hours: its views compute the slow way', () => {
+    const s = healthy();
+    const at = (msAgo: number): string => new Date(NOW - msAgo).toISOString();
+    s.rollups = {
+      waitingDays: 0,
+      lastError: null,
+      windows: [
+        { span: 1, ready: true, refreshedAt: at(40 * 60_000) },
+        { span: 7, ready: false, refreshedAt: at(60_000) },
+        { span: 30, ready: true, refreshedAt: at(3 * 3_600_000 + 1) },
+      ],
+    };
+    expect(keys(s)).toEqual(['rollups:window:7', 'rollups:window:30']);
+    // Said after an hour: a table is worked out again in minutes after a start.
+    expect(alertConditions(s as never, NOW).find((c) => c.key === 'rollups:window:7')?.forS).toBe(3600);
+    // Switched off, the status lists none.
+    s.rollups = { waitingDays: 0, lastError: null, windows: [] };
+    expect(keys(s)).toEqual([]);
+  });
+
   it('not a view computed on demand that failed once: nobody may ask for it again, and its error would stay for ever', () => {
     const s = healthy();
     s.views = [{ view: 'elysium:analytics:users:d90', everyS: null, lastError: 'deadline' }];
@@ -150,7 +170,7 @@ describe('what is worth a message', () => {
     s.database = { bytes: null, volumeBytes: 100e9, usedShare: null };
     s.credits = null;
     expect(keys(s)).toEqual([]);
-    expect(alertUnknown(s as never, NOW)).toEqual(['rollups:waiting', 'day:', 'reject:', 'database', 'credits:']);
+    expect(alertUnknown(s as never, NOW)).toEqual(['rollups:waiting', 'rollups:window:', 'day:', 'reject:', 'database', 'credits:']);
     expect(alertUnknown(healthy() as never, NOW)).toEqual([]);
   });
 

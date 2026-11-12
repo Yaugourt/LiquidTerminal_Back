@@ -1,17 +1,26 @@
 /**
- * Day rollups, the pure part: how a window splits between built days and raw
- * ranges (the two must never overlap and must cover the window), and which
- * days may be built.
+ * Rollups, the pure part: how a window splits between built days, built hours
+ * and raw ranges (they must never overlap and must cover the window), and
+ * which days and hours may be built.
  */
 import {
   closedRollupDays,
+  closedRollupHours,
   firstKeptDay,
+  HOUR_CLOSE_MARGIN_MS,
+  HOUR_KEEP_SLACK,
+  HOUR_MS,
+  HOUR_RECENT_KEEP,
   isWithinDays,
+  keptRollupHours,
+  nextRollupWakeMs,
   planRollupWindow,
   ROLLUP_CLOSE_MARGIN_MS,
   rollupKeepDays,
   RollupDayCoverage,
   RollupPlan,
+  utcHourStart,
+  wantedRollupHours,
 } from '../../../src/services/elysium/elysium-rollup.util';
 
 const DAY = 86_400_000;
@@ -30,6 +39,7 @@ const range = (from: string, to: string) => ({ from: at(from), to: at(to) });
 function covered(plan: RollupPlan): { ms: number; overlap: boolean } {
   const parts = [
     ...plan.days.map((d) => [Date.parse(`${d}T00:00:00Z`), Date.parse(`${d}T00:00:00Z`) + DAY]),
+    ...plan.hours.map((h) => [h, h + HOUR_MS]),
     ...plan.raw.map((r) => [r.from.getTime(), r.to.getTime()]),
   ].sort((a, b) => a[0] - b[0]);
   let overlap = false;
@@ -107,8 +117,8 @@ describe('planRollupWindow', () => {
   });
 
   it('gives an empty plan for an empty or inverted window', () => {
-    expect(planRollupWindow(now, now, built)).toEqual({ days: [], raw: [] });
-    expect(planRollupWindow(now, at('2026-11-09T00:00:00.000Z'), built)).toEqual({ days: [], raw: [] });
+    expect(planRollupWindow(now, now, built)).toEqual({ days: [], hours: [], raw: [] });
+    expect(planRollupWindow(now, at('2026-11-09T00:00:00.000Z'), built)).toEqual({ days: [], hours: [], raw: [] });
   });
 
   it('covers the window exactly once, whatever is built', () => {
@@ -208,5 +218,156 @@ describe('rollupKeepDays', () => {
     const days = closedRollupDays(new Date('2026-11-10T07:59:00Z'), new Date('2026-11-10T08:00:00Z'), new Date('2026-09-11T11:55:00Z'));
     expect(days).toHaveLength(12);
     expect(days[days.length - 1]).toBe('2026-10-29');
+  });
+});
+
+describe('planRollupWindow with hour rollups', () => {
+  const H = (iso: string): number => Date.parse(iso);
+  const now = at('2026-11-10T08:01:20.000Z');
+  const start = at('2026-11-03T08:01:20.000Z');
+  const days = coverage({ '2026-11-04': true, '2026-11-05': true, '2026-11-06': true, '2026-11-07': true, '2026-11-08': true, '2026-11-09': true });
+  /** Every hour from `from` to `to` (exclusive). */
+  const hoursOf = (from: string, to: string): Set<number> => {
+    const out = new Set<number>();
+    for (let h = H(from); h < H(to); h += HOUR_MS) out.add(h);
+    return out;
+  };
+
+  it('reads the whole hours of the edges from the hour rollups, and what is left from elysium_tx', () => {
+    const built = new Set([...hoursOf('2026-11-03T00:00:00Z', '2026-11-04T00:00:00Z'), ...hoursOf('2026-11-10T00:00:00Z', '2026-11-10T07:00:00Z')]);
+    const plan = planRollupWindow(start, now, days, 'calls', built);
+    expect(plan.days).toHaveLength(6);
+    // First day: its first whole hour in the window is 09:00, up to midnight. Today: 00:00 to 07:00.
+    expect(plan.hours).toEqual([...hoursOf('2026-11-03T09:00:00Z', '2026-11-04T00:00:00Z'), ...hoursOf('2026-11-10T00:00:00Z', '2026-11-10T07:00:00Z')]);
+    expect(plan.raw).toEqual([
+      range('2026-11-03T08:01:20.000Z', '2026-11-03T09:00:00.000Z'),
+      range('2026-11-10T07:00:00.000Z', '2026-11-10T08:01:20.000Z'),
+    ]);
+    expect(covered(plan)).toEqual({ ms: 7 * DAY, overlap: false });
+  });
+
+  it('reads an hour that is not built from elysium_tx, and joins it to the raw range beside it', () => {
+    const built = hoursOf('2026-11-10T00:00:00Z', '2026-11-10T07:00:00Z');
+    built.delete(H('2026-11-10T03:00:00Z'));
+    built.delete(H('2026-11-10T06:00:00Z'));
+    const plan = planRollupWindow(at('2026-11-10T00:00:00Z'), now, days, 'calls', built);
+    expect(plan.hours.map((h) => new Date(h).toISOString().slice(11, 13))).toEqual(['00', '01', '02', '04', '05']);
+    expect(plan.raw).toEqual([
+      range('2026-11-10T03:00:00.000Z', '2026-11-10T04:00:00.000Z'),
+      range('2026-11-10T06:00:00.000Z', '2026-11-10T08:01:20.000Z'),
+    ]);
+  });
+
+  it('never takes an hour the window holds only part of, nor an hour of a day read from the day rollups', () => {
+    const built = hoursOf('2026-11-03T00:00:00Z', '2026-11-11T00:00:00Z');
+    const plan = planRollupWindow(start, now, days, 'calls', built);
+    expect(plan.hours).not.toContain(H('2026-11-03T08:00:00Z'));
+    expect(plan.hours).not.toContain(H('2026-11-10T08:00:00Z'));
+    expect(plan.hours.some((h) => h >= H('2026-11-04T00:00:00Z') && h < H('2026-11-10T00:00:00Z'))).toBe(false);
+    expect(covered(plan)).toEqual({ ms: 7 * DAY, overlap: false });
+  });
+
+  it('takes the hours of a day that is not built, whole day included', () => {
+    const built = hoursOf('2026-11-08T00:00:00Z', '2026-11-10T00:00:00Z');
+    const plan = planRollupWindow(at('2026-11-08T00:00:00Z'), at('2026-11-10T00:00:00Z'), coverage({ '2026-11-08': true }), 'calls', built);
+    expect(plan.days).toEqual(['2026-11-08']);
+    expect(plan.hours).toEqual([...hoursOf('2026-11-09T00:00:00Z', '2026-11-10T00:00:00Z')]);
+    expect(plan.raw).toEqual([]);
+  });
+
+  it('does not use the hours for a read of the sender lists: they hold none', () => {
+    const built = hoursOf('2026-11-03T00:00:00Z', '2026-11-11T00:00:00Z');
+    for (const need of ['callers', 'senders'] as const) {
+      const plan = planRollupWindow(start, now, days, need, built);
+      expect(plan.hours).toEqual([]);
+      expect(plan.raw).toEqual([
+        range('2026-11-03T08:01:20.000Z', '2026-11-04T00:00:00.000Z'),
+        range('2026-11-10T00:00:00.000Z', '2026-11-10T08:01:20.000Z'),
+      ]);
+    }
+  });
+
+  it('covers the window exactly once, whatever days and hours are built', () => {
+    let seed = 11;
+    const rnd = (): number => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let i = 0; i < 300; i++) {
+      const builtDays = coverage(Object.fromEntries(['2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08', '2026-11-09'].filter(() => rnd() < 0.7).map((d) => [d, true as const])));
+      const builtHours = new Set([...hoursOf('2026-11-01T00:00:00Z', '2026-11-11T00:00:00Z')].filter(() => rnd() < 0.6));
+      const from = H('2026-11-02T00:00:00Z') + Math.floor(rnd() * 5 * DAY);
+      const to = from + Math.floor(rnd() * 4 * DAY) + 1;
+      const plan = planRollupWindow(new Date(from), new Date(to), builtDays, 'calls', builtHours);
+      expect(covered(plan)).toEqual({ ms: to - from, overlap: false });
+      for (const h of plan.hours) expect(builtHours.has(h) && h >= from && h + HOUR_MS <= to).toBe(true);
+    }
+  });
+});
+
+describe('the hours the builder wants', () => {
+  const genesis = at('2026-09-11T11:55:00Z');
+  const now = at('2026-11-10T08:01:20.000Z');
+  const current = Date.parse('2026-11-10T08:00:00Z');
+  const iso = (h: number): string => new Date(h).toISOString();
+
+  it('wants the last 50 hours, and for the 7 and 30 day windows the rest of their first day and the day after it', () => {
+    const wanted = new Set(wantedRollupHours(now, genesis));
+    for (let i = 1; i <= HOUR_RECENT_KEEP; i++) expect(wanted.has(current - i * HOUR_MS)).toBe(true);
+    expect(wanted.has(current)).toBe(false);
+    expect(wanted.has(current - (HOUR_RECENT_KEEP + 1) * HOUR_MS)).toBe(false);
+    for (const span of [7, 30]) {
+      const startHour = utcHourStart(now.getTime() - span * DAY);
+      // The hour the window starts in is never whole in it.
+      expect(wanted.has(startHour)).toBe(false);
+      expect(wanted.has(startHour + HOUR_MS)).toBe(true);
+      // To the end of the day after the window's first day: the first day of tomorrow's window, built ahead.
+      const lastWanted = Math.floor(startHour / DAY) * DAY + 2 * DAY - HOUR_MS;
+      expect(wanted.has(lastWanted)).toBe(true);
+      expect(wanted.has(lastWanted + HOUR_MS)).toBe(false);
+    }
+    // 50 recent, and for each longer window 15 hours left of its first day plus the 24 of the next.
+    expect(wanted.size).toBe(HOUR_RECENT_KEEP + 2 * (15 + 24));
+  });
+
+  it('puts the most pressing first: the latest hours, and the ones right after a window start', () => {
+    const wanted = wantedRollupHours(now, genesis);
+    expect(iso(wanted[0])).toBe('2026-11-03T09:00:00.000Z');
+    expect(new Set(wanted.slice(0, 3).map(iso))).toEqual(new Set(['2026-11-03T09:00:00.000Z', '2026-10-11T09:00:00.000Z', '2026-11-10T07:00:00.000Z']));
+  });
+
+  it('wants nothing before the first hour of the chain', () => {
+    const early = at('2026-09-12T03:10:00Z');
+    const wanted = wantedRollupHours(early, genesis);
+    expect(Math.min(...wanted)).toBe(Date.parse('2026-09-11T11:00:00Z'));
+    expect(wanted).toHaveLength(16);
+  });
+
+  it('builds an hour once the tx stream is three minutes past its end', () => {
+    const closedAt = (cursor: string): number[] => closedRollupHours(at(cursor), now, genesis);
+    const last = current - HOUR_MS;
+    expect(closedAt(new Date(current + HOUR_CLOSE_MARGIN_MS - 1).toISOString())).not.toContain(last);
+    expect(closedAt(new Date(current + HOUR_CLOSE_MARGIN_MS).toISOString())).toContain(last);
+    expect(closedRollupHours(null, now, genesis)).toEqual([]);
+    // A stream that stopped two days ago: the recent hours wait, the old ones of the windows are built.
+    const stalled = closedAt('2026-11-08T08:00:00Z');
+    expect(stalled).toContain(Date.parse('2026-11-03T09:00:00Z'));
+    expect(stalled).not.toContain(Date.parse('2026-11-08T08:00:00Z'));
+  });
+
+  it('keeps the wanted hours and a few before each run of them', () => {
+    const kept = keptRollupHours(now, genesis);
+    for (const hour of wantedRollupHours(now, genesis)) expect(kept.has(hour)).toBe(true);
+    const start7 = utcHourStart(now.getTime() - 7 * DAY);
+    for (let i = 0; i < HOUR_KEEP_SLACK; i++) expect(kept.has(start7 - i * HOUR_MS)).toBe(true);
+    expect(kept.has(start7 - HOUR_KEEP_SLACK * HOUR_MS)).toBe(false);
+  });
+
+  it('wakes the builder at the next hour close and at midnight, and no later than the idle period', () => {
+    const idle = 5 * 60_000;
+    expect(nextRollupWakeMs(at('2026-11-10T08:10:00Z'), idle)).toBe(idle);
+    // 07:59:00: the hour that ends at 08:00 closes at 08:03:05; before it, midnight is far.
+    expect(nextRollupWakeMs(at('2026-11-10T07:59:00Z'), idle)).toBe(4 * 60_000 + 5_000);
+    expect(nextRollupWakeMs(at('2026-11-10T08:02:00Z'), idle)).toBe(65_000);
+    expect(nextRollupWakeMs(at('2026-11-10T08:03:04Z'), idle)).toBe(5_000);
+    expect(nextRollupWakeMs(at('2026-11-10T23:58:00Z'), idle)).toBe(125_000);
+    expect(nextRollupWakeMs(at('2026-11-10T23:59:59Z'), idle)).toBe(6_000);
   });
 });

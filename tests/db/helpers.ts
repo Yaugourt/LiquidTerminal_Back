@@ -9,7 +9,8 @@ export const wipe = (): Promise<number> =>
   x(`TRUNCATE elysium_tx, elysium_tx_live, elysium_contract, elysium_address, elysium_address_day, elysium_day_rollup,
      elysium_call_day, elysium_caller_day, elysium_caller_set, elysium_method_sender_day, elysium_day_check,
      elysium_dex_pool, elysium_dex_swap, elysium_launch, elysium_launch_trade, elysium_ingest_reject,
-     elysium_bridge_transfer, elysium_token, elysium_token_stat, elysium_ingest_state`);
+     elysium_bridge_transfer, elysium_token, elysium_token_stat, elysium_ingest_state,
+     elysium_hour_rollup, elysium_call_hour, elysium_target_window, elysium_deployer_window, elysium_window_state`);
 
 export const H = (n: number): string => '0x' + n.toString(16).padStart(64, '0');
 export const A = (n: number): string => '0x' + n.toString(16).padStart(40, '0');

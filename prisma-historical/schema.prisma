@@ -181,6 +181,7 @@ model ElysiumBridgeTransfer {
   @@index([initiatedAt])
   @@index([direction, initiatedAt])
   @@index([fromAddr, initiatedAt])
+  @@index([toAddr, initiatedAt])
   // Plus a partial index Prisma cannot describe (migration 20261111180000):
   // elysium_bridge_transfer_open_deposit_idx on (initiated_at) for the deposits still waiting.
   @@map("elysium_bridge_transfer")
@@ -198,6 +199,9 @@ model ElysiumToken {
   transferCount BigInt    @default(0) @map("transfer_count")
   updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
 
+  // Plus two partial indexes Prisma cannot describe (migration 20261112120000):
+  // elysium_token_top_idx (transfer_count DESC, address) for the named ERC-20s,
+  // elysium_token_first_seen_idx (first_seen) for the ERC-20s.
   @@map("elysium_token")
 }
 
@@ -218,6 +222,8 @@ model ElysiumDexPool {
 
   @@index([createdAt])
   @@index([factory])
+  @@index([token0])
+  @@index([token1])
   @@map("elysium_dex_pool")
 }
 
@@ -394,6 +400,109 @@ model ElysiumMethodSenderDay {
 
   @@id([day, methodId, fromAddr])
   @@map("elysium_method_sender_day")
+}
+
+/// One row per UTC hour of elysium_tx whose rollup the builder wants: whether it is complete
+/// (`builtAt` set and not `dirty`) and the hour's totals. Kept a few days: the hours of the
+/// edges of the windows the pages show.
+model ElysiumHourRollup {
+  hour       DateTime  @id @db.Timestamptz(3)
+  builtAt    DateTime? @map("built_at") @db.Timestamptz(3)
+  /// A write to elysium_tx touched this past hour after the build: rebuilt on the next pass.
+  dirty      Boolean   @default(false)
+  buildToken String?   @map("build_token") @db.VarChar(36)
+  txs        Int       @default(0)
+  failedTxs  Int       @default(0) @map("failed_txs")
+  bridgeTxs  Int       @default(0) @map("bridge_txs")
+  calls      Int       @default(0)
+  transfers  Int       @default(0)
+  creations  Int       @default(0)
+  spamTxs    Int       @default(0) @map("spam_txs")
+  feeWei     Decimal   @default(0) @map("fee_wei") @db.Decimal(60, 0)
+
+  @@map("elysium_hour_rollup")
+}
+
+/// Non-spam transactions sent to an address, per hour, target and selector ('' = no calldata).
+model ElysiumCallHour {
+  hour     DateTime @db.Timestamptz(3)
+  toAddr   String   @map("to_addr") @db.VarChar(42)
+  methodId String   @default("") @map("method_id") @db.VarChar(10)
+  txs      Int
+  failed   Int
+  feeWei   Decimal  @map("fee_wei") @db.Decimal(60, 0)
+  gasUsed  BigInt   @map("gas_used")
+
+  @@id([hour, toAddr, methodId])
+  @@index([hour])
+  @@map("elysium_call_hour")
+}
+
+/// Per window (span in days: 1, 7, 30) and called address: the non-spam transactions sent to
+/// it over what the window's state row lists. `d*` = the whole days of the base; `txs`,
+/// `feeWei`, `gasUsed` = those plus the edges. kind: 0 not a known contract, 1 contract or
+/// registry token, 2 precompile. Partial indexes (top by fees / by txs among the known ones,
+/// rows still to class, rows the edges touch) live in the migration, and so does the split of
+/// the table in one partition per span: Prisma cannot describe them.
+model ElysiumTargetWindow {
+  span     Int     @db.SmallInt
+  toAddr   String  @map("to_addr") @db.VarChar(42)
+  dTxs     Int     @default(0) @map("d_txs")
+  dFeeWei  Decimal @default(0) @map("d_fee_wei") @db.Decimal(60, 0)
+  dGasUsed BigInt  @default(0) @map("d_gas_used")
+  txs      Int
+  feeWei   Decimal @map("fee_wei") @db.Decimal(60, 0)
+  gasUsed  BigInt  @map("gas_used")
+  edged    Boolean @default(false)
+  kind     Int     @db.SmallInt
+  deployer String? @db.VarChar(42)
+
+  @@id([span, toAddr])
+  @@map("elysium_target_window")
+}
+
+/// Per window and deployer: the sums of its contracts in elysium_target_window.
+model ElysiumDeployerWindow {
+  span      Int     @db.SmallInt
+  deployer  String  @db.VarChar(42)
+  txs       BigInt
+  feeWei    Decimal @map("fee_wei") @db.Decimal(60, 0)
+  gasUsed   Decimal @map("gas_used") @db.Decimal(40, 0)
+  contracts Int
+
+  @@id([span, deployer])
+  @@index([span, feeWei(sort: Desc), deployer])
+  @@map("elysium_deployer_window")
+}
+
+/// One row per window: the days and hours its rows stand for (each with the build time of the
+/// rollup it was read from), whether they are complete, and their totals per class.
+model ElysiumWindowState {
+  span          Int       @id @db.SmallInt
+  version       BigInt    @default(0)
+  ready         Boolean   @default(false)
+  /// The value of row span = 0's version under which every row's class was last worked out from nothing.
+  epoch         BigInt    @default(0)
+  baseDays      Json      @default("[]") @map("base_days")
+  coverDays     Json      @default("[]") @map("cover_days")
+  coverHours    Json      @default("[]") @map("cover_hours")
+  otherTxs      BigInt    @default(0) @map("other_txs")
+  otherFeeWei   Decimal   @default(0) @map("other_fee_wei") @db.Decimal(60, 0)
+  otherGasUsed  Decimal   @default(0) @map("other_gas_used") @db.Decimal(40, 0)
+  otherN        Int       @default(0) @map("other_n")
+  appTxs        BigInt    @default(0) @map("app_txs")
+  appFeeWei     Decimal   @default(0) @map("app_fee_wei") @db.Decimal(60, 0)
+  appGasUsed    Decimal   @default(0) @map("app_gas_used") @db.Decimal(40, 0)
+  appN          Int       @default(0) @map("app_n")
+  systemTxs     BigInt    @default(0) @map("system_txs")
+  systemFeeWei  Decimal   @default(0) @map("system_fee_wei") @db.Decimal(60, 0)
+  systemGasUsed Decimal   @default(0) @map("system_gas_used") @db.Decimal(40, 0)
+  systemN       Int       @default(0) @map("system_n")
+  basedAt       DateTime? @map("based_at") @db.Timestamptz(3)
+  refreshedAt   DateTime? @map("refreshed_at") @db.Timestamptz(3)
+  classifiedAt  DateTime? @map("classified_at") @db.Timestamptz(3)
+
+  @@map("elysium_window_state")
 }
 
 /// Watermark per ingestion stream (tx, bridge, tokens) for resume + monitoring.

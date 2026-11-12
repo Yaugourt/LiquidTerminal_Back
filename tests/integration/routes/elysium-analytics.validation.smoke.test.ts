@@ -151,9 +151,10 @@ describe('Elysium analytics GET validation smoke', () => {
   it('passes the address param through', async () => {
     const a = '0x1e4f06e89a0c4f0c47f42a78881c8ee357dd628e';
     await request(app).get(`/elysium/analytics/address/${a}`);
-    expect(mockService.getAddress).toHaveBeenLastCalledWith(a);
+    // With the client's key: the profiles are computed a few at a time, one per client.
+    expect(mockService.getAddress).toHaveBeenLastCalledWith(a, expect.any(String));
     await request(app).get(`/elysium/analytics/contract/${a}`);
-    expect(mockService.getContract).toHaveBeenLastCalledWith(a);
+    expect(mockService.getContract).toHaveBeenLastCalledWith(a, expect.any(String));
   });
 });
 

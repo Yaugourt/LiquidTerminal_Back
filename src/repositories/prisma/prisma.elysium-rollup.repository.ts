@@ -1,15 +1,20 @@
 import { randomUUID } from 'crypto';
 import { prismaHistorical } from '../../core/prisma.historical.service';
 import { BRIDGE_TX_TYPES } from '../../services/elysium/elysium-ingest.util';
-import { ROLLUP_CALLER_SET_MIN_TXS } from '../../services/elysium/elysium-rollup.util';
+import { HOUR_MS, ROLLUP_CALLER_SET_MIN_TXS } from '../../services/elysium/elysium-rollup.util';
 
 /** Constant SQL list of the bridge tx types (no user input involved). */
 const BRIDGE_TYPES_SQL = BRIDGE_TX_TYPES.map((t) => `'${t}'`).join(', ');
 
 /** Time limit of one day's build: it reads that day of elysium_tx once (up to a few million rows). */
 const BUILD_TIMEOUT_MS = 900_000;
-/** Key of the advisory lock that keeps two builds from running at once, on whatever process. */
-const BUILD_LOCK_KEY = 'elysium_day_rollup';
+/** Time limit of one hour's build: an hour of elysium_tx, read once. */
+const HOUR_BUILD_TIMEOUT_MS = 180_000;
+/**
+ * Key of the advisory lock that keeps two builds from running at once, on whatever process: a
+ * day, an hour, or a window table (ElysiumWindowRepository), which is read from both.
+ */
+export const BUILD_LOCK_KEY = 'elysium_day_rollup';
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -21,8 +26,15 @@ export interface RollupDayState {
   senders: boolean;
 }
 
+export interface RollupHourState {
+  /** Start of the hour, epoch ms. */
+  hour: number;
+  built: boolean;
+  dirty: boolean;
+}
+
 export type RollupBuildResult =
-  /** The day is built. */
+  /** The day (or hour) is built. */
   | 'built'
   /** A transaction of that day arrived during the build: nothing was kept, the next pass redoes it. */
   | 'dirty'
@@ -213,6 +225,136 @@ export class ElysiumRollupRepository {
       throw error;
     }
     return 'built';
+  }
+
+  /** Every hour row from `sinceMs` on, whatever its state. */
+  public async listHours(sinceMs: number): Promise<RollupHourState[]> {
+    const rows = await prismaHistorical.$queryRawUnsafe<Array<{ hour_ms: number; built: boolean; dirty: boolean }>>(
+      `SELECT (extract(epoch FROM hour) * 1000)::float8 AS hour_ms, (built_at IS NOT NULL) AS built, dirty
+       FROM elysium_hour_rollup WHERE hour >= $1::timestamptz ORDER BY hour`,
+      new Date(sinceMs).toISOString()
+    );
+    return rows.map((r) => ({ hour: Math.round(Number(r.hour_ms)), built: r.built, dirty: r.dirty }));
+  }
+
+  /**
+   * Builds the rollup of one UTC hour from elysium_tx, the way buildDay builds a day: the
+   * hour's row is reset and stamped with this build's token, the hour is read once, and the
+   * last statement only declares it built if the row is still not dirty and still carries the
+   * token. Every write to elysium_tx marks the past hours it touches dirty in its own
+   * statement, so an hour is never declared built without one of its transactions.
+   */
+  public async buildHour(hourMs: number): Promise<RollupBuildResult> {
+    if (!Number.isSafeInteger(hourMs) || hourMs % HOUR_MS !== 0) throw new Error(`Invalid rollup hour: ${hourMs}`);
+    const from = new Date(hourMs).toISOString();
+    const to = new Date(hourMs + HOUR_MS).toISOString();
+    const token = randomUUID();
+
+    const free = await prismaHistorical.$queryRawUnsafe<Array<{ ok: boolean }>>(
+      `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok`,
+      BUILD_LOCK_KEY
+    );
+    if (!free[0]?.ok) return 'busy';
+
+    await prismaHistorical.$executeRawUnsafe(
+      `INSERT INTO elysium_hour_rollup (hour, built_at, dirty, build_token) VALUES ($1::timestamptz, NULL, false, $2)
+       ON CONFLICT (hour) DO UPDATE SET built_at = NULL, dirty = false, build_token = EXCLUDED.build_token`,
+      from,
+      token
+    );
+
+    try {
+      await prismaHistorical.$transaction(
+        async (tx) => {
+          const lock = await tx.$queryRawUnsafe<Array<{ ok: boolean }>>(
+            `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok`,
+            BUILD_LOCK_KEY
+          );
+          if (!lock[0]?.ok) throw new RollupBusyError();
+
+          await tx.$executeRawUnsafe(`SET LOCAL max_parallel_workers_per_gather = 0`);
+          await tx.$executeRawUnsafe(`SET LOCAL work_mem = '64MB'`);
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${HOUR_BUILD_TIMEOUT_MS}`);
+
+          await tx.$executeRawUnsafe(
+            `CREATE TEMP TABLE _elysium_rollup_hour_src (
+               to_addr text, method_id text, tx_type text,
+               success boolean, is_spam boolean, gas_used bigint, fee_wei numeric
+             ) ON COMMIT DROP`
+          );
+          await tx.$executeRawUnsafe(
+            `INSERT INTO _elysium_rollup_hour_src
+             SELECT to_addr, method_id, tx_type, success, is_spam, gas_used, fee_wei
+             FROM elysium_tx WHERE block_time >= $1::timestamptz AND block_time < $2::timestamptz`,
+            from,
+            to
+          );
+
+          await tx.$executeRawUnsafe(`DELETE FROM elysium_call_hour WHERE hour = $1::timestamptz`, from);
+          await tx.$executeRawUnsafe(
+            `INSERT INTO elysium_call_hour (hour, to_addr, method_id, txs, failed, fee_wei, gas_used)
+             SELECT $1::timestamptz, to_addr, COALESCE(method_id, ''), count(*)::int,
+                    count(*) FILTER (WHERE NOT success)::int, COALESCE(sum(fee_wei), 0), COALESCE(sum(gas_used), 0)
+             FROM _elysium_rollup_hour_src
+             WHERE NOT is_spam AND to_addr IS NOT NULL
+             GROUP BY to_addr, COALESCE(method_id, '')`,
+            from
+          );
+
+          const done = await tx.$executeRawUnsafe(
+            `UPDATE elysium_hour_rollup r SET
+               built_at = now(),
+               txs = t.txs, failed_txs = t.failed, bridge_txs = t.bridge, calls = t.calls,
+               transfers = t.transfers, creations = t.creations, spam_txs = t.spam, fee_wei = t.fee
+             FROM (
+               SELECT count(*) FILTER (WHERE NOT is_spam)::int AS txs,
+                      count(*) FILTER (WHERE NOT is_spam AND NOT success)::int AS failed,
+                      count(*) FILTER (WHERE NOT is_spam AND tx_type IN (${BRIDGE_TYPES_SQL}))::int AS bridge,
+                      count(*) FILTER (WHERE NOT is_spam AND to_addr IS NOT NULL AND method_id IS NOT NULL)::int AS calls,
+                      count(*) FILTER (WHERE NOT is_spam AND to_addr IS NOT NULL AND method_id IS NULL)::int AS transfers,
+                      count(*) FILTER (WHERE NOT is_spam AND to_addr IS NULL)::int AS creations,
+                      count(*) FILTER (WHERE is_spam)::int AS spam,
+                      COALESCE(sum(fee_wei), 0) AS fee
+               FROM _elysium_rollup_hour_src
+             ) t
+             WHERE r.hour = $1::timestamptz AND NOT r.dirty AND r.build_token = $2`,
+            from,
+            token
+          );
+          if (done === 0) throw new RollupDayDirtyError();
+        },
+        { timeout: HOUR_BUILD_TIMEOUT_MS + 30_000, maxWait: 20_000 }
+      );
+    } catch (error) {
+      if (error instanceof RollupDayDirtyError) return 'dirty';
+      if (error instanceof RollupBusyError) return 'busy';
+      throw error;
+    }
+    return 'built';
+  }
+
+  /**
+   * Drops the hours before `beforeMs` that are not in `keep` (epoch ms of each hour's start):
+   * their rows, and their state. The hours from `beforeMs` on are all kept.
+   */
+  public async pruneHours(beforeMs: number, keep: number[]): Promise<number> {
+    const before = new Date(beforeMs).toISOString();
+    const kept = keep.filter((hour) => hour < beforeMs).map((hour) => new Date(hour).toISOString());
+    return prismaHistorical.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe(
+          `DELETE FROM elysium_hour_rollup WHERE hour < $1::timestamptz AND hour <> ALL($2::text[]::timestamptz[])`,
+          before,
+          kept
+        );
+        return tx.$executeRawUnsafe(
+          `DELETE FROM elysium_call_hour WHERE hour < $1::timestamptz AND hour <> ALL($2::text[]::timestamptz[])`,
+          before,
+          kept
+        );
+      },
+      { timeout: 300_000, maxWait: 20_000 }
+    );
   }
 
   /**

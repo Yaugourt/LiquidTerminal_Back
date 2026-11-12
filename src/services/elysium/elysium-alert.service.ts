@@ -16,6 +16,8 @@ const REPEAT_EVERY_MS = 6 * 3_600_000;
 const CLEAR_AFTER_MS = 5 * 60_000;
 /** A status computed longer ago than this is not the state of things any more: nothing is concluded from it. */
 const STATUS_STALE_MS = 5 * 60_000;
+/** A window table is refreshed once an hour: one not refreshed for this long is not being kept up. */
+const WINDOW_STALE_MS = 3 * 3_600_000;
 /** Looks that fail in a row before saying that nothing is being watched. */
 const BLIND_AFTER_LOOKS = 5;
 const STATE_KEY = 'elysium:alerts';
@@ -106,7 +108,21 @@ export function alertConditions(status: Status, now: number, computedAt: number 
       });
     }
 
-    if (status.rollups?.lastError) out.push({ key: 'rollups:error', forS: 600, text: `the day rollups fail: ${text(status.rollups.lastError)}` });
+    if (status.rollups?.lastError) out.push({ key: 'rollups:error', forS: 600, text: `the rollups fail: ${text(status.rollups.lastError)}` });
+    // A window table that is not ready, or not refreshed for hours: the views of its span still
+    // say the right figures, computed from the rollups, in tens of seconds instead of one.
+    if (!missing.has('rollups') && Array.isArray(status.rollups?.windows)) {
+      for (const w of status.rollups.windows as Array<Record<string, unknown>>) {
+        const refreshed = typeof w.refreshedAt === 'string' ? Date.parse(w.refreshedAt) : NaN;
+        if (w.ready !== true || !(now - refreshed < WINDOW_STALE_MS)) {
+          out.push({
+            key: `rollups:window:${text(w.span)}`,
+            forS: 3600,
+            text: `the window table of ${text(w.span)} day(s) is not kept up: its views compute the slow way`,
+          });
+        }
+      }
+    }
     if (!missing.has('rollups') && typeof status.rollups?.waitingDays === 'number' && status.rollups.waitingDays > 1) {
       out.push({ key: 'rollups:waiting', forS: 1800, text: `${status.rollups.waitingDays} closed days wait for their rollups` });
     }
@@ -181,7 +197,7 @@ export function alertUnknown(status: Status, now: number, computedAt: number = n
   if (now - computedAt > STATUS_STALE_MS) return ['stream:', 'provider', 'rollups:', 'day:', 'reject:', 'upkeep:', 'credits:', 'database'];
   const missing = partial(status);
   const out: string[] = [];
-  if (missing.has('rollups')) out.push('rollups:waiting');
+  if (missing.has('rollups')) out.push('rollups:waiting', 'rollups:window:');
   if (missing.has('completeness')) out.push('day:');
   if (missing.has('rejects')) out.push('reject:');
   if (missing.has('database')) out.push('database');

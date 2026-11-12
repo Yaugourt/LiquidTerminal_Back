@@ -63,7 +63,8 @@ address, `ELYSIUM_ALERT_TELEGRAM_CHAT_ID` is required: without it Telegram refus
 | `the provider's index has not moved for …` | 10 min of lag | 4 |
 | `<day> still differs from the provider after being read again whole` | at once | 5 |
 | `<day> differs from the provider and is still not equal` | 3 h (the daily check is reading it again meanwhile) | 5 |
-| `the day rollups fail` / `N closed days wait for their rollups` | 10 min / 30 min | 6 |
+| `the rollups fail` / `N closed days wait for their rollups` | 10 min / 30 min | 6 |
+| `the window table of N day(s) is not kept up` | 1 h | 6 |
 | `N <reason> on the <stream> stream today` | at once, per stream and reason, for that day | 7 |
 | `… HypeDexer credits spent today, over 1.3 times …` | at once, for that day | 8 |
 | `the historical database fills N% of its volume` | at 80% | 9 |
@@ -172,6 +173,47 @@ without a rollup is still served, from the raw table, slower, with the same figu
 - The rollups themselves are the suspect: `ELYSIUM_ROLLUPS_ENABLED=false` on every service makes
   every view read the raw table alone, as before 2026-11-10 (the long windows get much slower).
 - Disk: `ELYSIUM_ROLLUP_KEEP_DAYS` (63 by default) is how many days are kept.
+
+### Hours and window tables
+
+Since 2026-11-12 the same builder also keeps two more things, which change how fast a view is
+computed and never what it says:
+
+- **Hour rollups** (`elysium_hour_rollup`, `elysium_call_hour`): the hours at the edges of the
+  windows (the last 50, and the first hours of the 7 and 30 day windows). `rollups.hours` in the
+  status says how many are built and how many wait. An hour is built 3 minutes after it ends.
+- **Window tables** (`elysium_target_window`, `elysium_deployer_window`, state in
+  `elysium_window_state`): the sums per called address over 1, 7 and 30 days, read by the fees
+  and contracts views. `rollups.windows` says, per table, whether it is ready and when it was
+  last refreshed (once an hour, a few minutes past the hour). A table that is not ready, or that
+  differs too much from the window a view asks for, is simply not read: the view computes from
+  the day and hour rollups, in tens of seconds on prod instead of one.
+
+What to do:
+
+- `the window table of N day(s) is not kept up`: look at `rollups.lastError` (`window 7: …`,
+  `window classes: …`, or an hour's time) and at `rollups.waitingDays`: a table is not started,
+  and its base of whole days not moved, while a day of its window waits for its rollup. Nothing
+  is wrong for the visitors meanwhile.
+- A table you do not trust: mark it not ready, and the builder works it out again from nothing
+  on its next pass (seconds for 1 day, up to a few minutes for 30 days):
+
+  ```sql
+  UPDATE elysium_window_state SET ready = false, version = version + 1 WHERE span = 30;
+  ```
+
+- An hour you do not trust: `UPDATE elysium_hour_rollup SET dirty = true WHERE hour = '2026-11-12 08:00+00';`
+  It is read from `elysium_tx` until it is built again, and the tables that held it follow.
+- The tables themselves are the suspect: `ELYSIUM_WINDOWS_ENABLED=false` on every service. The
+  views compute from the rollups alone (the 30-day fees take a minute or two again), and the
+  builder leaves the tables alone. The hour rollups stay in use; `ELYSIUM_ROLLUPS_ENABLED=false`
+  turns everything off.
+- A class looks wrong (a contract shown as a plain address in the fees shares): the builder
+  looks at the unknown addresses again every 5 minutes. A contract that was removed (a chain
+  reorganisation) makes the tables be worked out again by itself; to force it by hand, the
+  same `ready = false` as above.
+- Disk: the hour rollups hold about 6 days of hours and the three tables a row per address
+  called in their window; together about 13 % of the transaction table.
 
 ## 7. Rows were left out
 

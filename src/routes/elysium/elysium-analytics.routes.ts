@@ -23,6 +23,7 @@ import {
 } from '../../services/elysium/elysium-launchpad-market.service';
 import { ViewResult, ViewWarmingError } from '../../core/viewScheduler';
 import { rateLimitKeyForIp } from '../../utils/client-ip';
+import { GateBusyError } from '../../utils/fairGate';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { sendUpstreamError } from '../../utils/upstream-error-response';
 
@@ -93,6 +94,12 @@ function register<S extends QuerySchema>(
             error: search ? 'Too many searches, retry shortly' : 'Too many requests for the token list, retry shortly',
             code,
           });
+          return;
+        }
+        if (error instanceof GateBusyError) {
+          // The profiles are computed a few at a time: this one waited its turn too long, or the caller already has one running and two waiting.
+          res.setHeader('Retry-After', String(error.retryAfterS));
+          res.status(429).json({ success: false, error: 'Too many lookups at once, retry shortly', code });
           return;
         }
         const db = isDatabaseError(error);
@@ -172,7 +179,7 @@ register(
   '/address/:address',
   elysiumAnalyticsAddressSchema,
   'ELYSIUM_ANALYTICS_ADDRESS_ERROR',
-  (_q, p) => service.getAddress(p.address),
+  (_q, p, client) => service.getAddress(p.address, client),
   addressLookupRateLimiter
 );
 
@@ -180,7 +187,7 @@ register(
   '/contract/:address',
   elysiumAnalyticsAddressSchema,
   'ELYSIUM_ANALYTICS_CONTRACT_ERROR',
-  (_q, p) => service.getContract(p.address),
+  (_q, p, client) => service.getContract(p.address, client),
   addressLookupRateLimiter
 );
 
