@@ -113,8 +113,9 @@ const HEAD_MIN_REFRESH_MS = 5_000;
 /**
  * No window read from the provider ends closer to its head than this. The rows of the head's own
  * second are still being written (2 of 222 missing at head = window end, measured 2026-11-10),
- * while /stats trails the data by 4 to 11 s: with the 15 s settle below, this margin never holds
- * a window back unless the provider itself is late.
+ * while /stats trails the data by 4 to 11 s (2 to 5 s on 2026-11-12): with the 15 s settle
+ * below, this margin never holds a window back unless the provider itself is late. It is not
+ * what makes a window whole: rows appear up to 15 s behind the head (see TX_OVERLAP_MS).
  */
 const HEAD_MARGIN_MS = 3_000;
 /** Behind the clock by more than this, the provider counts as lagging. */
@@ -157,10 +158,16 @@ const ROLLUP_TICK_LIMIT_MS = 20 * MINUTE_MS;
 const TX_LIVE_INTERVAL_MS = 30_000;
 const TX_STEP_MS = HOUR_MS;
 /**
- * Rows re-read before the cursor on each live tick. A window is complete 6 to 7 s after its end
- * and its count no longer moves over the next 4 minutes (measured 2026-11-10 on /transactions and
- * /logs), and no window ends past the provider's head: this is a margin on top of both, not what
- * catches late rows. At 120 s on a 30 s cadence every row was read (and billed) five times.
+ * Rows re-read before the cursor on each live tick: two thirds of the rows are read (and billed)
+ * twice, and that is what the re-read is for. The provider does not list its rows in order:
+ * some seconds of transactions appear after later ones, and after its head has passed them.
+ * Measured 2026-11-12 over 20 minutes (7,000 transactions, polled every 3 s): 292 of them were
+ * still missing when the head stood more than 3 s past their time, the last ones 15 s past it,
+ * about 20 s after their own time (on 2026-11-10 a window was complete 6 to 7 s after its end).
+ * A window ends 15 s behind the clock, so the first read of a second misses what takes longer
+ * than that; with this re-read every second is read again between 35 and 65 s after its time.
+ * Shortened to 5 s, a row listed more than 20 s late would have been left out until the daily
+ * comparison, a day later. At 120 s on a 30 s cadence every row was read five times.
  */
 const TX_OVERLAP_MS = 20_000;
 const TX_SETTLE_MS = 15_000;
