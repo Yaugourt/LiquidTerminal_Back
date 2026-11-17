@@ -3,7 +3,7 @@
 # Keep both stages on the same tag.
 
 # Stage 1: Build
-FROM node:22.23.4-alpine3.24 AS builder
+FROM node:22.23.5-alpine3.24 AS builder
 
 WORKDIR /app
 
@@ -41,7 +41,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # Stage 2: Production
-FROM node:22.23.4-alpine3.24 AS production
+FROM node:22.23.5-alpine3.24 AS production
 
 WORKDIR /app
 
