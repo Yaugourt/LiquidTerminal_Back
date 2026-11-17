@@ -22,7 +22,7 @@ jobs:
       DATABASE_URL: postgresql://user:pass@localhost:5432/db
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -79,7 +79,7 @@ jobs:
       TEST_HISTORICAL_DATABASE_URL: postgresql://test:test@localhost:5432/elysium_test
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
