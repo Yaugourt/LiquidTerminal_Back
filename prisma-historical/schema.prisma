@@ -130,9 +130,12 @@ model ElysiumContract {
   deployTx    String   @map("deploy_tx") @db.VarChar(66)
   deployedAt  DateTime @map("deployed_at") @db.Timestamptz(3)
   blockNumber BigInt   @map("block_number")
+  /// When the row was stored: the pass over the window classes reads the contracts stored since the previous pass.
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   @@index([deployedAt])
   @@index([deployer, deployedAt])
+  @@index([createdAt])
   @@map("elysium_contract")
 }
 
@@ -198,6 +201,8 @@ model ElysiumToken {
   firstSeen     DateTime? @map("first_seen") @db.Timestamptz(3)
   transferCount BigInt    @default(0) @map("transfer_count")
   updatedAt     DateTime  @default(now()) @map("updated_at") @db.Timestamptz(3)
+
+  @@index([updatedAt])
 
   // Plus two partial indexes Prisma cannot describe (migration 20261112120000):
   // elysium_token_top_idx (transfer_count DESC, address) for the named ERC-20s,
