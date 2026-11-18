@@ -445,6 +445,23 @@ describe('window tables', () => {
     expect(await version()).toBe(v);
   });
 
+  it('the pass over the classes reads the contracts stored since the previous pass, and the whole tables when none is on record', async () => {
+    const addr = EOAS[12];
+    expect((await kindOf(30, addr))?.kind).toBe(0);
+    // A contract at that address, stored long before the previous pass: the pass does not read it.
+    await ingest.insertTxs([tx(Date.now() - 30 * MINUTE_MS, { to_addr: null, contract_address: addr, from_addr: DEP2 })]);
+    await x(`UPDATE elysium_contract SET created_at = now() - interval '7 days' WHERE address = $1`, addr);
+    expect((await windows.reclassify()) as Map<number, number>).toEqual(new Map());
+    expect((await kindOf(30, addr))?.kind).toBe(0);
+    // No previous pass on record: the whole tables are read.
+    await x(`UPDATE elysium_window_state SET classified_at = NULL WHERE span > 0`);
+    const changed = (await windows.reclassify()) as Map<number, number>;
+    expect(changed.get(30)).toBe(1);
+    expect(await kindOf(30, addr)).toEqual({ kind: 1, deployer: DEP2 });
+    expect((await q<{ n: number }>(`SELECT count(*)::int AS n FROM elysium_window_state WHERE span > 0 AND classified_at IS NULL`))[0].n).toBe(0);
+    await tablesMatchRaw();
+  });
+
   it('a contract that is removed: the tables are not read until they are worked out again from nothing', async () => {
     const victim = CONTRACTS[3];
     const creation = (await q<{ deploy_tx: string }>(`SELECT deploy_tx FROM elysium_contract WHERE address = $1`, victim))[0].deploy_tx;

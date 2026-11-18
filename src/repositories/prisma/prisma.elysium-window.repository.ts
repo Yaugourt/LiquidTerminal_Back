@@ -8,6 +8,14 @@ import { BUILD_LOCK_KEY } from './prisma.elysium-rollup.repository';
 const REFRESH_TIMEOUT_MS = 900_000;
 
 /** Constant SQL (no user input): an address's class from the joined contract (c) and token (k) rows. */
+/**
+ * How far before the previous pass over the classes the next one looks for new contracts and
+ * tokens. A row stored by a transaction that started before that pass but committed after it
+ * carries a time before the pass: the overlap catches it. Ingestion transactions last seconds;
+ * six hours leaves a wide margin and still reads a few thousand rows, not the whole tables.
+ */
+const CLASSIFY_OVERLAP_MS = 6 * 3_600_000;
+
 const KIND_SQL = (addr: string): string =>
   `CASE WHEN ${addr} LIKE '${PRECOMPILE_LIKE}' THEN 2 WHEN c.address IS NOT NULL OR k.address IS NOT NULL THEN 1 ELSE 0 END`;
 
@@ -201,7 +209,7 @@ export class ElysiumWindowRepository {
             addDays: addDays.map((d) => d.day),
             subDays: subDays.map((d) => d.day),
           });
-          if (!full) await this.classify(tx, [span]);
+          if (!full) await this.classify(tx, [span], await this.classifySince(tx, [span]));
 
           const negative = await tx.$queryRawUnsafe<Array<{ n: number }>>(
             `SELECT count(*)::int AS n FROM elysium_target_window
@@ -267,7 +275,7 @@ export class ElysiumWindowRepository {
           await tx.$executeRawUnsafe(`SET LOCAL max_parallel_workers_per_gather = 0`);
           await tx.$executeRawUnsafe(`SET LOCAL work_mem = '128MB'`);
           await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${REFRESH_TIMEOUT_MS}`);
-          const rows = await this.classify(tx, spans);
+          const rows = await this.classify(tx, spans, await this.classifySince(tx, spans));
           for (const row of rows) changed.set(Number(row.span), (changed.get(Number(row.span)) ?? 0) + Number(row.n));
           for (const span of changed.keys()) await this.writeTotals(tx, span);
           await tx.$executeRawUnsafe(
@@ -424,23 +432,51 @@ export class ElysiumWindowRepository {
   }
 
   /**
+   * The time from which the pass over the classes of `spans` reads new contracts and tokens: the
+   * oldest previous pass among them, less the overlap. Null when one of them was never classed
+   * that way: the pass then reads the whole tables.
+   */
+  private async classifySince(tx: Tx, spans: number[]): Promise<Date | null> {
+    const rows = await tx.$queryRawUnsafe<Array<{ ms: number | null; missing: number }>>(
+      `SELECT (extract(epoch FROM min(classified_at)) * 1000)::float8 AS ms,
+              count(*) FILTER (WHERE classified_at IS NULL)::int AS missing
+       FROM elysium_window_state WHERE span = ANY($1::smallint[])`,
+      spans
+    );
+    const row = rows[0];
+    if (!row || row.ms === null || Number(row.missing) > 0) return null;
+    return new Date(Number(row.ms) - CLASSIFY_OVERLAP_MS);
+  }
+
+  /**
    * The rows of `spans` that were no known contract, or had no deployer, set to what the
-   * contract and token tables say now; how many changed, per span. Two plain joins from the
+   * contract and token tables say now; how many changed, per span.
+   *
+   * A row can only change class when a contract or a token is stored for its address after the
+   * row was last classed: every row is classed against both tables when it is written. So, with
+   * `since`, only the contracts stored and the tokens stored or changed from then on are joined,
+   * through their time index, instead of the whole tables (millions of rows) on every pass.
+   * Without it (`null`), the whole tables are read, as before. Two plain joins from the
    * rows still to class (a partial index) to each table: written as one statement over the
    * two, the planner joined the window table to itself without an index and did not finish.
    */
-  private async classify(tx: Tx, spans: number[]): Promise<Array<{ span: number; n: number }>> {
+  private async classify(tx: Tx, spans: number[], since: Date | null): Promise<Array<{ span: number; n: number }>> {
+    const contracts = since
+      ? `(SELECT address, deployer FROM elysium_contract WHERE created_at >= $2::timestamptz)`
+      : `elysium_contract`;
+    const tokens = since ? `(SELECT address FROM elysium_token WHERE updated_at >= $2::timestamptz)` : `elysium_token`;
+    const params: unknown[] = since ? [spans, since.toISOString()] : [spans];
     return tx.$queryRawUnsafe<Array<{ span: number; n: number }>>(
       `WITH by_contract AS (
          UPDATE elysium_target_window w SET kind = 1, deployer = c.deployer
-         FROM elysium_contract c
+         FROM ${contracts} c
          WHERE w.span = ANY($1::smallint[]) AND (w.kind = 0 OR (w.kind = 1 AND w.deployer IS NULL)) AND c.address = w.to_addr
          RETURNING w.span, w.to_addr
        ),
        by_token AS (
          -- A row the first statement also changed is seen here as it was before: counted once below.
          UPDATE elysium_target_window w SET kind = 1
-         FROM elysium_token k
+         FROM ${tokens} k
          WHERE w.span = ANY($1::smallint[]) AND w.kind = 0 AND k.address = w.to_addr
            AND NOT EXISTS (SELECT 1 FROM elysium_contract c WHERE c.address = w.to_addr)
          RETURNING w.span, w.to_addr
@@ -448,7 +484,7 @@ export class ElysiumWindowRepository {
        SELECT span, count(*)::int AS n FROM (
          SELECT span, to_addr FROM by_contract UNION SELECT span, to_addr FROM by_token
        ) u GROUP BY span`,
-      spans
+      ...params
     );
   }
 
