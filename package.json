@@ -66,8 +66,8 @@
   },
   "homepage": "https://liquidterminal.xyz",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1168.0",
-    "@aws-sdk/s3-request-presigner": "^3.1168.0",
+    "@aws-sdk/client-s3": "^3.1173.0",
+    "@aws-sdk/s3-request-presigner": "^3.1173.0",
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
     "@types/multer": "^2.3.0",
@@ -99,8 +99,8 @@
     "@types/sanitize-html": "^2.16.2",
     "@types/supertest": "^7.2.1",
     "@types/ws": "^8.18.2",
-    "@typescript-eslint/eslint-plugin": "^8.72.2",
-    "@typescript-eslint/parser": "^8.72.2",
+    "@typescript-eslint/eslint-plugin": "^8.73.0",
+    "@typescript-eslint/parser": "^8.73.0",
     "eslint": "^9.39.4",
     "globals": "^17.14.0",
     "jest": "^30.5.2",
@@ -111,7 +111,7 @@
     "ts-jest": "^29.4.15",
     "tsx": "^4.23.15",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.72.2"
+    "typescript-eslint": "^8.73.0"
   },
   "engines": {
     "node": ">=22.0.0"
