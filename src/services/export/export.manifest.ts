@@ -26,12 +26,16 @@ export interface ExportParamSpec {
 
 export type ExportPagination = 'cursor' | 'offset' | 'none';
 /**
- * Every list endpoint here is walked by offset, not cursor, even though several
- * hand out a `next_cursor`. Measured on /fills 2026-07-26: the first page takes
- * ~5s, its cursor page ~45s (past the 30s client timeout), while offset pages
- * come back in 1-3s with zero overlap between them. Cursor would be the safer
- * semantics on a live feed, so the service pins `end_time` instead — see
- * ExportService.freezeWindow.
+ * How a source hands out its next rows:
+ *
+ * - `offset`: most endpoints, even several that hand out a `next_cursor`. Measured on /fills
+ *   2026-07-26: the first page takes ~5s, its cursor page ~45s (past the 30s client timeout),
+ *   while offset pages come back in 1-3s with zero overlap between them. Cursor would be the
+ *   safer semantics on a live feed, so the service pins `end_time` instead, see
+ *   ExportService.freezeWindow.
+ * - `cursor`: the endpoints that take no offset (an offset they do not know is ignored, and every
+ *   page is the first one). /liquidations: 0.3-0.9s a page, no overlap (2026-11-25).
+ * - `none`: one answer holds everything the source gives.
  */
 
 /**
@@ -63,7 +67,34 @@ export interface ExportDataset {
    * throw — which only showed on a full export, never on a 5-row preview.
    */
   pageSize?: number;
+
+  // How the source is asked. Not served by GET /export/datasets. The names, the sizes and the
+  // paging of each endpoint are checked against the provider's own list by
+  // tests/unit/services/export.provider-params.test.ts: it ignores a param it does not know, so a
+  // wrong name gives a file that looks right and is not what was asked.
+
+  /** Params (our names) the source knows under another name. */
+  sourceNames?: Record<string, string>;
+  /** Dates (our names) the source wants as epoch milliseconds. */
+  sourceEpochMs?: string[];
+  /** Sent when the caller leaves the param empty. */
+  defaults?: Record<string, string>;
+  /** Param that takes the source's `next_cursor`: `cursor` unless said. */
+  cursorParam?: string;
+  /** Columns that name a row, for a source that repeats some: the first one is kept. */
+  uniqueBy?: string[];
 }
+
+/** Dataset fields that only concern how its source is asked. */
+export const EXPORT_SOURCE_FIELDS = [
+  'upstreamPath',
+  'source',
+  'sourceNames',
+  'sourceEpochMs',
+  'defaults',
+  'cursorParam',
+  'uniqueBy',
+] as const satisfies readonly (keyof ExportDataset)[];
 
 const TIME_WINDOW: ExportParamSpec[] = [
   {
@@ -74,6 +105,9 @@ const TIME_WINDOW: ExportParamSpec[] = [
   },
   { key: 'end_time', label: 'To', type: 'datetime', help: 'ISO-8601 UTC' },
 ];
+
+/** Endpoints that call the window `start` / `end`. */
+const START_END = { start_time: 'start', end_time: 'end' };
 
 const ORDER: ExportParamSpec = {
   key: 'order',
@@ -139,7 +173,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     description: 'Every fill on the spot order book.',
     upstreamPath: '/fills/spot/',
     publicPath: '/indexer/fills/spot',
-    params: [...TIME_WINDOW, COIN, SIDE, USER, SIZE_USD, ORDER],
+    params: [...TIME_WINDOW, COIN, SIDE, USER, ORDER],
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
   },
@@ -152,7 +186,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     upstreamPath: '/liquidations/',
     publicPath: '/liquidations',
     params: [...TIME_WINDOW, COIN, ORDER],
-    pagination: 'offset',
+    pagination: 'cursor',
     maxRows: EXPORT_MAX_ROWS,
   },
   {
@@ -164,6 +198,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     upstreamPath: '/completed-trades/',
     publicPath: '/indexer/completed-trades',
     params: [...TIME_WINDOW, COIN, USER, ORDER],
+    sourceNames: { order: 'sort_dir' },
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
   },
@@ -189,8 +224,12 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     publicPath: '/indexer/funding/fundingHistory',
     // Upstream answers 422 without a coin: funding is per-market by nature.
     params: [{ ...COIN, placeholder: 'HYPE', required: true }, ...TIME_WINDOW],
+    sourceNames: { start_time: 'startTime', end_time: 'endTime' },
+    sourceEpochMs: ['start_time', 'end_time'],
+    // One answer, no paging: 5,000 hours (208 days), the newest of the window. It was 500.
     pagination: 'none',
-    maxRows: EXPORT_MAX_ROWS,
+    maxRows: 5000,
+    pageSize: 5000,
   },
 
   // ───────────────────────────── Chain ─────────────────────────────
@@ -202,7 +241,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     description: 'HyperEVM blocks.',
     upstreamPath: '/evm/blocks',
     publicPath: '/indexer/evm/blocks',
-    params: [...TIME_WINDOW, ORDER],
+    params: [...TIME_WINDOW],
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
   },
@@ -214,7 +253,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     description: 'HyperEVM transactions.',
     upstreamPath: '/evm/transactions',
     publicPath: '/indexer/evm/transactions',
-    params: [...TIME_WINDOW, ORDER],
+    params: [...TIME_WINDOW],
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
   },
@@ -226,7 +265,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     description: 'Ledger transfers between HyperEVM and the L1.',
     upstreamPath: '/evm/ledger/transfers',
     publicPath: '/indexer/evm/ledger/transfers',
-    params: [...TIME_WINDOW, ORDER],
+    params: [...TIME_WINDOW],
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
   },
@@ -238,7 +277,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     description: 'Bridge deposits and withdrawals.',
     upstreamPath: '/evm/bridge/events',
     publicPath: '/indexer/evm/bridge/events',
-    params: [...TIME_WINDOW, ORDER],
+    params: [...TIME_WINDOW],
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
   },
@@ -253,8 +292,12 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     upstreamPath: '/spot/pairs',
     publicPath: '/indexer/spot/pairs',
     params: [],
-    pagination: 'offset',
+    // While the source rewrites this table it holds each row twice, and the pages of a walk overlap:
+    // asked in one go (357 pairs on 2026-11-25), one row per pair kept.
+    pagination: 'none',
     maxRows: EXPORT_MAX_ROWS,
+    pageSize: 5000,
+    uniqueBy: ['pair_index'],
   },
   {
     id: 'spot-tokens',
@@ -265,8 +308,11 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     upstreamPath: '/spot/tokens',
     publicPath: '/indexer/spot/tokens',
     params: [],
-    pagination: 'offset',
+    // Same as spot-pairs (521 tokens on 2026-11-25).
+    pagination: 'none',
     maxRows: EXPORT_MAX_ROWS,
+    pageSize: 5000,
+    uniqueBy: ['token_id'],
   },
   {
     id: 'hip3-assets',
@@ -312,7 +358,8 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     description: 'Fills on builder-deployed perp markets.',
     upstreamPath: '/hip3/fills',
     publicPath: '/indexer/hip3/fills',
-    params: [...TIME_WINDOW, COIN, USER, ORDER],
+    params: [...TIME_WINDOW, COIN, USER],
+    sourceNames: START_END,
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
   },
@@ -327,6 +374,8 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     params: [],
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
+    // Its offset pages overlap a little (42 rows of 1,500 on 2026-11-25).
+    uniqueBy: ['outcome_id'],
   },
   {
     id: 'hip4-fills',
@@ -336,9 +385,12 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     description: 'Fills on outcome markets.',
     upstreamPath: '/hip4/fills',
     publicPath: '/indexer/hip4/fills',
-    params: [...TIME_WINDOW, USER, ORDER],
+    params: [...TIME_WINDOW, USER],
+    sourceNames: START_END,
     pagination: 'offset',
     maxRows: EXPORT_MAX_ROWS,
+    // Same: 50 rows of 1,500.
+    uniqueBy: ['user', 'coin', 'tid', 'side'],
   },
   {
     id: 'hip4-settlements',
@@ -363,19 +415,40 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     upstreamPath: '/vaults/vaultSummaries',
     publicPath: '/indexer/vaults/vaultSummaries',
     params: [],
-    pagination: 'offset',
+    // No paging at the source: the whole list at once (3,060 vaults on 2026-11-25).
+    pagination: 'none',
     maxRows: EXPORT_MAX_ROWS,
+    pageSize: 5000,
   },
   {
     id: 'traders-leaderboard',
     label: 'Traders leaderboard',
     group: 'Capital',
     source: 'hypedexer',
-    description: 'Traders ranked by PnL and volume.',
+    description: 'Traders ranked over 7 days, 30 days or all time, with PnL, win rate and account value.',
     upstreamPath: '/users/leaderboard',
     publicPath: '/indexer/users/leaderboard',
-    params: [],
-    pagination: 'offset',
+    params: [
+      {
+        key: 'window',
+        label: 'Window',
+        type: 'enum',
+        options: ['7d', '30d', 'all'],
+        help: '7d when none is picked',
+      },
+      {
+        key: 'by',
+        label: 'Ranked by',
+        type: 'enum',
+        options: ['volume', 'pnl', 'trades', 'win_rate', 'pnl_pct', 'unrealized_pnl'],
+        help: 'volume when none is picked',
+      },
+    ],
+    // Without a window the source ranks 24 h and gives 100 rows at most, on one page. With one it
+    // numbers its pages, and its next_cursor is the next number.
+    defaults: { window: '7d' },
+    pagination: 'cursor',
+    cursorParam: 'page',
     maxRows: EXPORT_MAX_ROWS,
   },
   {
@@ -389,6 +462,7 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     params: [],
     pagination: 'none',
     maxRows: EXPORT_MAX_ROWS,
+    pageSize: 50,
   },
   {
     id: 'active-users',
@@ -399,8 +473,9 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     upstreamPath: '/users/active',
     publicPath: '/active-users',
     params: [],
-    pagination: 'offset',
+    pagination: 'none',
     maxRows: EXPORT_MAX_ROWS,
+    pageSize: 100,
   },
 
   // ───────────────────────────── Ecosystem ─────────────────────────────
@@ -413,7 +488,8 @@ export const EXPORT_DATASETS: ExportDataset[] = [
     upstreamPath: '/builders/list',
     publicPath: '/builders',
     params: [],
-    pagination: 'offset',
+    // Gives every builder at once, whatever the limit.
+    pagination: 'none',
     maxRows: EXPORT_MAX_ROWS,
   },
 

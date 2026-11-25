@@ -45,13 +45,15 @@ export class ExportService {
    * loop and the CSV writer stay source-agnostic.
    *
    * `page` is 1-based because every local service paginates that way; the
-   * HypeDexer branch converts it back to an offset.
+   * provider's endpoints are told where the page starts (`from`).
    */
   private async fetchPage(
     dataset: ExportDataset,
     params: ExportQueryParams,
     limit: number,
-    page: number
+    page: number,
+    /** Where the page starts: the rows read so far, or `next_cursor` of the page before. */
+    from: { offset: number; cursor: string | null } = { offset: 0, cursor: null }
   ): Promise<ExportPage> {
     if (dataset.source === 'local') {
       const resolver = getLocalSource(dataset.id);
@@ -68,8 +70,12 @@ export class ExportService {
       };
     }
 
-    const pageParams: Record<string, string | number> = { ...params, limit };
-    if (page > 1) pageParams.offset = (page - 1) * limit;
+    const pageParams: Record<string, string | number> = { ...sourceParams(dataset, params), limit };
+    if (dataset.pagination === 'cursor') {
+      if (from.cursor !== null) pageParams[dataset.cursorParam ?? 'cursor'] = from.cursor;
+    } else if (from.offset > 0) {
+      pageParams.offset = from.offset;
+    }
     return this.client.fetchPage(dataset.upstreamPath, pageParams);
   }
 
@@ -128,14 +134,21 @@ export class ExportService {
     let lastPage: ExportPage | null = null;
     let lastPageLimit = 0;
     let drained = false;
+    let cursor: string | null = null;
+    let offset = 0;
+    let lastRows = '';
+    let repeated = false;
+    const seen = new Set<string>();
 
     while (pages < EXPORT_MAX_PAGES && rowCount < dataset.maxRows) {
       const remaining = dataset.maxRows - rowCount;
-      const pageLimit = Math.min(dataset.pageSize ?? EXPORT_PAGE_SIZE, remaining);
+      const pageSize = dataset.pageSize ?? EXPORT_PAGE_SIZE;
+      // One size for every page of a walk by cursor: the source may number pages of that size.
+      const pageLimit = dataset.pagination === 'cursor' ? pageSize : Math.min(pageSize, remaining);
 
       let page: ExportPage;
       try {
-        page = await this.fetchPage(dataset, frozenParams, pageLimit, pageNumber);
+        page = await this.fetchPage(dataset, frozenParams, pageLimit, pageNumber, { offset, cursor });
       } catch (error) {
         logDeduplicator.error('Export page fetch failed', {
           dataset: dataset.id,
@@ -158,6 +171,15 @@ export class ExportService {
         break;
       }
 
+      // A source that does not know how it is asked for its next rows answers the same page again:
+      // the file would hold it a hundred times, each one paid for.
+      const rowsAsText = JSON.stringify(page.rows);
+      if (pages > 1 && rowsAsText === lastRows) {
+        repeated = true;
+        break;
+      }
+      lastRows = rowsAsText;
+
       const flattened = page.rows.map((r) => redactRow(flattenRow(r)));
 
       if (!columns) {
@@ -174,16 +196,37 @@ export class ExportService {
 
       for (const row of flattened) {
         if (rowCount >= dataset.maxRows) break;
+        if (dataset.uniqueBy) {
+          const id = JSON.stringify(dataset.uniqueBy.map((column) => row[column]));
+          if (seen.has(id)) continue;
+          seen.add(id);
+        }
         yield `${columns.map((key) => csvCell(row[key])).join(',')}\n`;
         rowCount += 1;
       }
 
       // Stop conditions, in the order the source makes them knowable.
-      if (dataset.pagination === 'none' || page.hasMore === false || page.rows.length < pageLimit) {
+      if (
+        dataset.pagination === 'none' ||
+        page.hasMore === false ||
+        page.rows.length < pageLimit ||
+        (dataset.pagination === 'cursor' && page.nextCursor === null)
+      ) {
         drained = true;
         break;
       }
       pageNumber += 1;
+      cursor = page.nextCursor;
+      offset += page.rows.length;
+    }
+
+    if (repeated) {
+      logDeduplicator.warn('Export stopped: its source answered the same page twice', {
+        dataset: dataset.id,
+        rows: rowCount,
+        pages,
+      });
+      return { rowCount, truncated: true };
     }
 
     // Left through the row or page ceiling rather than the end of the data.
@@ -229,6 +272,23 @@ export function freezeWindow(
   const acceptsEnd = dataset.params.some((p) => p.key === 'end_time');
   if (!acceptsEnd || params.end_time || !params.start_time) return params;
   return { ...params, end_time: new Date().toISOString() };
+}
+
+/** The caller's params as the dataset's source names and writes them. */
+export function sourceParams(dataset: ExportDataset, params: ExportQueryParams): ExportQueryParams {
+  const out: ExportQueryParams = {};
+  for (const [key, value] of Object.entries({ ...dataset.defaults, ...params })) {
+    out[dataset.sourceNames?.[key] ?? key] = dataset.sourceEpochMs?.includes(key) ? toEpochMs(value) : value;
+  }
+  return out;
+}
+
+/** A date the export accepts (ISO, UTC when it names no zone, or epoch seconds / ms) as epoch ms. */
+function toEpochMs(value: string): string {
+  if (/^\d+$/.test(value)) return value.length <= 10 ? `${value}000` : value;
+  const zoned = /T.*(Z|[+-]\d{2}:?\d{2})$/i.test(value) || !/T/i.test(value);
+  const ms = Date.parse(zoned ? value : `${value}Z`);
+  return Number.isNaN(ms) ? value : String(ms);
 }
 
 /**

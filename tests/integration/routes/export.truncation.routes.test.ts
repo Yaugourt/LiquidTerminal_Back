@@ -91,3 +91,18 @@ describe('GET /export/:dataset truncation signal', () => {
     expect(res.headers['x-export-truncated']).toBeUndefined();
   });
 });
+
+describe('GET /export/datasets', () => {
+  it('says what can be exported and nothing of how its source is asked', async () => {
+    const res = await request(app).get('/export/datasets');
+
+    expect(res.status).toBe(200);
+    const datasets = res.body.data.datasets as Array<Record<string, unknown>>;
+    expect(datasets.map((d) => d.id)).toEqual(expect.arrayContaining(['perp-fills', 'hip3-fills', 'traders-leaderboard']));
+    for (const field of ['upstreamPath', 'source', 'sourceNames', 'sourceEpochMs', 'defaults', 'cursorParam', 'uniqueBy']) {
+      expect(datasets.filter((d) => field in d).map((d) => d.id)).toEqual([]);
+    }
+    // What the page builds its form from.
+    for (const d of datasets) expect(Object.keys(d)).toEqual(expect.arrayContaining(['label', 'group', 'description', 'params', 'maxRows']));
+  });
+});
