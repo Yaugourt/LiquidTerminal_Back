@@ -35,8 +35,14 @@ const builders = {
 };
 const evm = { getEvmBlocks: echo(), getEvmTransactions: echo(), getEvmBridgeEvents: echo(), getEvmLedgerTransfers: echo() };
 const completed = { listCompletedTrades: echo(), getSummary: echo(), getTradeFills: echo() };
-const hip3 = { getFills: echo(), getSnapshots: echo(), getStatsTraders: echo(), getTopMovers: echo() };
-const twaps = { listTwaps: echo() };
+const hip3 = {
+  getFills: echo(),
+  getSnapshots: echo(),
+  getStatsTraders: echo(),
+  getTopMovers: echo(),
+  getLeaderboard: echo(),
+};
+const twaps = { listTwaps: echo(), getStats: echo() };
 const analytics = { getFillsStats: echo(), getPriorityFeesStats: echo() };
 const hip4 = { getAnalytics: echo() };
 
@@ -165,6 +171,37 @@ describe('shared passthrough caches', () => {
     expect(hip3.getTopMovers).toHaveBeenCalledTimes(2);
     expect(ttlOf('hypedexer:hip3:top-movers')).toBe(HYPEDEXER_TTL.liveRolling);
     expect(HYPEDEXER_TTL.liveRolling).toBe(15);
+  });
+
+  it('shares the HIP-3 leaderboard per order, DEX and size', async () => {
+    const svc = IndexerHip3Service.getInstance();
+    const all = await svc.getLeaderboard({ by: 'volume', limit: 50 });
+    const again = await svc.getLeaderboard({ by: 'volume', limit: 50 });
+    const byPnl = await svc.getLeaderboard({ by: 'pnl', limit: 50 });
+    const oneDex = await svc.getLeaderboard({ by: 'volume', dex_id: 'xyz', limit: 50 });
+    const larger = await svc.getLeaderboard({ by: 'volume', limit: 100 });
+
+    expect(hip3.getLeaderboard).toHaveBeenCalledTimes(4);
+    expect(again).toEqual(all);
+    expect(new Set([all, byPnl, oneDex, larger].map((answer) => JSON.stringify(answer))).size).toBe(4);
+    expect(ttlOf('hypedexer:hip3:leaderboard')).toBe(HYPEDEXER_TTL.hip3Leaderboard);
+    expect(HYPEDEXER_TTL.hip3Leaderboard).toBe(120);
+  });
+
+  it('shares TWAP stats per window and coin, at the live cadence', async () => {
+    const svc = IndexerTwapsService.getInstance();
+    const day = await svc.getStats({ hours: 24 });
+    const again = await svc.getStats({ hours: 24 });
+    const week = await svc.getStats({ hours: 168 });
+    const btc = await svc.getStats({ hours: 24, coin: 'BTC' });
+    // The route passes both params, set or not: same upstream call, same entry.
+    await svc.getStats({ hours: 24, coin: undefined });
+
+    expect(twaps.getStats).toHaveBeenCalledTimes(3);
+    expect(again).toEqual(day);
+    expect(new Set([day, week, btc].map((answer) => JSON.stringify(answer))).size).toBe(3);
+    expect(ttlOf('hypedexer:twaps:stats')).toBe(HYPEDEXER_TTL.marketList);
+    expect(HYPEDEXER_TTL.marketList).toBe(15);
   });
 
   it('shares TWAP lists and analytics stats', async () => {

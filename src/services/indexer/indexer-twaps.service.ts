@@ -207,8 +207,13 @@ export class IndexerTwapsService {
     return raw as IndexerTwap[];
   }
 
+  /** Counts and executed notional by status over a window: shared per window and coin, live. */
   public getStats(params: IndexerTwapsStatsQuery): Promise<unknown> {
-    return this.client.getStats(params);
+    return cacheService.getOrSet(
+      buildHypedexerCacheKey('twaps', 'stats', { ...params }),
+      () => this.client.getStats(params),
+      HYPEDEXER_TTL.marketList
+    );
   }
 
   public getUserTwaps(userAddress: string, params: IndexerTwapsUserQuery): Promise<unknown> {

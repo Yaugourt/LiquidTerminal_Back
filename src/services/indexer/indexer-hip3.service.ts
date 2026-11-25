@@ -79,8 +79,13 @@ export class IndexerHip3Service {
     );
   }
 
+  /** Shared per order, DEX and size. */
   public getLeaderboard(p: Parameters<HypeDexerHip3Client['getLeaderboard']>[0]): Promise<unknown> {
-    return this.client.getLeaderboard(p);
+    return cacheService.getOrSet(
+      buildHypedexerCacheKey('hip3', 'leaderboard', { ...p }),
+      () => this.client.getLeaderboard(p),
+      HYPEDEXER_TTL.hip3Leaderboard
+    );
   }
 
   public getOhlcv(p: Parameters<HypeDexerHip3Client['getOhlcv']>[0]): Promise<unknown> {
