@@ -1,12 +1,11 @@
 import express from 'express';
-import cors from 'cors';
 import { logDeduplicator } from './utils/logDeduplicator';
 import { RejectionGuard } from './utils/rejectionGuard';
 import 'dotenv/config';
 import { createServer } from 'http';
 import { sanitizeInput } from './middleware/validation';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
-import { SECURITY_CONSTANTS } from './constants/security.constants';
+import { corsMiddleware, previewReadOnly } from './middleware/cors.middleware';
 import { securityHeaders } from './middleware/security.middleware';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import { compressionMiddleware } from './middleware/compression.middleware';
@@ -113,31 +112,13 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
   next();
 });
 
-// Configuration CORS basée sur les constantes de sécurité
-app.use(cors({
-  origin: (origin, callback) => {
-    // Always validate against allowed origins (defense in depth)
-    // In development, localhost origins are included via SECURITY_CONSTANTS defaults
-    if (!origin || SECURITY_CONSTANTS.ALLOWED_ORIGINS.includes(origin as typeof SECURITY_CONSTANTS.ALLOWED_ORIGINS[number])) {
-      callback(null, true);
-    } else {
-      logDeduplicator.warn('CORS blocked origin', {
-        origin,
-        nodeEnv: process.env.NODE_ENV
-      });
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
-  // Readable by the front, which backs off for the time a 429 or 503 names, and
-  // which tells a CSV cut at the export row ceiling from a complete one.
-  exposedHeaders: ['Retry-After', 'X-Export-Truncated', 'X-Export-Total-Rows'],
-  credentials: true
-}));
+// Who may call from a browser: our pages, and the front's preview deployments to read
+// (see cors.middleware.ts).
+app.use(corsMiddleware);
 
 // Ajouter les en-têtes de sécurité
 app.use(securityHeaders);
+app.use(previewReadOnly);
 
 // Bodies are counted per client before they are parsed: the parsers and the
 // sanitizer run ahead of every route limiter (see bodyBudget.middleware.ts).

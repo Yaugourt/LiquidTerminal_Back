@@ -38,7 +38,13 @@ describe('InternalWebSocketServer against abuse', () => {
   let port: number;
   let wsServer: import('../../../src/websocket/ws.server').InternalWebSocketServer;
   const opened: WebSocket[] = [];
-  const ENV = ['WS_MAX_CONNECTIONS_PER_IP', 'WS_MAX_CONNECTIONS_PER_MINUTE', 'WS_CHECK_ORIGIN', 'TELEGRAM_BOT_API_KEY'];
+  const ENV = [
+    'WS_MAX_CONNECTIONS_PER_IP',
+    'WS_MAX_CONNECTIONS_PER_MINUTE',
+    'WS_CHECK_ORIGIN',
+    'TELEGRAM_BOT_API_KEY',
+    'PREVIEW_VERCEL_SCOPE',
+  ];
 
   async function start(env: Record<string, string> = {}): Promise<void> {
     jest.resetModules();
@@ -75,10 +81,14 @@ describe('InternalWebSocketServer against abuse', () => {
     return { messages, closed };
   }
 
-  afterEach(async () => {
+  async function stop(): Promise<void> {
     for (const ws of opened.splice(0)) ws.terminate();
     wsServer.shutdown();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
+  afterEach(async () => {
+    await stop();
     for (const k of ENV) delete process.env[k];
     jest.restoreAllMocks();
   });
@@ -125,6 +135,16 @@ describe('InternalWebSocketServer against abuse', () => {
     expect((await connect('198.51.100.30')).open).toBe(true);
     // The refused attempt opened nothing.
     expect(wsServer.getStats().totalConnections).toBe(2);
+  });
+
+  it('lets a preview deployment of the front in, unless previews are switched off', async () => {
+    const preview = 'https://liquidterminal-front-59mwf5195-deffyblock-gmailcoms-projects.vercel.app';
+    await start();
+    expect((await connect('198.51.100.32', { Origin: preview })).open).toBe(true);
+    expect(await connect('198.51.100.32', { Origin: preview.replace('https:', 'http:') })).toMatchObject({ open: false, status: 403 });
+    await stop();
+    await start({ PREVIEW_VERCEL_SCOPE: 'false' });
+    expect(await connect('198.51.100.32', { Origin: preview })).toMatchObject({ open: false, status: 403 });
   });
 
   it('can have the origin check switched off', async () => {

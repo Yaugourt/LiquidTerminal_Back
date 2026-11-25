@@ -103,6 +103,7 @@ Copy `.env.example` to `.env`. Key variables:
 | `REDIS_URL` | Redis connection |
 | `JWKS_URL`, `NEXT_PUBLIC_PRIVY_AUDIENCE`, `FIRST_ADMIN_PRIVY_USER_ID` | Privy authentication |
 | `ALLOWED_ORIGINS`, `PORT`, `NODE_ENV` | Server config |
+| `PREVIEW_VERCEL_SCOPE` | The Vercel team whose preview deployments of the front may read the API from a browser, never write (optional, default the project's team; `false` refuses previews) |
 | `HL_INDEXER_API_KEY` | HypeDexer / HL indexer access |
 | `HYPEDEXER_DAILY_CREDIT_BUDGET` | HypeDexer credits a UTC day before a warning is logged (optional, no default since 2026-11-12: unset, nothing is logged; warning only, never blocks a call). An abnormal day, hour or balance is told by the Elysium alerts, against the days before (`docs/DATA_BUDGET.md` §4.2, `docs/ELYSIUM_RUNBOOK.md` §8) |
 | `HYPERFOLIO_API_KEY` | Hyperfolio access: required for `/hyperfolio/*` (Yields page, tracker EVM panels), which answer 503 `HYPERFOLIO_NOT_CONFIGURED` without it |
