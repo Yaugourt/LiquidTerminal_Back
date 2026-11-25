@@ -11,12 +11,28 @@ import {
   indexerUsersOverviewQuerySchema,
   indexerUsersPerformanceQuerySchema,
 } from '../../schemas/indexer/users-indexer.schema';
+import { MAX_INDEXER_OFFSET } from '../../schemas/indexer/bounds';
+import type { LeaderboardMetric, LeaderboardWindow } from '../../constants/indexer-leaderboard.constants';
 import { IndexerUsersService } from '../../services/indexer/indexer-users.service';
 import { logDeduplicator } from '../../utils/logDeduplicator';
 import { sendUpstreamError } from '../../utils/upstream-error-response';
 
 const router = Router();
 const service = IndexerUsersService.getInstance();
+
+/** `total` is how many addresses are ranked; the pages announced are the ones this route serves. */
+function leaderboardPagination(total: number | null, page: number, limit: number, rows: number) {
+  const totalPages =
+    total === null ? null : Math.min(Math.ceil(total / limit), Math.floor(MAX_INDEXER_OFFSET / limit) + 1);
+  return {
+    page,
+    limit,
+    total,
+    totalPages,
+    hasNext: totalPages === null ? rows === limit : page < totalPages,
+    hasPrevious: page > 1,
+  };
+}
 
 router.get(
   '/leaderboard',
@@ -26,10 +42,22 @@ router.get(
   (async (req: Request, res: Response) => {
     try {
       const q = req.query;
+      const limit = q.limit !== undefined ? Number(q.limit) : 20;
+      if (q.window !== undefined) {
+        const page = q.page !== undefined ? Number(q.page) : 1;
+        const { rows, total } = await service.getLeaderboardWindow({
+          window: q.window as LeaderboardWindow,
+          by: (q.by as LeaderboardMetric) ?? 'volume',
+          page,
+          limit,
+        });
+        res.json({ success: true, data: rows, pagination: leaderboardPagination(total, page, limit, rows.length) });
+        return;
+      }
       const upstream = await service.getLeaderboard({
         by: (q.by as 'volume' | 'pnl' | 'trades' | 'priority_fees') ?? 'volume',
         hours: q.hours !== undefined ? Number(q.hours) : 24,
-        limit: q.limit !== undefined ? Number(q.limit) : 20,
+        limit,
       });
       res.json({ success: true, data: upstream });
     } catch (error) {

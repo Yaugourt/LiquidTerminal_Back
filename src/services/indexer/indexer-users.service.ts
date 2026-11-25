@@ -1,4 +1,10 @@
-import { HypeDexerUsersIndexerClient, IndexerUsersLeaderboardQuery } from '../../clients/hypedexer/rest/users/users-indexer.client';
+import {
+  HypeDexerUsersIndexerClient,
+  IndexerUsersLeaderboardPage,
+  IndexerUsersLeaderboardQuery,
+  IndexerUsersLeaderboardWindowQuery,
+} from '../../clients/hypedexer/rest/users/users-indexer.client';
+import { buildHypedexerCacheKey } from '../../clients/hypedexer/rest/shared/hypedexer-cache.helper';
 import { cacheService } from '../../core/cache.service';
 import { HYPEDEXER_USER_CACHE_KEY, HYPEDEXER_TTL } from '../../constants/hypedexer.cache';
 
@@ -15,6 +21,15 @@ export class IndexerUsersService {
 
   public async getLeaderboard(q: IndexerUsersLeaderboardQuery): Promise<unknown> {
     return this.client.getLeaderboard(q);
+  }
+
+  /** Shared per window, ranking and page. */
+  public getLeaderboardWindow(q: IndexerUsersLeaderboardWindowQuery): Promise<IndexerUsersLeaderboardPage> {
+    return cacheService.getOrSet(
+      buildHypedexerCacheKey('users', 'leaderboard-window', { ...q }),
+      () => this.client.getLeaderboardWindow(q),
+      HYPEDEXER_TTL.usersLeaderboardWindow
+    );
   }
 
   public async getUserCoins(

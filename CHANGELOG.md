@@ -11,6 +11,7 @@ How to use it: every pull request whose change is visible to a user adds one lin
 ### Added
 
 - Preview deployments of the site can read the API and its live streams. They cannot change anything through it.
+- The traders' leaderboard of the API ranks 7 days, 30 days or all time, page by page, with PnL, win rate and account value.
 
 ## 2026-11-12
 

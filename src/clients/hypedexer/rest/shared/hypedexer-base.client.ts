@@ -128,6 +128,15 @@ export abstract class HypeDexerBaseClient extends BaseApiService {
     );
   }
 
+  /** The answer as the provider wraps it (the rows and how many there are in all), for a list served page by page. */
+  protected async getEnvelope(endpoint: string): Promise<unknown> {
+    return singleFlight(
+      buildInFlightKey('GET-ENVELOPE', endpoint),
+      () => this.refuseExhaustedCaller(),
+      () => this.get<unknown>(endpoint)
+    );
+  }
+
   protected async getSingleAttemptUnwrapped<T>(endpoint: string, timeoutMs?: number): Promise<T> {
     return singleFlight(
       buildInFlightKey('GET-SA', endpoint),
