@@ -14,7 +14,16 @@ export const SECURITY_CONSTANTS = {
         'http://127.0.0.1:3002',
         'http://127.0.0.1:5173'
       ],
-  
+
+  /** The Vercel project of the front, whose preview deployments may read the API (see originAccess). */
+  PREVIEW_PROJECT: 'liquidterminal-front',
+
+  /**
+   * The Vercel team that owns that project: it ends the address of every preview.
+   * PREVIEW_VERCEL_SCOPE names another one (the project moved), `false` accepts no preview.
+   */
+  PREVIEW_SCOPE: process.env.PREVIEW_VERCEL_SCOPE?.trim() || 'deffyblock-gmailcoms-projects',
+
   // Durée de validité du token JWT (24 heures)
   TOKEN_EXPIRY: 24 * 60 * 60,
 

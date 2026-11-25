@@ -23,7 +23,7 @@ import { CompletedTrade } from '../types/wallet-events.types';
 import { enabledUnlessFalseEnv, positiveIntEnv } from '../utils/env';
 import { rateLimitKeyForIp } from '../utils/client-ip';
 import { ClientBudget } from '../utils/clientBudget';
-import { SECURITY_CONSTANTS } from '../constants/security.constants';
+import { originAccess } from '../utils/originAccess';
 import { normalizeLiquidationFilters } from './liquidationFilters';
 
 /**
@@ -388,8 +388,9 @@ export class InternalWebSocketServer {
    * handshake completes, synchronously with the acceptance that follows it,
    * so the counts it reads cannot move in between.
    *
-   * - Origin: a browser always sends one, and only our own pages may open the
-   *   socket from a browser (the same list as the HTTP API's CORS). Without the
+   * - Origin: a browser always sends one, and only our own pages and the
+   *   front's preview deployments may open the socket from a browser (the same
+   *   rule as the HTTP API's CORS, see originAccess). Without the
    *   check any site could feed its visitors from this socket, each from their
    *   own address and so outside every per-client cap. No Origin is not a
    *   browser (the Telegram bot, a script) and is accepted, as on the HTTP API.
@@ -401,11 +402,7 @@ export class InternalWebSocketServer {
     req: IncomingMessage,
     origin: string | undefined
   ): { status: number; reason: string; headers?: Record<string, string> } | null {
-    if (
-      origin &&
-      enabledUnlessFalseEnv('WS_CHECK_ORIGIN') &&
-      !(SECURITY_CONSTANTS.ALLOWED_ORIGINS as readonly string[]).includes(origin)
-    ) {
+    if (origin && enabledUnlessFalseEnv('WS_CHECK_ORIGIN') && originAccess(origin) === 'none') {
       logDeduplicator.warn('InternalWebSocketServer: origin refused', { origin: origin.slice(0, 120) });
       return { status: 403, reason: 'Origin not allowed' };
     }

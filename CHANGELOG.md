@@ -8,6 +8,10 @@ How to use it: every pull request whose change is visible to a user adds one lin
 
 ## [Unreleased]
 
+### Added
+
+- Preview deployments of the site can read the API and its live streams. They cannot change anything through it.
+
 ## 2026-11-12
 
 ### Changed
