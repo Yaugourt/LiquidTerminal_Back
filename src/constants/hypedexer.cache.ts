@@ -110,14 +110,14 @@ export const HYPEDEXER_TTL = {
   /** Hyperliquid's HIP-4 template registry (not HypeDexer, free): a template
    * added upstream titles its markets within the hour. */
   hip4OutcomeTemplates: 3600,
-  /** HIP-3 market pages: the tape (polled every 10 s), cumulative snapshots
-   * (polled every 10-15 s) and per-market trader aggregates (60 s). */
+  /** HIP-3 market pages: the tape (polled every 10 s), cumulative snapshots (10-15 s), trader aggregates (60 s). */
   hip3Fills:              10,
   hip3Snapshots:          15,
   hip3StatsTraders:      120,
+  hip3Leaderboard:       120,   // traders ranked; the provider recomputes it about every 5 min (measured 2026-11-25)
   /** Market-wide live lists: completed trades (biggest trades, trade
-   * explorer, a wallet's round trips) and their summary, TWAP flow,
-   * fills/priority-fee stats (~7-17 credits a call, shared). */
+   * explorer, a wallet's round trips) and their summary, TWAP flow and TWAP
+   * stats, fills/priority-fee stats (~3-17 credits a call, shared). */
   marketList:             15,
   /** /indexer/twaps pages of 500 (~52 credits each): the front's primary TWAP
    * source. Every page carries live progress, and pages walked together must
