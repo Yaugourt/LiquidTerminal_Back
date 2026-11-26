@@ -170,6 +170,9 @@ export const HYPEDEXER_TTL = {
   /** `/vaults/vaultLedger` answers [] even for HLP (2026-09): keep an empty
    * answer for an hour instead of asking again on every poll. */
   vaultLedgerEmpty:     3600,
+  /** Traders ranked over 7d, 30d or all time (12 credits for 100 rows): computed by the provider every
+   * 5 min, every hour for `all`. One page of one ranking per key. */
+  usersLeaderboardWindow: 300,
 } as const;
 
 /** Clés de cache pour les endpoints globaux (identiques pour tous les users) */

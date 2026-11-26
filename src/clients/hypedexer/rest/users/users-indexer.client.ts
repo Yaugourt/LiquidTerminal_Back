@@ -4,6 +4,7 @@ import { logDeduplicator } from '../../../../utils/logDeduplicator';
 import { HYPEDEXER_API_URL, hypedexerJsonHeaders } from '../shared/hypedexer-api.config';
 import { HypeDexerBaseClient } from '../shared/hypedexer-base.client';
 import { buildHypedexerCacheKey, withRedisCache } from '../shared/hypedexer-cache.helper';
+import type { LeaderboardMetric, LeaderboardWindow } from '../../../../constants/indexer-leaderboard.constants';
 
 const TTL_LEADERBOARD = 60;
 
@@ -11,6 +12,20 @@ export interface IndexerUsersLeaderboardQuery {
   by?: 'volume' | 'pnl' | 'trades' | 'priority_fees';
   hours?: number;
   limit?: number;
+}
+
+export interface IndexerUsersLeaderboardWindowQuery {
+  window: LeaderboardWindow;
+  by: LeaderboardMetric;
+  page: number;
+  limit: number;
+}
+
+/** One page of a ranking over a window. */
+export interface IndexerUsersLeaderboardPage {
+  rows: unknown[];
+  /** Addresses ranked in all; null when the provider does not say. */
+  total: number | null;
 }
 
 /**
@@ -64,6 +79,19 @@ export class HypeDexerUsersIndexerClient extends HypeDexerBaseClient {
     );
   }
 
+  /**
+   * Addresses ranked over a window, one page of them: volume, PnL (realized and unrealized), fees,
+   * win rate, account value, and when the provider computed it (`refreshed_at`, epoch ms).
+   */
+  public async getLeaderboardWindow(q: IndexerUsersLeaderboardWindowQuery): Promise<IndexerUsersLeaderboardPage> {
+    return this.circuitBreaker.execute(async () => {
+      const sp = new URLSearchParams({ window: q.window, by: q.by, page: String(q.page), limit: String(q.limit) });
+      const endpoint = `/users/leaderboard?${sp.toString()}`;
+      logDeduplicator.info('HypeDexerUsersIndexerClient.getLeaderboardWindow', { endpoint });
+      return toLeaderboardPage(await this.getEnvelope(endpoint));
+    });
+  }
+
   public async getUserCoins(
     user: string,
     params: { start_time?: string; end_time?: string; limit?: number } = {}
@@ -109,4 +137,15 @@ export class HypeDexerUsersIndexerClient extends HypeDexerBaseClient {
       return this.getUnwrapped<unknown>(path);
     });
   }
+}
+
+function toLeaderboardPage(body: unknown): IndexerUsersLeaderboardPage {
+  const envelope = (body ?? {}) as { success?: unknown; data?: unknown; total_count?: unknown };
+  if (envelope.success === false || !Array.isArray(envelope.data)) {
+    throw new Error('Unexpected leaderboard payload');
+  }
+  return {
+    rows: envelope.data,
+    total: typeof envelope.total_count === 'number' ? envelope.total_count : null,
+  };
 }
