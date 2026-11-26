@@ -11,6 +11,7 @@ import {
 } from '../../middleware/exportRateLimiter';
 import {
   EXPORT_DATASETS,
+  EXPORT_SOURCE_FIELDS,
   getExportDataset,
   type ExportDataset,
   type ExportParamSpec,
@@ -112,11 +113,13 @@ function datasetFileName(dataset: ExportDataset, params: ExportQueryParams): str
 
 /** The catalog, so the UI can build its picker and its forms from one source. */
 router.get('/datasets', marketRateLimiter, ((_req: Request, res: Response) => {
-  // `upstreamPath` and `source` are stripped: the first names HypeDexer's
-  // internal routes, the second tells an anonymous caller which datasets hit a
-  // paid provider. This endpoint is public and the UI needs neither.
-  const datasets = EXPORT_DATASETS.map(
-    ({ upstreamPath: _upstreamPath, source: _source, ...rest }) => rest
+  // What concerns the source is stripped: its paths and the names of its params are the provider's
+  // internal routes, and `source` tells an anonymous caller which datasets hit a paid provider.
+  // This endpoint is public and the UI needs none of it.
+  const datasets = EXPORT_DATASETS.map((dataset) =>
+    Object.fromEntries(
+      Object.entries(dataset).filter(([field]) => !(EXPORT_SOURCE_FIELDS as readonly string[]).includes(field))
+    )
   );
 
   res.json({

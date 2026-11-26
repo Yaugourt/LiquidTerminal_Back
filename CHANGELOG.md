@@ -10,8 +10,27 @@ How to use it: every pull request whose change is visible to a user adds one lin
 
 ### Added
 
-- Preview deployments of the site can read the API and its live streams. They cannot change anything through it.
 - The traders' leaderboard of the API ranks 7 days, 30 days or all time, page by page, with PnL, win rate and account value.
+
+## 2026-11-26
+
+### Added
+
+- The traders export ranks 7 days, 30 days or all time, with PnL, win rate and account value.
+
+### Fixed
+
+- The exports of the traders, the top traders and the active users work again: they always failed.
+- The exports of liquidations, vaults and builders no longer hold the same rows over and over.
+- The dates picked for an export of HIP-3 fills, HIP-4 fills or funding are applied. They were ignored.
+- The funding export holds up to 5,000 hours instead of 500.
+- Filters that did nothing are no longer offered (the size of spot fills, the order of HyperEVM, HIP-3 and HIP-4 rows), and the order of completed trades is applied.
+
+## 2026-11-25
+
+### Added
+
+- Preview deployments of the site can read the API and its live streams. They cannot change anything through it.
 
 ## 2026-11-12
 

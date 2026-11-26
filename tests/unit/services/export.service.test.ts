@@ -207,11 +207,12 @@ describe('export manifest', () => {
     }
   });
 
-  it('keeps every page size inside what the source accepts', () => {
+  // Provider datasets: see export.provider-params.test.ts.
+  it('keeps every page size of our own sources inside what they accept', () => {
     for (const dataset of EXPORT_DATASETS) {
       if (dataset.pageSize === undefined) continue;
       expect(dataset.pageSize).toBeGreaterThan(0);
-      expect(dataset.pageSize).toBeLessThanOrEqual(500);
+      if (dataset.source === 'local') expect(dataset.pageSize).toBeLessThanOrEqual(500);
     }
   });
 
